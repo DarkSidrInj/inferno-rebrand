@@ -2,6 +2,7 @@
 #include "CMenu.hpp"
 #include "Widgets/CStatusBar.hpp"
 #include "../CConfigs/CConfig.hpp"
+#include "../CGame/CFog.hpp"
 #include "Theme/CTheme.hpp"
 #include "Widgets/CWidgets.hpp"
 #include "imgui.h"
@@ -37,7 +38,7 @@ namespace ui::menu {
     static const char* tabs[] = {"Visuals", "Settings"};
     static constexpr int tc = sizeof(tabs) / sizeof(tabs[0]);
 
-    static const char* vstabs[] = {"ESP", "Other"};
+    static const char* vstabs[] = {"ESP", "World"};
     static constexpr int vstc = sizeof(vstabs) / sizeof(vstabs[0]);
 
     static float lrp(float a, float b, float t) { return a + (b - a) * t; }
@@ -79,11 +80,6 @@ namespace ui::menu {
         separator(a);
         colorpick("Distance color", &cfg::esp::distance_col, a);
         separator(a);
-        checkbox("Distance fog", &cfg::fog::enabled, a);
-        slider("Fog min distance", &cfg::fog::min_distance, 0.f, 200.f, a, "%.0f m");
-        slider("Fog max distance", &cfg::fog::max_distance, 10.f, 400.f, a, "%.0f m");
-        colorpick("Fog color", &cfg::fog::color, a);
-        separator(a);
         slider("Skeleton width", &cfg::esp::skeleton_thickness, 1.f, 4.f, a, "%.1f");
         separator(a);
         colorpick("Skeleton color", &cfg::esp::skeleton_col, a);
@@ -95,34 +91,23 @@ namespace ui::menu {
         colorpick("Dropped color", &cfg::esp::dropped_col, a);
     }
 
-    static void other_tab(float a) {
-        if (a < 0.01f) return;
-
-        ImGuiWindow* w = ImGui::GetCurrentWindow();
-        ImDrawList* dl = w->DrawList;
-        ImVec2 p = w->DC.CursorPos;
-        float ww = content_w > 0 ? content_w : ImGui::GetContentRegionAvail().x;
-
-        float h = 60.f * S;
-
-        dl->AddRectFilled(p, ImVec2(p.x + ww, p.y + h), col(clr::panel, a));
-        dl->AddRect(p, ImVec2(p.x + ww, p.y + h), col(clr::border, a));
-
-        ImGui::PushFont(fontMedium);
-        const char* txt = "nothing here yet...";
-        ImVec2 tsz = ImGui::CalcTextSize(txt);
-        float tx = p.x + (ww - tsz.x) * 0.5f;
-        float ty = p.y + (h - tsz.y) * 0.5f;
-        dl->AddText(ImVec2(tx, ty), col(clr::text_dim, a), txt);
-        ImGui::PopFont();
-
-        ImGui::Dummy(ImVec2(0, h));
+    static void world_tab(float a) {
+        checkbox("Fog", &cfg::fog::enabled, a);
+        separator(a);
+        checkbox("Auto fog color", &cfg::fog::auto_color, a);
+        separator(a);
+        slider("Fog min distance", &cfg::fog::min_distance, 0.f, 200.f, a, "%.0f m");
+        slider("Fog max distance", &cfg::fog::max_distance, 10.f, 400.f, a, "%.0f m");
+        separator(a);
+        colorpick("Fog color", &cfg::fog::color, a);
+        separator(a);
+        button("Rescan fog", a, [] { worldfog::rescan(); });
     }
 
     static void visuals_tab(float a) {
         switch (stab) {
             case 0: esp_tab(a); break;
-            case 1: other_tab(a); break;
+            case 1: world_tab(a); break;
         }
     }
 

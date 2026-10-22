@@ -29,9 +29,10 @@ namespace esp {
 
 namespace fog {
     inline bool enabled = false;
-    inline float min_distance = 20.f;    // meters: closer than this keeps its own color
-    inline float max_distance = 150.f;   // meters: at or beyond this it is fully fogged
-    inline ImVec4 color = ImVec4(0.12f, 0.13f, 0.16f, 1.f);  // estimated fog color
+    inline bool auto_color = true;       // estimate the color from the scene's ambient light
+    inline float min_distance = 20.f;    // meters: fog starts here
+    inline float max_distance = 150.f;   // meters: fully fogged from here
+    inline ImVec4 color = ImVec4(0.12f, 0.13f, 0.16f, 1.f);  // manual color (auto_color off)
 }
 
 }

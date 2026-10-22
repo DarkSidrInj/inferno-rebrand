@@ -4,6 +4,7 @@
 #include "CMenu/Widgets/CStatusBar.hpp"
 #include "CUtils/CMemory.hpp"
 #include "CGame/CGameContext.hpp"
+#include "CGame/CFog.hpp"
 #include "CVisual/CVisualManager.hpp"
 #include "CProtection/COxorany.hpp"
 #include <cstdio>
@@ -121,6 +122,7 @@ int main() {
                 // Library health is independent from asynchronous registry discovery.
                 game::check_lib(proc::lib);
                 visuals::draw();
+                worldfog::tick();
             }
         }
 

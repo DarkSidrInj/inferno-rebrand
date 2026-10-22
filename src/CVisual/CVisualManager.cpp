@@ -5,7 +5,6 @@
 #include "../CGame/CCamera.hpp"
 #include "../CMenu/Theme/CTheme.hpp"
 #include "../CConfigs/CConfig.hpp"
-#include "CFog.hpp"
 #include "../CProtection/COxorany.hpp"
 #include "imgui.h"
 #include <cmath>
@@ -230,7 +229,6 @@ void visuals::draw() {
 
         float inv_dist = 1.f / (Distance + 0.1f);
         float font_sz = std::clamp(400.f * inv_dist, 10.f, 18.f);
-        distfog::g_factor = distfog::factor_for(Distance);
 
         if (cfg::esp::box) {
             dbox(BoxMin, BoxMax, 1.f);
@@ -251,7 +249,6 @@ void visuals::draw() {
             ddist(Distance, BoxMax.x, BoxMin.y, font_sz, 1.f);
         }
     }
-    distfog::g_factor = 0.f;
     std::vector<uint64_t> enemy_objects;
     enemy_objects.reserve(frame_enemies.size());
     for (const auto& Enemy : frame_enemies) enemy_objects.push_back(Enemy.object);
@@ -276,7 +273,12 @@ void visuals::dbox(const ImVec2& t, const ImVec2& b, float a) {
     float x1 = t.x, y1 = t.y, x2 = b.x, y2 = b.y;
     float r = cfg::esp::box_rounding;
 
-    ImU32 col = distfog::col(cfg::esp::box_col, a);
+    ImU32 col = IM_COL32(
+        static_cast<int>(cfg::esp::box_col.x * 255),
+        static_cast<int>(cfg::esp::box_col.y * 255),
+        static_cast<int>(cfg::esp::box_col.z * 255),
+        static_cast<int>(cfg::esp::box_col.w * 255 * a)
+    );
 
     if (cfg::esp::box_type == 0) {
         dl->AddRect(ImVec2(x1 + 2.f, y1 + 2.f), ImVec2(x2 + 2.f, y2 + 2.f), IM_COL32(0, 0, 0, (int)(100 * a)), r, 0, 2.f);
@@ -393,7 +395,12 @@ void visuals::dnick(const char* name, const ImVec2& box_max, float cx, float sz,
     ImVec2 ts = espFont->CalcTextSizeA(sz, FLT_MAX, 0.f, name);
     ImVec2 tp(roundf(cx - ts.x * 0.5f), roundf(box_max.y + 4.f));
 
-    ImU32 col = distfog::col(cfg::esp::name_col, a);
+    ImU32 col = IM_COL32(
+        static_cast<int>(cfg::esp::name_col.x * 255),
+        static_cast<int>(cfg::esp::name_col.y * 255),
+        static_cast<int>(cfg::esp::name_col.z * 255),
+        static_cast<int>(cfg::esp::name_col.w * 255 * a)
+    );
     draw_text_outlined(dl, espFont, sz, tp, col, name);
 }
 
@@ -407,7 +414,12 @@ void visuals::ddist(float dist, float x, float y, float sz, float a) {
 
     ImVec2 tp(roundf(x + 5.f), roundf(y));
 
-    ImU32 col = distfog::col(cfg::esp::distance_col, a);
+    ImU32 col = IM_COL32(
+        static_cast<int>(cfg::esp::distance_col.x * 255),
+        static_cast<int>(cfg::esp::distance_col.y * 255),
+        static_cast<int>(cfg::esp::distance_col.z * 255),
+        static_cast<int>(cfg::esp::distance_col.w * 255 * a)
+    );
     draw_text_outlined(dl, espFont, sz, tp, col, txt);
 }
 

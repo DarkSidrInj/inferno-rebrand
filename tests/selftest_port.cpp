@@ -6,6 +6,8 @@
 #include "CGame/CCamera.hpp"
 #include "CGame/CWorld.hpp"
 #include "CGame/CSkeleton.hpp"
+#include "CGame/CFog.hpp"
+#include "CConfigs/CConfig.hpp"
 #include <sys/mman.h>
 #include <unistd.h>
 #include <cstdio>
@@ -143,6 +145,76 @@ int main() {
     CHECK(game_camera::acquire(players, reinterpret_cast<uint64_t>(net), r3), "acquire via dictionary");
     CHECK(r3.holder == reinterpret_cast<uint64_t>(holder), "holder");
     CHECK(game_camera::acquire(players, reinterpret_cast<uint64_t>(net), r3), "cached acquire");
+
+    // ---- 7. find_model: jgi directly in the parts, and jgi behind a vds part at +0x58 ------------
+    {
+        const uint64_t jgi_class = rpm<uint64_t>(proc::lib + v100::model_typeinfo);
+        uint8_t* jgi = static_cast<uint8_t*>(calloc(1, 0x80));
+        *reinterpret_cast<uint64_t*>(jgi) = jgi_class;
+        uint8_t* vds = static_cast<uint8_t*>(calloc(1, 0x80));
+        *reinterpret_cast<uint64_t*>(vds + v100::part_model) = reinterpret_cast<uint64_t>(jgi);
+        uint8_t* decoy = static_cast<uint8_t*>(calloc(1, 0x80));
+        uint8_t* wmz2 = static_cast<uint8_t*>(calloc(1, 0x100));
+        uint8_t* net2 = static_cast<uint8_t*>(calloc(1, 0x100));
+        *reinterpret_cast<uint64_t*>(net2 + v100::net_systems) = reinterpret_cast<uint64_t>(wmz2);
+        uint8_t* arr = static_cast<uint8_t*>(calloc(1, 0x20 + 2 * 8));
+        *reinterpret_cast<uint64_t*>(arr + v100::array_length) = 2;
+        *reinterpret_cast<uint64_t*>(arr + v100::array_data) = reinterpret_cast<uint64_t>(decoy);
+        *reinterpret_cast<uint64_t*>(arr + v100::array_data + 8) = reinterpret_cast<uint64_t>(vds);
+        *reinterpret_cast<uint64_t*>(wmz2 + v100::wmz_first_array) = reinterpret_cast<uint64_t>(arr);
+        CHECK(skeleton::find_model(reinterpret_cast<uint64_t>(net2)) == reinterpret_cast<uint64_t>(jgi), "jgi behind vds");
+        *reinterpret_cast<uint64_t*>(arr + v100::array_data + 8) = reinterpret_cast<uint64_t>(jgi);
+        CHECK(skeleton::find_model(reinterpret_cast<uint64_t>(net2)) == reinterpret_cast<uint64_t>(jgi), "jgi direct");
+        *reinterpret_cast<uint64_t*>(arr + v100::array_data + 8) = reinterpret_cast<uint64_t>(decoy);
+        CHECK(skeleton::find_model(reinterpret_cast<uint64_t>(net2)) == 0, "no jgi");
+    }
+
+    // ---- 8. fog: scan finds the RenderSettings block, tick writes it, disabling restores it -------
+    {
+        const size_t size = 2 * 1024 * 1024;
+        uint8_t* region = static_cast<uint8_t*>(mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+        CHECK(region != MAP_FAILED, "fog mmap");
+        auto fill = [&](size_t at, float start, float end, bool tail) {
+            worldfog::Block b{};
+            b.fog = 0; b.color[0] = .5f; b.color[1] = .5f; b.color[2] = .5f; b.color[3] = 1.f;
+            b.mode = 3; b.density = .01f; b.start = start; b.end = end;
+            if (tail) for (int c = 0; c < 3; ++c) { b.ambient[c * 4] = .2f + .1f * c; b.ambient[c * 4 + 1] = .3f; b.ambient[c * 4 + 2] = .4f; b.ambient[c * 4 + 3] = 1.f; }
+            std::memcpy(region + at, &b, sizeof(b));
+        };
+        fill(0x1000, 1.f, 50.f, false);       // look-alike: no ambient tail
+        fill(0x80010, 0.f, 300.f, true);      // the real one, straddling a 1 MiB chunk edge is covered separately
+        fill((1024 * 1024) - 0x20, 2.f, 80.f, false);
+        worldfog::forget(); worldfog::restart_scan(); worldfog::g_pid = proc::pid;
+        g_scan_maps.clear();
+        refresh_scan_maps();
+        int steps = 0;
+        while (!worldfog::g_address && steps++ < 4000) worldfog::scan_step(8 * 1024 * 1024);
+        CHECK(worldfog::g_address == reinterpret_cast<uint64_t>(region + 0x80010), "fog found at %llx want %llx",
+              (unsigned long long)worldfog::g_address, (unsigned long long)(reinterpret_cast<uint64_t>(region) + 0x80010));
+
+        cfg::fog::enabled = true; cfg::fog::auto_color = true; cfg::fog::min_distance = 25.f; cfg::fog::max_distance = 90.f;
+        worldfog::g_last_write = 0;
+        worldfog::tick();
+        worldfog::Block live{};
+        std::memcpy(&live, region + 0x80010, sizeof(live));
+        CHECK(live.fog == 1 && live.mode == 1, "fog on linear");
+        CHECK(live.start == 25.f && live.end == 90.f, "fog distances %.1f %.1f", live.start, live.end);
+        CHECK(std::fabs(live.color[0] - .3f) < 1e-4f && std::fabs(live.color[2] - .4f) < 1e-4f, "estimated color from ambient equator %.2f %.2f", live.color[0], live.color[2]);
+        CHECK(live.ambient[3] == 1.f, "tail untouched");
+
+        cfg::fog::auto_color = false; cfg::fog::color = ImVec4(.9f, .1f, .2f, 1.f);
+        worldfog::g_last_write = 0;
+        worldfog::tick();
+        std::memcpy(&live, region + 0x80010, sizeof(live));
+        CHECK(std::fabs(live.color[0] - .9f) < 1e-4f && std::fabs(live.color[1] - .1f) < 1e-4f, "manual color");
+
+        cfg::fog::enabled = false;
+        worldfog::tick();
+        std::memcpy(&live, region + 0x80010, sizeof(live));
+        CHECK(live.fog == 0 && live.mode == 3 && live.start == 0.f && live.end == 300.f && std::fabs(live.color[0] - .5f) < 1e-4f,
+              "restored fog=%d mode=%d start=%.1f end=%.1f", live.fog, live.mode, live.start, live.end);
+        cfg::fog::enabled = false;
+    }
 
     std::printf(failures ? "SELFTEST FAILED (%d)\n" : "SELFTEST OK\n", failures);
     return failures ? 1 : 0;

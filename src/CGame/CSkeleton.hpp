@@ -37,6 +37,7 @@ namespace skeleton {
         long long built{};
         long long touched{};
         Pose pose{};
+        const char* stage = "new";  // where the last attempt stopped, logged by draw_skeletons
     };
 
     inline std::unordered_map<uint64_t, Cache> g_cache;
@@ -105,12 +106,15 @@ namespace skeleton {
 
     inline bool build(uint64_t p, Cache& cache, long long now) {
         const auto* l = layout();
-        if (!l) return false;
+        if (!l) { cache.stage = "transform layout not measured"; return false; }
         const uint64_t model = find_model(p);
-        const uint64_t bindings = plausible(model) ? rpm<uint64_t>(model + v100::model_bindings) : 0;
-        const uint64_t bones = plausible(bindings) ? rpm<uint64_t>(bindings + v100::bindings_bones) : 0;
+        if (!plausible(model)) { cache.stage = "jgi not found in parts"; return false; }
+        const uint64_t bindings = rpm<uint64_t>(model + v100::model_bindings);
+        if (!plausible(bindings)) { cache.stage = "jgi has no CharacterBindings"; return false; }
+        const uint64_t bones = rpm<uint64_t>(bindings + v100::bindings_bones);
+        if (!plausible(bones)) { cache.stage = "bindings has no BonesDictionary"; return false; }
         std::vector<BoneRef> refs;
-        if (!plausible(bones) || !bone_refs(bones, refs)) return false;
+        if (!bone_refs(bones, refs)) { cache.stage = "BonesDictionary unreadable"; return false; }
 
         cache.known.fill(false);
         cache.index_of.fill(0);
@@ -130,7 +134,7 @@ namespace skeleton {
         }
         // The rig is one hierarchy; a bone that points elsewhere is not part of it.
         cache.data = data_of[Hips] ? data_of[Hips] : data_of[Head];
-        if (!cache.data) return false;
+        if (!cache.data) { cache.stage = "bone transforms unreadable"; return false; }
         int usable = 0;
         for (int i = 0; i < kCount; ++i) {
             if (cache.known[i] && data_of[i] != cache.data) cache.known[i] = false;
@@ -139,6 +143,7 @@ namespace skeleton {
             cache.max_index = std::max(cache.max_index, int(cache.index_of[i]));
         }
         cache.built = now;
+        cache.stage = usable >= 8 ? "rig found" : "fewer than 8 bones usable";
         return usable >= 8;
     }
 
@@ -150,18 +155,20 @@ namespace skeleton {
         const uint64_t parents = rpm<uint64_t>(cache.data + uint64_t(l->parents_offset));
         if (!plausible(entries) || !plausible(parents) || entries == parents) return false;
 
-        // A little slack so parents stored after the highest bone index are covered.
-        int n = std::min(cache.max_index + 1 + 48, 4096);
+        // Parents are not always stored before their children, so read well past the highest
+        // bone index and fall back to smaller reads if the arrays end sooner.
+        const int sizes[] = {std::min(cache.max_index + 1 + 256, 4096), std::min(cache.max_index + 1 + 48, 4096),
+                             cache.max_index + 1};
+        int n = 0;
         std::vector<player::TransformEntry> table;
         std::vector<int> parent_of;
-        for (int attempt = 0; attempt < 2; ++attempt) {
-            table.assign(size_t(n), player::TransformEntry{});
-            parent_of.assign(size_t(n), -1);
-            if (mem_read(entries, table.data(), size_t(n) * sizeof(player::TransformEntry)) &&
-                mem_read(parents, parent_of.data(), size_t(n) * sizeof(int))) break;
-            n = cache.max_index + 1;
-            if (attempt == 1) return false;
+        for (int size : sizes) {
+            table.assign(size_t(size), player::TransformEntry{});
+            parent_of.assign(size_t(size), -1);
+            if (mem_read(entries, table.data(), size_t(size) * sizeof(player::TransformEntry)) &&
+                mem_read(parents, parent_of.data(), size_t(size) * sizeof(int))) { n = size; break; }
         }
+        if (!n) return false;
 
         int composed = 0;
         for (int bone = 0; bone < kCount; ++bone) {
@@ -212,7 +219,9 @@ namespace skeleton {
             if (!build(p, cache, now)) cache.built = now;  // retry in a second, keep any held pose
         }
         Pose fresh = cache.pose;
-        const bool got = cache.data != 0 && update(cache, fresh) && plausible_pose(fresh, feet);
+        const bool composed = cache.data != 0 && update(cache, fresh);
+        const bool got = composed && plausible_pose(fresh, feet);
+        if (cache.data != 0) cache.stage = got ? "live" : composed ? "pose rejected (head/feet)" : "hierarchy unreadable";
         if (got) {
             fresh.stamp = now;
             fresh.live = true;

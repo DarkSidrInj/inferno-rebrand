@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <map>
+#include <string>
 
 extern ImFont* espFont;
 
@@ -110,6 +112,10 @@ void visuals::draw_skeletons(const matrix& view, const matrix& projection, const
         for (const auto& entry : skeleton::g_cache) if (entry.second.pose.live) ++live;
         diag::log("SKELETON", "enemies=%zu cached=%zu live=%zu dictOffset=+0x%llx", enemies.size(),
                   skeleton::g_cache.size(), live, (unsigned long long)skeleton::g_dict_offset);
+        // Where each tracked player stopped: the stage names the first thing that failed.
+        std::map<std::string, int> stages;
+        for (const auto& entry : skeleton::g_cache) ++stages[entry.second.stage];
+        for (const auto& stage : stages) diag::log("SKELETON", "  %d player(s): %s", stage.second, stage.first.c_str());
     }
 }
 
