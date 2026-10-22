@@ -131,7 +131,34 @@ namespace skeleton {
         return value.pid == proc::pid && value.data_offset >= 0 ? &value : nullptr;
     }
 
-    inline bool build(uint64_t p, Cache& cache, long long now) {
+    // Unity 6 transform index. The layout probe runs on a player root, whose index is 0, so a
+    // field that merely happens to be 0 there passes it; on bones that field is garbage (the
+    // device log showed index=631199440 and heads composed exactly at the feet). Measure the
+    // index offset on the hips instead: the right one puts the hips about a meter above the
+    // player's feet.
+    inline int g_index_offset = -1;
+    inline int g_index_pid = -1;
+
+    inline int bone_index_offset(uint64_t hips_native, const Vector3& feet, const player::TransformLayout& l) {
+        if (g_index_pid == proc::pid && g_index_offset >= 0) return g_index_offset;
+        for (int off = 0x8; off <= 0x80; off += 4) {
+            if (off >= l.data_offset && off < l.data_offset + 8) continue;
+            const int index = rpm<int>(hips_native + uint64_t(off));
+            if (index <= 0 || index >= kMaxIndex) continue;  // the hips are never the hierarchy root
+            Vector3 at;
+            if (!player::decode_transform(hips_native, l.data_offset, off, l.entries_offset, l.parents_offset, at, kMaxIndex)) continue;
+            const float dx = at.x - feet.x, dy = at.y - feet.y, dz = at.z - feet.z;
+            if (dx * dx + dz * dz > 1.5f * 1.5f || dy < 0.2f || dy > 2.0f) continue;
+            g_index_offset = off;
+            g_index_pid = proc::pid;
+            diag::log("INFO", "bone transform index offset = +0x%x (layout probe said +0x%x; hips %.2f m above the feet)",
+                      off, l.index_offset, dy);
+            return off;
+        }
+        return -1;
+    }
+
+    inline bool build(uint64_t p, const Vector3& feet, Cache& cache, long long now) {
         const auto* l = layout();
         if (!l) { cache.stage = "transform layout not measured"; return false; }
         const uint64_t model = find_model(p);
@@ -150,12 +177,20 @@ namespace skeleton {
         cache.max_index = 0;
         std::array<uint64_t, kCount> data_of{};
         int bad_native = 0, bad_data = 0, bad_index = 0;
-        char trace[160] = "";
+        char trace[200] = "";
+        int index_offset = -1;
+        for (const BoneRef& ref : refs) {
+            if (ref.key != Hips) continue;
+            const uint64_t native = rpm<uint64_t>(ref.managed + v100::unity_cached_ptr);
+            if (plausible(native)) index_offset = bone_index_offset(native, feet, *l);
+        }
+        const bool measured = index_offset >= 0;
+        if (!measured) index_offset = l->index_offset;
         for (const BoneRef& ref : refs) {
             if (ref.key >= kCount) continue;
             const uint64_t native = rpm<uint64_t>(ref.managed + v100::unity_cached_ptr);
             const uint64_t data = plausible(native) ? rpm<uint64_t>(native + uint64_t(l->data_offset)) : 0;
-            const int index = plausible(native) ? rpm<int>(native + uint64_t(l->index_offset)) : -1;
+            const int index = plausible(native) ? rpm<int>(native + uint64_t(index_offset)) : -1;
             if (ref.key == Hips || (ref.key == Head && !trace[0]))
                 std::snprintf(trace, sizeof(trace), "bone %d managed=0x%llx native=0x%llx data=0x%llx index=%d",
                               ref.key, (unsigned long long)ref.managed, (unsigned long long)native,
@@ -171,8 +206,8 @@ namespace skeleton {
         cache.data = data_of[Hips] ? data_of[Hips] : data_of[Head];
         if (!cache.data) {
             char text[256];
-            std::snprintf(text, sizeof(text), "bone transforms unreadable (native=%d data=%d index=%d bad of %zu) %s",
-                          bad_native, bad_data, bad_index, refs.size(), trace);
+            std::snprintf(text, sizeof(text), "bone transforms unreadable (native=%d data=%d index=%d bad of %zu, index +0x%x %s) %s",
+                          bad_native, bad_data, bad_index, refs.size(), index_offset, measured ? "measured" : "NOT measured", trace);
             cache.stage = text;
             return false;
         }
@@ -412,7 +447,7 @@ namespace skeleton {
         cache.touched = now;
 
         if (cache.data == 0 || now - cache.built > kRebuildMs) {
-            if (!build(p, cache, now)) cache.built = now;  // retry in a second, keep any held pose
+            if (!build(p, feet, cache, now)) cache.built = now;  // retry in a second, keep any held pose
         }
         Pose fresh = cache.pose;
         const bool composed = cache.data != 0 && update(cache, fresh);

@@ -36,10 +36,10 @@ namespace player {
     }
 
     inline bool decode_transform(uint64_t native, int data_offset, int index_offset,
-                                 int entries_offset, int parents_offset, Vector3& out) noexcept {
+                                 int entries_offset, int parents_offset, Vector3& out, int max_index = 8192) noexcept {
         uint64_t data = rpm<uint64_t>(native + uint64_t(data_offset));
         int index = rpm<int>(native + uint64_t(index_offset));
-        if (!plausible(data) || index < 0 || index > 8192) return false;
+        if (!plausible(data) || index < 0 || index > max_index) return false;
         uint64_t entries = rpm<uint64_t>(data + uint64_t(entries_offset));
         uint64_t parents = rpm<uint64_t>(data + uint64_t(parents_offset));
         if (!plausible(entries) || !plausible(parents) || entries == parents) return false;
@@ -49,7 +49,7 @@ namespace player {
         Vector3 result(current.position.x, current.position.y, current.position.z);
         int parent = rpm<int>(parents + uint64_t(index) * sizeof(int));
         int guard = 0;
-        while (parent >= 0 && parent <= 8192 && guard++ < 128) {
+        while (parent >= 0 && parent <= max_index && guard++ < 128) {
             TransformEntry entry{};
             if (!mem_read(entries + uint64_t(parent) * sizeof(TransformEntry), &entry, sizeof(entry)) ||
                 !entry_valid(entry)) return false;

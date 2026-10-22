@@ -7,6 +7,7 @@
 #include "CGame/CWorld.hpp"
 #include "CGame/CSkeleton.hpp"
 #include "CGame/CFog.hpp"
+#include "fixtures/rs_accessors.h"
 #include "CConfigs/CConfig.hpp"
 #include <sys/mman.h>
 #include <fcntl.h>
@@ -188,6 +189,31 @@ int main() {
         CHECK(std::fabs(far_pose.position[skeleton::Hips].x - 5.f) < 1e-3f, "far hips x=%.3f", far_pose.position[skeleton::Hips].x);
     }
 
+    // ---- 10. bone index offset is measured on the hips, not taken from the root probe -----------------
+    {
+        // Root at (10, 0, 10); hips (index 1) 1 m above it. The native transform keeps a 0 at the
+        // probed index offset (+0x40, as on a player root) and the real index at +0x48.
+        auto* e = static_cast<player::TransformEntry*>(calloc(8, sizeof(player::TransformEntry)));
+        auto* par = static_cast<int*>(calloc(8, sizeof(int)));
+        for (int i = 0; i < 8; ++i) { e[i].rotation = Vector4(0, 0, 0, 1); e[i].scale = Vector4(1, 1, 1, 0); par[i] = i == 0 ? -1 : 0; }
+        e[0].position = Vector4(10.f, 0.f, 10.f, 0.f);
+        e[1].position = Vector4(0.f, 1.f, 0.f, 0.f);
+        uint8_t* h = static_cast<uint8_t*>(calloc(1, 0x100));
+        *reinterpret_cast<uint64_t*>(h + 0x18) = reinterpret_cast<uint64_t>(e);
+        *reinterpret_cast<uint64_t*>(h + 0x20) = reinterpret_cast<uint64_t>(par);
+        uint8_t* hips = static_cast<uint8_t*>(calloc(1, 0x100));
+        *reinterpret_cast<uint64_t*>(hips + 0x38) = reinterpret_cast<uint64_t>(h);
+        *reinterpret_cast<int*>(hips + 0x40) = 0;
+        *reinterpret_cast<int*>(hips + 0x48) = 1;
+        const player::TransformLayout probed{0x38, 0x40, 0x18, 0x20, proc::pid};
+        skeleton::g_index_offset = -1; skeleton::g_index_pid = -1;
+        CHECK(skeleton::bone_index_offset(reinterpret_cast<uint64_t>(hips), Vector3(10.f, 0.f, 10.f), probed) == 0x48,
+              "measured index offset +0x%x", skeleton::g_index_offset);
+        skeleton::g_index_offset = -1; skeleton::g_index_pid = -1;
+        CHECK(skeleton::bone_index_offset(reinterpret_cast<uint64_t>(hips), Vector3(50.f, 0.f, 50.f), probed) == -1,
+              "no offset when the hips are nowhere near the feet");
+    }
+
     // ---- 7. find_model: jgi directly in the parts, and jgi behind a vds part at +0x58 ------------
     {
         const uint64_t jgi_class = rpm<uint64_t>(proc::lib + v100::model_typeinfo);
@@ -211,93 +237,72 @@ int main() {
         CHECK(skeleton::find_model(reinterpret_cast<uint64_t>(net2)) == 0, "no jgi");
     }
 
-    // ---- 8. fog: field addresses read out of the game's accessor code -------------------------------
+    // ---- 8. fog: field addresses read out of compiled accessor code -------------------------------
+    // tests/fixtures/rs_accessors.c, built for aarch64 by clang: il2cpp wrappers with lazily filled
+    // icall slots, native icalls with a TLS main-thread check and an error reporter, PLT calls into
+    // symbols that are not there. Laid out and relocated here the way the loader would.
     {
-        // AArch64 encoders for the fake accessor code.
+        namespace fx = rs_fixture;
+        const uint64_t lib = proc::lib;
+        const uint64_t base = lib + 0x7800000;                      // fixture "libunity" inside the fake lib
+        std::memcpy(reinterpret_cast<void*>(base), fx::image, fx::image_size);
+        for (const auto& r : fx::relocs) {
+            uint64_t value = 0;
+            if (r.kind == fx::Relative) value = base + r.addend;
+            else if (r.kind == fx::Symbol && r.defined) value = base + r.value + r.addend;
+            else continue;                                          // unresolved symbol / TLS descriptor: left 0
+            *reinterpret_cast<uint64_t*>(base + r.offset) = value;
+        }
+        auto at = [&](uint64_t off) { return reinterpret_cast<uint64_t*>(base + off); };
+
+        uint8_t* rs = static_cast<uint8_t*>(calloc(1, 0x200));
+        auto put_f = [](uint8_t* o, int off, float v) { std::memcpy(o + off, &v, 4); };
+        auto init_rs = [&](uint8_t* o) {
+            o[0x40] = 0;
+            put_f(o, 0x44, .5f); put_f(o, 0x48, .5f); put_f(o, 0x4C, .5f); put_f(o, 0x50, 1.f);
+            const int32_t mode = 3; std::memcpy(o + 0x54, &mode, 4);
+            put_f(o, 0x58, .01f); put_f(o, 0x5C, 0.f); put_f(o, 0x60, 300.f);
+            put_f(o, 0x70, .1f); put_f(o, 0x74, .2f); put_f(o, 0x78, .3f); put_f(o, 0x7C, 1.f);   // ambient sky
+            put_f(o, 0x80, .3f); put_f(o, 0x84, .35f); put_f(o, 0x88, .4f); put_f(o, 0x8C, 1.f);  // ambient equator
+        };
+        init_rs(rs);
+        at(fx::g_managers)[7] = reinterpret_cast<uint64_t>(rs);
+
+        // Slots the game has used are filled; the rest stay empty, as in a real process.
+        *at(fx::slot_get_start) = base + fx::RenderSettings_get_fogStartDistance;
+        *at(fx::slot_set_end) = base + fx::RenderSettings_set_fogEndDistance;       // end getter slot left empty
+        *at(fx::slot_get_fog) = base + fx::RenderSettings_get_fog;
+        *at(fx::slot_get_mode) = base + fx::RenderSettings_get_fogMode;
+        *at(fx::slot_get_color) = base + fx::RenderSettings_get_fogColor_Injected;
+        *at(fx::slot_get_object) = base + fx::RenderSettings_GetRenderSettings_Injected;
+        // slot_get_equator stays empty: found through the icall table below.
+
+        // The script.json RVAs jump to the compiled wrappers; the others trap.
+        auto branch = [](uint64_t from, uint64_t to) { return 0x14000000u | (uint32_t((to - from) >> 2) & 0x3FFFFFFu); };
+        auto route = [&](uint64_t rva, uint64_t target) {
+            const uint32_t w = target ? branch(lib + rva, target) : 0xD4200000u;
+            std::memcpy(reinterpret_cast<void*>(lib + rva), &w, 4);
+        };
+        const uint64_t traps[] = {v100::rs_set_fog, v100::rs_set_fog_start, v100::rs_set_fog_mode, v100::rs_get_fog_density,
+                                  v100::rs_set_fog_density, v100::rs_set_fog_color_injected, v100::rs_set_ambient_equator_injected,
+                                  v100::rs_get_ambient_sky_injected, v100::rs_set_ambient_sky_injected};
+        for (uint64_t rva : traps) route(rva, 0);
+        route(v100::rs_get_fog, base + fx::UnityEngine_RenderSettings__get_fog);
+        route(v100::rs_get_fog_start, base + fx::UnityEngine_RenderSettings__get_fogStartDistance);
+        route(v100::rs_get_fog_end, base + fx::UnityEngine_RenderSettings__get_fogEndDistance);
+        route(v100::rs_set_fog_end, base + fx::UnityEngine_RenderSettings__set_fogEndDistance);
+        route(v100::rs_get_fog_mode, base + fx::UnityEngine_RenderSettings__get_fogMode);
+        route(v100::rs_get_fog_color_injected, base + fx::UnityEngine_RenderSettings__get_fogColor_Injected);
+        route(v100::rs_get_ambient_equator_injected, base + fx::UnityEngine_RenderSettings__get_ambientEquatorColor_Injected);
+        route(v100::rs_get_render_settings_injected, base + fx::UnityEngine_RenderSettings__GetRenderSettings_Injected);
+
+        // A file-backed "libunity.so" holding icall names, a {name, fn} pair (equator) and a
+        // registration call site in an executable page (sky).
         auto adrp = [](int rd, uint64_t pc, uint64_t target) {
             const int64_t imm = (int64_t(target & ~uint64_t(0xFFF)) - int64_t(pc & ~uint64_t(0xFFF))) >> 12;
             return uint32_t(0x90000000u | (uint32_t(imm & 3) << 29) | (uint32_t((imm >> 2) & 0x7FFFF) << 5) | uint32_t(rd));
         };
         auto add_imm = [](int rd, int rn, uint32_t imm) { return 0x91000000u | (imm << 10) | (uint32_t(rn) << 5) | uint32_t(rd); };
-        auto ldr_x = [](int rt, int rn, uint32_t off) { return 0xF9400000u | ((off / 8) << 10) | (uint32_t(rn) << 5) | uint32_t(rt); };
-        auto bl = [](uint64_t pc, uint64_t target) { return 0x94000000u | (uint32_t((target - pc) >> 2) & 0x3FFFFFFu); };
-        auto cbz_x = [](int rt, int64_t off) { return 0xB4000000u | (uint32_t((off >> 2) & 0x7FFFF) << 5) | uint32_t(rt); };
-        const uint32_t RET = 0xD65F03C0, BRK = 0xD4200000, NOP = 0xD503201F, PACIASP = 0xD503233F;
-        const uint32_t STP_X19_X30 = 0xA9BF7BF3, LDP_X19_X30 = 0xA8C17BF3, STP_FP_LR = 0xA9BF7BFD, LDP_FP_LR = 0xA8C17BFD;
-        const uint32_t MOV_FP_SP = 0x910003FD, MOV_X19_X0 = 0xAA0003F3;
-
-        auto emit = [&](uint64_t at, std::vector<uint32_t> words) { std::memcpy(reinterpret_cast<void*>(at), words.data(), words.size() * 4); };
-        // il2cpp wrapper: load the icall slot, call it if filled, trap otherwise.
-        auto wrapper = [&](uint64_t at, uint64_t slot) {
-            emit(at, {PACIASP, STP_X19_X30, adrp(19, at + 8, slot), ldr_x(8, 19, uint32_t(slot & 0xFFF)), cbz_x(8, 16),
-                      0xD63F0100 /* blr x8 */, LDP_X19_X30, RET, BRK});
-        };
-
-        const uint64_t lib = proc::lib;
-        uint8_t* rs = static_cast<uint8_t*>(calloc(1, 0x200));
-        auto put_f = [](uint8_t* o, int off, float v) { std::memcpy(o + off, &v, 4); };
-        auto init_rs = [&](uint8_t* o) {
-            o[0x40] = 0;                                                  // m_Fog
-            put_f(o, 0x44, .5f); put_f(o, 0x48, .5f); put_f(o, 0x4C, .5f); put_f(o, 0x50, 1.f);  // m_FogColor
-            const int32_t mode = 3; std::memcpy(o + 0x54, &mode, 4);      // m_FogMode
-            put_f(o, 0x58, .01f); put_f(o, 0x5C, 0.f); put_f(o, 0x60, 300.f);
-            put_f(o, 0x70, .1f); put_f(o, 0x74, .2f); put_f(o, 0x78, .3f); put_f(o, 0x7C, 1.f);  // ambient sky
-            put_f(o, 0x80, .3f); put_f(o, 0x84, .35f); put_f(o, 0x88, .4f); put_f(o, 0x8C, 1.f); // ambient equator
-        };
-        init_rs(rs);
-
-        const uint64_t data = lib + 0xC480000;          // globals: manager pointer and icall slots
-        const uint64_t manager = data;
-        *reinterpret_cast<uint64_t*>(manager) = reinterpret_cast<uint64_t>(rs);
-        auto slot = [&](int i) { return data + 0x100 + uint64_t(i) * 8; };
-        const uint64_t code = lib + 0x200000;           // native engine code
-        const uint64_t grs = code;                       // RenderSettings& GetRenderSettings()
-        emit(grs, {adrp(8, grs, manager), ldr_x(0, 8, uint32_t(manager & 0xFFF)), RET});
-        auto native = [&](uint64_t at, std::vector<uint32_t> body) {
-            std::vector<uint32_t> w{STP_FP_LR, MOV_FP_SP, bl(at + 8, grs)};
-            w.insert(w.end(), body.begin(), body.end());
-            w.push_back(LDP_FP_LR); w.push_back(RET);
-            emit(at, w);
-        };
-        const uint64_t n_start = code + 0x100, n_end_set = code + 0x200, n_fog = code + 0x300, n_mode = code + 0x400,
-                       n_color = code + 0x500, n_obj = code + 0x600, n_equator = code + 0x700, n_sky = code + 0x800;
-        native(n_start, {0xBD400000u | ((0x5C / 4) << 10)});                                   // ldr s0, [x0,#0x5C]
-        emit(n_end_set, {STP_FP_LR, MOV_FP_SP, 0x1E204001 /* fmov s1,s0 */, bl(n_end_set + 12, grs),
-                         0xBD000000u | ((0x60 / 4) << 10) | 1 /* str s1,[x0,#0x60] */, LDP_FP_LR, RET});
-        native(n_fog, {0x39400000u | (0x40 << 10) | 8 /* ldrb w8,[x0,#0x40] */, 0x7100011F /* cmp w8,#0 */, 0x1A9F07E0 /* cset w0,ne */});
-        native(n_mode, {0xB9400000u | ((0x54 / 4) << 10)});                                    // ldr w0, [x0,#0x54]
-        native(n_obj, {});                                                                     // returns x0 = RenderSettings*
-        auto color_getter = [&](uint64_t at, int off) {
-            emit(at, {STP_X19_X30, MOV_X19_X0, bl(at + 8, grs),
-                      0x3CC00000u | (uint32_t(off & 0x1FF) << 12) /* ldur q0,[x0,#off] */, 0x3D800260 /* str q0,[x19] */,
-                      LDP_X19_X30, RET});
-        };
-        color_getter(n_color, 0x44);
-        color_getter(n_equator, 0x80);
-        color_getter(n_sky, 0x70);
-
-        // Wrappers at the real RVAs. Filled slots: start getter, end setter, fog getter, mode getter,
-        // color getter, GetRenderSettings. Everything else is left unresolved on purpose.
-        const uint64_t all[] = {v100::rs_get_fog, v100::rs_set_fog, v100::rs_get_fog_start, v100::rs_set_fog_start,
-                                v100::rs_get_fog_end, v100::rs_set_fog_end, v100::rs_get_fog_mode, v100::rs_set_fog_mode,
-                                v100::rs_get_fog_density, v100::rs_set_fog_density, v100::rs_get_fog_color_injected,
-                                v100::rs_set_fog_color_injected, v100::rs_get_ambient_equator_injected,
-                                v100::rs_set_ambient_equator_injected, v100::rs_get_ambient_sky_injected,
-                                v100::rs_set_ambient_sky_injected, v100::rs_get_render_settings_injected};
-        for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); ++i) wrapper(lib + all[i], slot(int(i)));
-        auto fill = [&](uint64_t rva, uint64_t fn) {
-            for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); ++i)
-                if (all[i] == rva) *reinterpret_cast<uint64_t*>(slot(int(i))) = fn;
-        };
-        fill(v100::rs_get_fog_start, n_start);
-        fill(v100::rs_set_fog_end, n_end_set);
-        fill(v100::rs_get_fog, n_fog);
-        fill(v100::rs_get_fog_mode, n_mode);
-        fill(v100::rs_get_fog_color_injected, n_color);
-        fill(v100::rs_get_render_settings_injected, n_obj);
-
-        // A file-backed "libunity.so": icall names, a {name, fn} table (equator) and a
-        // registration call site in an executable page (sky).
         char unity_path[] = "/tmp/bycmd_selftest_XXXXXX";
         CHECK(mkdtemp(unity_path) != nullptr, "mkdtemp");
         const std::string so = std::string(unity_path) + "/libunity.so";
@@ -315,37 +320,43 @@ int main() {
         std::memcpy(unity + 0x100, eq_name, sizeof(eq_name));
         std::memcpy(unity + 0x200, sky_name, sizeof(sky_name));
         *reinterpret_cast<uint64_t*>(unity + 0x400) = reinterpret_cast<uint64_t>(unity + 0x100);
-        *reinterpret_cast<uint64_t*>(unity + 0x408) = n_equator;
+        *reinterpret_cast<uint64_t*>(unity + 0x408) = base + fx::RenderSettings_get_ambientEquatorColor_Injected;
         const uint64_t site = reinterpret_cast<uint64_t>(unity + 0x1000);
-        const int64_t reach = int64_t(n_sky) - int64_t(site);
+        const uint64_t sky_fn = base + fx::RenderSettings_get_ambientSkyColor_Injected;
+        const int64_t reach = int64_t(sky_fn) - int64_t(site);
         const bool sky_reachable = reach > -(int64_t(1) << 32) && reach < (int64_t(1) << 32);
         if (sky_reachable) {
-            emit(site, {NOP, adrp(0, site + 4, reinterpret_cast<uint64_t>(unity + 0x200)),
-                        add_imm(0, 0, uint32_t(reinterpret_cast<uint64_t>(unity + 0x200) & 0xFFF)),
-                        adrp(1, site + 12, n_sky), add_imm(1, 1, uint32_t(n_sky & 0xFFF)), bl(site + 20, site), RET});
+            const uint32_t words[] = {0xD503201F, adrp(0, site + 4, reinterpret_cast<uint64_t>(unity + 0x200)),
+                                      add_imm(0, 0, uint32_t(reinterpret_cast<uint64_t>(unity + 0x200) & 0xFFF)),
+                                      adrp(1, site + 12, sky_fn), add_imm(1, 1, uint32_t(sky_fn & 0xFFF)), 0xD65F03C0};
+            std::memcpy(unity + 0x1000, words, sizeof(words));
         }
         const bool exec_ok = mprotect(unity + 0x1000, 0x1000, PROT_READ | PROT_EXEC) == 0;
 
         cfg::fog::enabled = true; cfg::fog::auto_color = true; cfg::fog::min_distance = 25.f; cfg::fog::max_distance = 90.f;
         worldfog::g_pid = -1;
-        worldfog::tick();
-        const uint64_t base = reinterpret_cast<uint64_t>(rs);
-        CHECK(worldfog::g_object == base, "GetRenderSettings traced");
-        CHECK(worldfog::g_fields[worldfog::Start].address == base + 0x5C, "start via getter %s", worldfog::g_fields[worldfog::Start].how.c_str());
-        CHECK(worldfog::g_fields[worldfog::End].address == base + 0x60 && worldfog::g_fields[worldfog::End].setter, "end via setter %s", worldfog::g_fields[worldfog::End].how.c_str());
-        CHECK(worldfog::g_fields[worldfog::Fog].address == base + 0x40, "fog via cset getter %s", worldfog::g_fields[worldfog::Fog].how.c_str());
-        CHECK(worldfog::g_fields[worldfog::Mode].address == base + 0x54, "mode via getter");
-        CHECK(worldfog::g_fields[worldfog::FogColor].address == base + 0x44, "color via q copy %s", worldfog::g_fields[worldfog::FogColor].how.c_str());
-        CHECK(worldfog::g_fields[worldfog::Density].address == base + 0x58 && worldfog::g_fields[worldfog::Density].how == "inferred from fog start",
-              "density inferred: %s", worldfog::g_fields[worldfog::Density].how.c_str());
-        CHECK(worldfog::g_fields[worldfog::Equator].address == base + 0x80, "equator via icall table: %s", worldfog::g_fields[worldfog::Equator].how.c_str());
+        worldfog::tick();                       // starts the resolution thread
+        worldfog::wait();
+        worldfog::tick();                       // applies
+        const uint64_t obj = reinterpret_cast<uint64_t>(rs);
+        auto how = [](worldfog::Field f) { return worldfog::g_fields[f].how.c_str(); };
+        CHECK(worldfog::g_object == obj, "GetRenderSettings traced");
+        CHECK(worldfog::g_fields[worldfog::Start].address == obj + 0x5C, "start: %s", how(worldfog::Start));
+        CHECK(worldfog::g_fields[worldfog::End].address == obj + 0x60 && worldfog::g_fields[worldfog::End].setter, "end via setter: %s", how(worldfog::End));
+        CHECK(worldfog::g_fields[worldfog::Fog].address == obj + 0x40, "fog: %s", how(worldfog::Fog));
+        CHECK(worldfog::g_fields[worldfog::Mode].address == obj + 0x54, "mode: %s", how(worldfog::Mode));
+        CHECK(worldfog::g_fields[worldfog::FogColor].address == obj + 0x44, "color: %s", how(worldfog::FogColor));
+        CHECK(worldfog::g_fields[worldfog::Density].address == obj + 0x58 && worldfog::g_fields[worldfog::Density].how == "inferred from fog start",
+              "density inferred: %s", how(worldfog::Density));
+        CHECK(worldfog::g_fields[worldfog::Equator].address == obj + 0x80, "equator via icall table: %s", how(worldfog::Equator));
         if (sky_reachable && exec_ok)
-            CHECK(worldfog::g_fields[worldfog::Sky].address == base + 0x70, "sky via registration site: %s", worldfog::g_fields[worldfog::Sky].how.c_str());
+            CHECK(worldfog::g_fields[worldfog::Sky].address == obj + 0x70, "sky via registration site: %s", how(worldfog::Sky));
         else std::printf("note: registration call-site case skipped (exec=%d reach=%d)\n", exec_ok, sky_reachable);
 
         float f = 0.f;
+        int32_t mode = 0;
         CHECK(rs[0x40] == 1, "fog on");
-        int32_t mode = 0; std::memcpy(&mode, rs + 0x54, 4); CHECK(mode == 1, "linear");
+        std::memcpy(&mode, rs + 0x54, 4); CHECK(mode == 1, "linear");
         std::memcpy(&f, rs + 0x5C, 4); CHECK(f == 25.f, "start %.1f", f);
         std::memcpy(&f, rs + 0x60, 4); CHECK(f == 90.f, "end %.1f", f);
         std::memcpy(&f, rs + 0x44, 4); CHECK(std::fabs(f - .3f) < 1e-5f, "estimated color r=%.2f", f);
@@ -359,11 +370,13 @@ int main() {
         // Scene load: RenderSettings moves; the start trace notices and everything follows.
         uint8_t* rs2 = static_cast<uint8_t*>(calloc(1, 0x200));
         init_rs(rs2);
-        *reinterpret_cast<uint64_t*>(manager) = reinterpret_cast<uint64_t>(rs2);
+        at(fx::g_managers)[7] = reinterpret_cast<uint64_t>(rs2);
         worldfog::g_last_check = 0;
         worldfog::tick();                       // notices the move
+        worldfog::tick();                       // resolves again
+        worldfog::wait();
         worldfog::g_last_write = 0;
-        worldfog::tick();                       // resolves again and applies
+        worldfog::tick();                       // applies
         CHECK(worldfog::g_fields[worldfog::Start].address == reinterpret_cast<uint64_t>(rs2) + 0x5C, "followed the move");
         CHECK(rs2[0x40] == 1, "fog on after the move");
 
@@ -372,10 +385,22 @@ int main() {
         std::memcpy(&f, rs2 + 0x60, 4);
         std::memcpy(&mode, rs2 + 0x54, 4);
         CHECK(rs2[0x40] == 0 && mode == 3 && f == 300.f, "restored fog=%d mode=%d end=%.1f", rs2[0x40], mode, f);
+
+        // Every slot empty: no trace may invent an address, and the code dump must run.
+        for (uint64_t slot : {fx::slot_get_start, fx::slot_set_end, fx::slot_get_fog, fx::slot_get_mode, fx::slot_get_color,
+                              fx::slot_get_object, fx::slot_get_end, fx::slot_get_equator})
+            *at(slot) = 0;
         munmap(unity, 0x2000);
         close(fd);
         unlink(so.c_str());
         rmdir(unity_path);
+        cfg::fog::enabled = true;
+        worldfog::g_pid = -1;
+        worldfog::tick();
+        worldfog::wait();
+        CHECK(!worldfog::g_ready && !worldfog::g_fields[worldfog::Start].address, "nothing resolved without slots");
+        CHECK(worldfog::g_dumped, "wrapper code dumped");
+        cfg::fog::enabled = false;
     }
 
     std::printf(failures ? "SELFTEST FAILED (%d)\n" : "SELFTEST OK\n", failures);

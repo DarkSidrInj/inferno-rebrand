@@ -24,9 +24,12 @@
 #include "../CUtils/CArm64.hpp"
 #include "../CConfigs/CConfig.hpp"
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace worldfog {
@@ -76,6 +79,10 @@ namespace worldfog {
     inline bool g_applied = false;
     inline Original g_original{};
     inline bool g_icalls_scanned = false;
+    inline bool g_dumped = false;            // wrapper code logged once per process
+    // Resolution can walk deep into il2cpp (an empty icall slot leads into the resolver), so it
+    // runs on its own thread; the frame only picks up the result.
+    inline std::atomic<bool> g_resolving{false};
     inline std::vector<std::pair<std::string, uint64_t>> g_icalls;  // icall name -> native function
 
     // ---- reading the game's code ------------------------------------------------------------
@@ -249,6 +256,7 @@ namespace worldfog {
             g_icalls.push_back({icall, fn});
             diag::log("FOG", "icall %s = 0x%llx (%s)", icall.c_str(), (unsigned long long)fn, how);
         };
+        size_t refs = 0, sites = 0;
         auto is_name_ptr = [&](uint64_t v) {
             char text[12]{};
             return plausible(v) && mem_read(v, text, 12) && std::strncmp(text, "UnityEngine.", 12) == 0;
@@ -266,6 +274,7 @@ namespace worldfog {
                         if (!std::binary_search(wanted.begin(), wanted.end(), words[i])) continue;
                         const std::string* icall = name_at(words[i]);
                         if (!icall) continue;
+                        ++refs;
                         const uint64_t slot = at + i * 8;
                         accept(*icall, rpm<uint64_t>(slot + 8), "name/function pair");
                         // parallel arrays: find this name array's end, functions follow it
@@ -302,25 +311,68 @@ namespace worldfog {
                         out = (pc & ~uint64_t(0xFFF)) + (imm << 12) + ((b >> 10) & 0xFFF);
                         return true;
                     };
+                    // adrp x1 / ldr x1, [x1, #lo]: the function pointer comes from the GOT
+                    auto adrp_ldr = [&](size_t k, int reg, uint64_t& out) {
+                        if (k + 1 >= count) return false;
+                        const uint32_t a = code[k], b = code[k + 1];
+                        if ((a & 0x9F00001F) != uint32_t(0x90000000 | reg)) return false;
+                        if ((b & 0xFFC003FF) != uint32_t(0xF9400000 | (reg << 5) | reg)) return false;
+                        const uint64_t pc = at + k * 4;
+                        const uint64_t imm = a64::sext((uint64_t((a >> 5) & 0x7FFFF) << 2) | ((a >> 29) & 3), 21);
+                        out = rpm<uint64_t>((pc & ~uint64_t(0xFFF)) + (imm << 12) + uint64_t((b >> 10) & 0xFFF) * 8);
+                        return true;
+                    };
                     for (size_t k = 0; k + 1 < std::min(count, chunk / 4); ++k) {
                         uint64_t text = 0;
                         if (!adrp_add(k, 0, text) || !std::binary_search(wanted.begin(), wanted.end(), text)) continue;
                         const std::string* icall = name_at(text);
+                        ++sites;
                         for (size_t j = k + 2; icall && j < k + 10; ++j) {
                             uint64_t fn = 0;
-                            if (adrp_add(j, 1, fn)) { accept(*icall, fn, "registration call site"); break; }
+                            if (adrp_add(j, 1, fn) || adrp_ldr(j, 1, fn)) { accept(*icall, fn, "registration call site"); break; }
                         }
                     }
                 }
                 at += chunk;
             }
         }
-        diag::log("FOG", "icall scan: %zu names, %zu functions resolved", names.size(), g_icalls.size());
+        diag::log("FOG", "icall scan: %zu names, %zu data references, %zu code references, %zu functions resolved",
+                  names.size(), refs, sites, g_icalls.size());
     }
 
     inline uint64_t icall(const char* name) {
         for (const auto& known : g_icalls) if (known.first == name) return known.second;
         return 0;
+    }
+
+    // ---- diagnostics ----------------------------------------------------------------------------
+
+    // Logs the first instructions of an accessor and follows its first adrp + ldr (the icall
+    // slot or its GOT entry) two levels, so a failed trace can be read from the log.
+    inline void dump_code(const char* what, uint64_t entry) {
+        uint32_t words[24]{};
+        if (!mem_read(entry, words, sizeof(words))) { diag::log("FOG", "%s 0x%llx: code unreadable", what, (unsigned long long)entry); return; }
+        char text[24 * 9 + 1];
+        for (int i = 0; i < 24; ++i) std::snprintf(text + i * 9, 10, "%08x ", words[i]);
+        diag::log("FOG", "%s 0x%llx (lib+0x%llx): %s", what, (unsigned long long)entry,
+                  (unsigned long long)(entry - proc::lib), text);
+        for (int i = 0; i + 1 < 24; ++i) {
+            const uint32_t a = words[i];
+            if ((a & 0x9F000000) != 0x90000000) continue;
+            const int reg = int(a & 31);
+            for (int j = i + 1; j < std::min(i + 4, 24); ++j) {
+                const uint32_t b = words[j];
+                if ((b & 0xFFC00000) != 0xF9400000 || int((b >> 5) & 31) != reg) continue;
+                const uint64_t pc = entry + uint64_t(i) * 4;
+                const uint64_t imm = a64::sext((uint64_t((a >> 5) & 0x7FFFF) << 2) | ((a >> 29) & 3), 21);
+                const uint64_t slot = (pc & ~uint64_t(0xFFF)) + (imm << 12) + uint64_t((b >> 10) & 0xFFF) * 8;
+                const uint64_t v1 = rpm<uint64_t>(slot);
+                const uint64_t v2 = plausible(v1) ? rpm<uint64_t>(v1) : 0;
+                diag::log("FOG", "  adrp+ldr at +%d -> [0x%llx] = 0x%llx -> [..] = 0x%llx", i * 4,
+                          (unsigned long long)slot, (unsigned long long)v1, (unsigned long long)v2);
+                return;
+            }
+        }
     }
 
     // ---- resolution ---------------------------------------------------------------------------
@@ -395,7 +447,15 @@ namespace worldfog {
             diag::log("FOG", "  %-15s 0x%llx  %s", kSpecs[f].name, (unsigned long long)g_fields[f].address, g_fields[f].how.c_str());
 
         g_ready = g_fields[Fog].address && g_fields[Start].address && g_fields[End].address;
-        if (!g_ready) diag::log("WARN", "FOG not usable: fog, start and end are all needed");
+        if (!g_ready) {
+            diag::log("WARN", "FOG not usable: fog, start and end are all needed");
+            if (!g_dumped) {
+                g_dumped = true;
+                dump_code("get_fogStartDistance wrapper", proc::lib + v100::rs_get_fog_start);
+                dump_code("set_fogStartDistance wrapper", proc::lib + v100::rs_set_fog_start);
+                dump_code("GetRenderSettings_Injected wrapper", proc::lib + v100::rs_get_render_settings_injected);
+            }
+        }
     }
 
     // ---- applying -------------------------------------------------------------------------------
@@ -474,9 +534,11 @@ namespace worldfog {
     // back when it is switched off.
     inline void tick() {
         if (g_pid != proc::pid) {
+            if (g_resolving.load()) return;  // let the old resolution finish first
             g_pid = proc::pid;
             g_ready = g_applied = false;
             g_icalls_scanned = false;
+            g_dumped = false;
             g_icalls.clear();
             g_last_resolve = 0;
             for (auto& f : g_fields) f = Resolved{};
@@ -485,11 +547,13 @@ namespace worldfog {
         if (!cfg::fog::enabled && !g_applied) return;
         const long long now = diag::now_ms();
 
+        if (g_resolving.load()) return;
         if (!g_ready) {
-            if (!cfg::fog::enabled || now - g_last_resolve < 3000) return;
+            if (!cfg::fog::enabled || now - g_last_resolve < (g_dumped ? 15000 : 3000)) return;
             g_last_resolve = now;
-            resolve_all();
-            if (!g_ready) return;
+            g_resolving = true;
+            std::thread([] { resolve_all(); g_resolving = false; }).detach();
+            return;
         }
 
         if (now - g_last_check > 2000) {
@@ -513,8 +577,12 @@ namespace worldfog {
         apply();
     }
 
+    // Waits for a resolution started by tick() (tests and shutdown).
+    inline void wait() { while (g_resolving.load()) std::this_thread::sleep_for(std::chrono::milliseconds(5)); }
+
     // Menu "Rescan" button.
     inline void rescan() {
+        if (g_resolving.load()) return;
         if (g_applied) restore();
         g_ready = g_applied = false;
         g_icalls_scanned = false;

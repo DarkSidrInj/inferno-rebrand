@@ -10,7 +10,11 @@
 // bitfield moves, CSEL family, loads and stores (all addressing forms, pairs, literals),
 // FMOV, B/BL/BR/BLR/RET (plus the pointer-auth forms), CBZ/CBNZ, TBZ/TBNZ and B.cond.
 // A branch whose condition is not known (thread checks, values read from TLS) forks the
-// machine and both paths are explored, so error paths cannot hide the normal one.
+// machine. Paths are explored shortest first, so a 20-instruction accessor finishes long
+// before an error-reporting path; each branch site may fork only a few times, so loops over
+// unknown data cannot blow up. A call that cannot be followed (unknown or unresolved target,
+// PLT slot the loader filled with something outside the game, too deep) is stepped over:
+// the caller-saved registers become unknown, as after any call.
 
 #include "CMemory.hpp"
 #include <cstdint>
@@ -96,11 +100,21 @@ namespace a64 {
 
     struct Session {
         CodeCache code;
-        int max_steps = 4000;
-        int max_forks = 32;
+        int max_steps = 4000;      // per path
+        long max_total = 60000;    // all paths together
+        int max_forks = 2000;
+        int max_site_forks = 6;    // per branch instruction
         int max_depth = 8;
         const char* why = "";
     };
+
+    // After a call we could not follow: AAPCS64 caller-saved registers hold anything.
+    inline void clobber(Machine& m) {
+        for (int r = 0; r <= 18; ++r) m.x[r] = Reg{};
+        for (int r = 0; r <= 7; ++r) m.v[r] = Reg{};
+        for (int r = 16; r <= 31; ++r) m.v[r] = Reg{};
+        m.flags_known = false;
+    }
 
     // Result of reading `size` bytes at `addr` for the machine.
     inline Reg load(Machine& m, uint64_t addr, int size, bool sign, bool to64) {
@@ -189,7 +203,7 @@ namespace a64 {
         if ((ins & 0x7C000000) == 0x14000000) {  // B / BL
             const uint64_t target = pc + sext(uint64_t(ins & 0x3FFFFFF) << 2, 28);
             if (ins & 0x80000000) {
-                if (int(m.calls.size()) >= s.max_depth) { s.why = "call depth"; return Step::Fail; }
+                if (int(m.calls.size()) >= s.max_depth) { clobber(m); return Step::Next; }  // too deep: step over
                 m.calls.push_back(m.pc);
                 m.x[30] = known_value(m.pc);
             }
@@ -206,11 +220,20 @@ namespace a64 {
                 m.calls.pop_back();
                 return Step::Next;
             }
-            if (!target.known || !plausible(target.value)) { s.why = "indirect branch to unknown target"; return Step::Fail; }
-            if (opc == 1) {
-                if (int(m.calls.size()) >= s.max_depth) { s.why = "call depth"; return Step::Fail; }
+            const bool followable = target.known && plausible(target.value);
+            if (opc == 1) {  // BLR
+                if (!followable || int(m.calls.size()) >= s.max_depth) { clobber(m); return Step::Next; }
                 m.calls.push_back(m.pc);
                 m.x[30] = known_value(m.pc);
+                m.pc = target.value;
+                return Step::Next;
+            }
+            if (!followable) {  // BR: a tail call or PLT jump we cannot follow
+                if (m.calls.empty()) { s.why = "tail call to an unresolved target (icall slot empty?)"; return Step::Fail; }
+                clobber(m);
+                m.pc = m.calls.back();
+                m.calls.pop_back();
+                return Step::Next;
             }
             m.pc = target.value;
             return Step::Next;
@@ -521,29 +544,41 @@ namespace a64 {
     }
 
     // Explores from `start` until `goal` accepts a machine (checked after every store and at
-    // the final return). Unknown branches fork; the first accepted machine wins.
+    // the final return). The path with the fewest steps always runs next.
     inline bool explore(Session& s, const Machine& start, const std::function<bool(const Machine&)>& goal, Machine& found) {
         std::vector<Machine> pending{start};
+        std::unordered_map<uint64_t, int> site_forks;
         int forks = 0;
+        long total = 0;
+        const char* last_failure = "";
         while (!pending.empty()) {
-            Machine m = std::move(pending.back());
+            size_t best = 0;
+            for (size_t i = 1; i < pending.size(); ++i) if (pending[i].steps < pending[best].steps) best = i;
+            Machine m = std::move(pending[best]);
+            if (best + 1 != pending.size()) pending[best] = std::move(pending.back());
             pending.pop_back();
-            Machine other;
             for (;;) {
+                if (++total > s.max_total) { s.why = "total step budget"; return false; }
+                const uint64_t pc = m.pc;
                 const size_t before = m.stores.size();
+                Machine other;
                 const Step result = step(s, m, other);
-                if (result == Step::Fail) break;
+                if (result == Step::Fail) { last_failure = s.why; break; }
                 if (result == Step::Fork) {
-                    if (++forks > s.max_forks) { s.why = "too many forks"; return false; }
-                    pending.push_back(std::move(other));
-                    other = Machine{};
+                    // Keep both sides only while this branch and the whole search are under
+                    // budget; past that, follow the fall-through alone.
+                    if (++site_forks[pc] <= s.max_site_forks && ++forks <= s.max_forks) {
+                        pending.push_back(std::move(other));
+                        pending.push_back(std::move(m));
+                        break;
+                    }
                     continue;
                 }
                 if ((m.stores.size() != before || result == Step::Done) && goal(m)) { found = m; return true; }
-                if (result == Step::Done) break;
+                if (result == Step::Done) { last_failure = "returned without reaching the goal"; break; }
             }
         }
-        if (!*s.why) s.why = "no path reached the goal";
+        s.why = *last_failure ? last_failure : "no path reached the goal";
         return false;
     }
 }
