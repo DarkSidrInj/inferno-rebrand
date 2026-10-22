@@ -13,8 +13,11 @@
 // estimate. If they do not match this build, the fog still works and the estimate falls
 // back to the fog color the game had.
 //
-// Scene loads can replace the object: every tick re-checks the block and rescans when it
-// stops looking like fog settings. Turning the fog off writes the game's own values back.
+// Memory is full of float runs that look like this, so a candidate is only trusted after a
+// probe: one float (the fog start) is nudged, and the block is kept only if the nudge is
+// still there 150 ms later. A candidate that changes it back is blacklisted and the scan
+// goes on. Scene loads can replace the object: every tick re-checks the block and rescans
+// when it stops looking like fog settings. Turning the fog off writes the game's values back.
 
 #include "CGameContext.hpp"
 #include "../CConfigs/CConfig.hpp"
@@ -40,7 +43,13 @@ namespace worldfog {
     inline uint64_t g_address = 0;
     inline Block g_original{};
     inline bool g_applied = false;
+    inline bool g_verified = false;   // the probe nudge survived
+    inline bool g_probing = false;
+    inline float g_probe_value = 0.f;
+    inline long long g_probe_at = 0;
     inline long long g_last_write = 0;
+    inline std::vector<uint64_t> g_bad;  // candidates that did not hold a written value
+    inline bool blacklisted(uint64_t a) { return std::find(g_bad.begin(), g_bad.end(), a) != g_bad.end(); }
 
     inline std::vector<remote_map> g_maps;
     inline size_t g_map = 0;
@@ -51,18 +60,22 @@ namespace worldfog {
     inline bool unit(float v) { return std::isfinite(v) && v >= 0.f && v <= 1.f; }
 
     // -1 = not a fog block, otherwise how many of the three ambient alphas are exactly 1.0
-    // (0..3). Two or more is how the real object is told from look-alikes.
+    // (0..3). Only a full 3 with sane ambient colors counts as the real object at first sight.
     inline int score(const Block& b) {
         if (b.fog > 1 || b.mode < 1 || b.mode > 3) return -1;
         for (float c : b.color) if (!unit(c)) return -1;
         if (!unit(b.density)) return -1;
-        if (!std::isfinite(b.start) || !std::isfinite(b.end) || b.start < 0.f || b.end <= b.start || b.end > 1000000.f) return -1;
+        if (!std::isfinite(b.start) || !std::isfinite(b.end) || b.start < 0.f || b.end < b.start + 1.f || b.end > 1000000.f) return -1;
         int hits = 0;
-        for (int i = 3; i < 12; i += 4) if (b.ambient[i] == 1.f) ++hits;
+        for (int i = 0; i < 12; ++i) {
+            const float v = b.ambient[i];
+            if (!std::isfinite(v) || v < 0.f || v > 8.f) return -1;
+            if (i % 4 == 3 && v == 1.f) ++hits;
+        }
         return hits;
     }
 
-    inline void forget() { g_address = 0; g_applied = false; }
+    inline void forget() { g_address = 0; g_applied = false; g_verified = false; g_probing = false; }
     inline void restart_scan() { g_maps.clear(); g_map = 0; g_cursor = 0; g_weak = 0; g_weak_score = -1; }
 
     inline void log_found(const char* how, uint64_t address, const Block& b, int tail) {
@@ -97,8 +110,8 @@ namespace worldfog {
                     Block b;
                     std::memcpy(&b, buffer.data() + i, sizeof(b));
                     const int tail = score(b);
-                    if (tail < 0) continue;
-                    if (tail >= 2) {
+                    if (tail < 0 || blacklisted(cursor + i)) continue;
+                    if (tail >= 3) {
                         g_address = cursor + i;
                         g_original = b;
                         log_found("found", g_address, b, tail);
@@ -115,7 +128,7 @@ namespace worldfog {
         if (g_map >= g_maps.size()) {
             ++g_cycles;
             Block weak{};
-            if (g_weak && mem_read(g_weak, &weak, sizeof(weak)) && score(weak) >= 0) {
+            if (g_weak && !blacklisted(g_weak) && mem_read(g_weak, &weak, sizeof(weak)) && score(weak) >= 0) {
                 g_address = g_weak;
                 g_original = weak;
                 log_found("found (ambient tail unconfirmed)", g_address, weak, score(weak));
@@ -157,9 +170,11 @@ namespace worldfog {
     // One call per frame. Does nothing until the fog is switched on, and puts the game's
     // values back when it is switched off.
     inline void tick() {
-        if (g_pid != proc::pid) { g_pid = proc::pid; forget(); restart_scan(); g_cycles = 0; g_scanned = 0; }
+        if (g_pid != proc::pid) {
+            g_pid = proc::pid; forget(); restart_scan(); g_cycles = 0; g_scanned = 0; g_bad.clear();
+        }
         if (proc::pid <= 0 || !plausible(proc::lib)) return;
-        if (!cfg::fog::enabled && !g_applied) return;
+        if (!cfg::fog::enabled && !g_applied && !g_probing) return;
 
         if (!g_address) {
             if (!cfg::fog::enabled || !scan_step()) return;
@@ -171,8 +186,14 @@ namespace worldfog {
             forget();
             return;
         }
+        const long long stamp = diag::now_ms();
 
         if (!cfg::fog::enabled) {
+            if (g_probing) {
+                mem_write(g_address + offsetof(Block, start), &g_original.start, sizeof(float));
+                g_probing = false;
+                return;
+            }
             Block restore = now;
             std::memcpy(&restore, &g_original, kWriteSize);
             write_block(restore);
@@ -181,7 +202,29 @@ namespace worldfog {
             return;
         }
 
-        if (!g_applied) g_original = now;  // what the game had, before the first write
+        if (!g_verified) {
+            if (!g_probing) {
+                g_original = now;
+                g_probe_value = now.start + 0.0625f;  // exact in binary, so it can be compared bit for bit
+                mem_write(g_address + offsetof(Block, start), &g_probe_value, sizeof(float));
+                g_probe_at = stamp;
+                g_probing = true;
+                return;
+            }
+            if (stamp - g_probe_at < 150) return;
+            g_probing = false;
+            if (std::memcmp(&now.start, &g_probe_value, sizeof(float)) != 0) {
+                g_bad.push_back(g_address);
+                diag::log("FOG", "0x%llx did not hold a written value (start=%.4f), not RenderSettings; scanning on",
+                          (unsigned long long)g_address, now.start);
+                mem_write(g_address + offsetof(Block, start), &g_original.start, sizeof(float));
+                forget();
+                return;
+            }
+            g_verified = true;
+            diag::log("FOG", "0x%llx holds written values, accepted as RenderSettings", (unsigned long long)g_address);
+            now.start = g_original.start;  // the nudge is replaced by the real write below
+        }
 
         Block want = now;
         want.fog = 1;
@@ -195,7 +238,6 @@ namespace worldfog {
         }
         want.color[3] = 1.f;
 
-        const long long stamp = diag::now_ms();
         if (same(want, now) || stamp - g_last_write < kWriteMs) { g_applied = true; return; }
         g_last_write = stamp;
         write_block(want);

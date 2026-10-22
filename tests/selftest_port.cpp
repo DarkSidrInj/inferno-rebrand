@@ -54,8 +54,8 @@ int main() {
 
     // ---- 3. Transform hierarchy: batched skeleton compose == reference decode_transform ----
     const int n = 40;
-    auto* entries = static_cast<player::TransformEntry*>(calloc(n, sizeof(player::TransformEntry)));
-    auto* parents = static_cast<int*>(calloc(n, sizeof(int)));
+    auto* entries = static_cast<player::TransformEntry*>(calloc(1024, sizeof(player::TransformEntry)));
+    auto* parents = static_cast<int*>(calloc(1024, sizeof(int)));
     for (int i = 0; i < n; ++i) {
         entries[i].position = Vector4(0.1f * i, 0.05f * (i % 5), 0.02f * i, 0.f);
         const float a = 0.05f * i; // small z rotation
@@ -146,21 +146,11 @@ int main() {
     CHECK(r3.holder == reinterpret_cast<uint64_t>(holder), "holder");
     CHECK(game_camera::acquire(players, reinterpret_cast<uint64_t>(net), r3), "cached acquire");
 
-    // ---- 9. whole rig: every node below the hips, composed like the reference decode --------------
+    // ---- 9. whole rig: nodes below the hips, composed like the reference decode --------------------
     {
-        skeleton::Pose rig{};
-        rig.position[skeleton::Head] = Vector3(0.f, 0.f, 0.f);  // radius test is exercised below
-        std::vector<player::TransformEntry> table(entries, entries + n);
-        std::vector<int> parent_of(parents, parents + n);
-        skeleton::compose_rig(cache, table, parent_of, n, rig);
-        CHECK(rig.nodes.empty() || rig.nodes.size() < size_t(n), "radius around a far head keeps few nodes");
-
-        skeleton::Pose full{};
-        full.position[skeleton::Head] = pose.position[skeleton::Head];
-        skeleton::compose_rig(cache, table, parent_of, n, full);
-        CHECK(full.nodes.size() > 5, "rig nodes=%zu", full.nodes.size());
+        CHECK(pose.nodes.size() > 5, "rig nodes=%zu", pose.nodes.size());
         int linked = 0, matched = 0;
-        for (const auto& node : full.nodes) {
+        for (const auto& node : pose.nodes) {
             uint8_t* nativ = static_cast<uint8_t*>(calloc(1, 0x100));
             *reinterpret_cast<uint64_t*>(nativ + 0x38) = reinterpret_cast<uint64_t>(hierarchy);
             *reinterpret_cast<int*>(nativ + 0x40) = node.index;
@@ -169,11 +159,31 @@ int main() {
                 std::fabs(ref.x - node.position.x) + std::fabs(ref.y - node.position.y) + std::fabs(ref.z - node.position.z) < 1e-3f) ++matched;
             if (node.parent >= 0) {
                 ++linked;
-                CHECK(full.nodes[size_t(node.parent)].index == parents[node.index], "parent link index=%d", node.index);
+                CHECK(pose.nodes[size_t(node.parent)].index == parents[node.index], "parent link index=%d", node.index);
             }
         }
-        CHECK(matched == int(full.nodes.size()), "rig matched %d of %zu", matched, full.nodes.size());
-        CHECK(linked >= int(full.nodes.size()) - 1, "linked=%d nodes=%zu", linked, full.nodes.size());
+        CHECK(matched == int(pose.nodes.size()), "rig matched %d of %zu", matched, pose.nodes.size());
+        CHECK(linked >= int(pose.nodes.size()) - 1, "linked=%d nodes=%zu", linked, pose.nodes.size());
+
+        // A hierarchy this far into a big scene must still compose: bones at index 9000+.
+        const int big = 12000;
+        auto* big_entries = static_cast<player::TransformEntry*>(calloc(big + 64, sizeof(player::TransformEntry)));
+        auto* big_parents = static_cast<int*>(calloc(big + 64, sizeof(int)));
+        for (int i = 0; i < big + 64; ++i) { big_entries[i].rotation = Vector4(0, 0, 0, 1); big_entries[i].scale = Vector4(1, 1, 1, 0); big_parents[i] = i == 0 ? -1 : 0; }
+        big_entries[0].position = Vector4(5.f, 0.f, 0.f, 0.f);
+        const int base = 9000;
+        for (int b = 0; b < skeleton::kCount; ++b) { big_parents[base + b] = b == 0 ? 0 : base + (b - 1) / 2 * (b > 0); big_entries[base + b].position = Vector4(0.f, 0.1f, 0.f, 0.f); }
+        big_parents[base] = 0;
+        uint8_t* big_hierarchy = static_cast<uint8_t*>(calloc(1, 0x100));
+        *reinterpret_cast<uint64_t*>(big_hierarchy + 0x18) = reinterpret_cast<uint64_t>(big_entries);
+        *reinterpret_cast<uint64_t*>(big_hierarchy + 0x20) = reinterpret_cast<uint64_t>(big_parents);
+        skeleton::Cache far_cache{};
+        far_cache.data = reinterpret_cast<uint64_t>(big_hierarchy);
+        far_cache.min_index = base; far_cache.max_index = base + skeleton::kCount - 1;
+        for (int b = 0; b < skeleton::kCount; ++b) { far_cache.known[b] = true; far_cache.index_of[b] = uint64_t(base + b); }
+        skeleton::Pose far_pose{};
+        CHECK(skeleton::update(far_cache, far_pose), "update at index %d", base);
+        CHECK(std::fabs(far_pose.position[skeleton::Hips].x - 5.f) < 1e-3f, "far hips x=%.3f", far_pose.position[skeleton::Hips].x);
     }
 
     // ---- 7. find_model: jgi directly in the parts, and jgi behind a vds part at +0x58 ------------
@@ -199,7 +209,7 @@ int main() {
         CHECK(skeleton::find_model(reinterpret_cast<uint64_t>(net2)) == 0, "no jgi");
     }
 
-    // ---- 8. fog: scan finds the RenderSettings block, tick writes it, disabling restores it -------
+    // ---- 8. fog: scan, probe, apply, restore; a block the game rewrites is rejected ------------------
     {
         const size_t size = 2 * 1024 * 1024;
         uint8_t* region = static_cast<uint8_t*>(mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
@@ -211,23 +221,44 @@ int main() {
             if (tail) for (int c = 0; c < 3; ++c) { b.ambient[c * 4] = .2f + .1f * c; b.ambient[c * 4 + 1] = .3f; b.ambient[c * 4 + 2] = .4f; b.ambient[c * 4 + 3] = 1.f; }
             std::memcpy(region + at, &b, sizeof(b));
         };
-        fill(0x1000, 1.f, 50.f, false);       // look-alike: no ambient tail
-        fill(0x80010, 0.f, 300.f, true);      // the real one, straddling a 1 MiB chunk edge is covered separately
+        fill(0x1000, 1.f, 50.f, false);       // look-alike without an ambient tail: never a candidate
+        fill(0x2000, 3.f, 70.f, true);        // look-alike the game keeps rewriting
+        fill(0x80010, 0.f, 300.f, true);      // the real one
         fill((1024 * 1024) - 0x20, 2.f, 80.f, false);
-        worldfog::forget(); worldfog::restart_scan(); worldfog::g_pid = proc::pid;
+        const uint64_t base = reinterpret_cast<uint64_t>(region);
+        worldfog::forget(); worldfog::restart_scan(); worldfog::g_bad.clear(); worldfog::g_pid = proc::pid;
         g_scan_maps.clear();
         refresh_scan_maps();
+        cfg::fog::enabled = true; cfg::fog::auto_color = true; cfg::fog::min_distance = 25.f; cfg::fog::max_distance = 90.f;
+
         int steps = 0;
         while (!worldfog::g_address && steps++ < 4000) worldfog::scan_step(8 * 1024 * 1024);
-        CHECK(worldfog::g_address == reinterpret_cast<uint64_t>(region + 0x80010), "fog found at %llx want %llx",
-              (unsigned long long)worldfog::g_address, (unsigned long long)(reinterpret_cast<uint64_t>(region) + 0x80010));
+        CHECK(worldfog::g_address == base + 0x2000, "first strict candidate is the rewritten one: %llx", (unsigned long long)(worldfog::g_address - base));
 
-        cfg::fog::enabled = true; cfg::fog::auto_color = true; cfg::fog::min_distance = 25.f; cfg::fog::max_distance = 90.f;
+        worldfog::tick();                                    // probe write
+        worldfog::Block fake{};
+        std::memcpy(&fake, region + 0x2000, sizeof(fake));
+        CHECK(fake.start == 3.f + 0.0625f, "probe nudge written");
+        fake.start = 3.f;                                    // the game writes its own value back
+        std::memcpy(region + 0x2000, &fake, sizeof(fake));
+        usleep(200 * 1000);
+        worldfog::tick();
+        CHECK(worldfog::g_bad.size() == 1 && !worldfog::g_address, "rewritten block blacklisted");
+        std::memcpy(&fake, region + 0x2000, sizeof(fake));
+        CHECK(fake.fog == 0 && fake.start == 3.f && fake.end == 70.f, "rewritten block left as the game had it");
+
+        steps = 0;
+        while (!worldfog::g_address && steps++ < 4000) worldfog::tick();
+        CHECK(worldfog::g_address == base + 0x80010, "real block found after the decoy: %llx", (unsigned long long)(worldfog::g_address - base));
+        worldfog::tick();                                    // probe write
+        usleep(200 * 1000);
+        worldfog::g_last_write = 0;
+        worldfog::tick();                                    // probe held -> accepted, fog applied
         worldfog::g_last_write = 0;
         worldfog::tick();
         worldfog::Block live{};
         std::memcpy(&live, region + 0x80010, sizeof(live));
-        CHECK(live.fog == 1 && live.mode == 1, "fog on linear");
+        CHECK(worldfog::g_verified && live.fog == 1 && live.mode == 1, "fog on linear");
         CHECK(live.start == 25.f && live.end == 90.f, "fog distances %.1f %.1f", live.start, live.end);
         CHECK(std::fabs(live.color[0] - .3f) < 1e-4f && std::fabs(live.color[2] - .4f) < 1e-4f, "estimated color from ambient equator %.2f %.2f", live.color[0], live.color[2]);
         CHECK(live.ambient[3] == 1.f, "tail untouched");
@@ -243,7 +274,6 @@ int main() {
         std::memcpy(&live, region + 0x80010, sizeof(live));
         CHECK(live.fog == 0 && live.mode == 3 && live.start == 0.f && live.end == 300.f && std::fabs(live.color[0] - .5f) < 1e-4f,
               "restored fog=%d mode=%d start=%.1f end=%.1f", live.fog, live.mode, live.start, live.end);
-        cfg::fog::enabled = false;
     }
 
     std::printf(failures ? "SELFTEST FAILED (%d)\n" : "SELFTEST OK\n", failures);
