@@ -56,6 +56,10 @@ void RenderSettings_get_ambientEquatorColor_Injected(Color* ret) { CHECK_THREAD(
 void RenderSettings_get_ambientSkyColor_Injected(Color* ret) { CHECK_THREAD("get_ambientSkyColor"); *ret = GetRenderSettings()->sky; }
 void* RenderSettings_GetRenderSettings_Injected(void) { return GetRenderSettings(); }
 
+// Animator (Unity 6 binding style: the icall gets the native object).
+typedef struct Animator { void* vtable; char pad[0x50]; int culling_mode; /* 0x58 */ } Animator;
+int Animator_get_cullingMode_Injected(void* self) { CHECK_THREAD("get_cullingMode"); return ((Animator*)self)->culling_mode; }
+
 // il2cpp wrappers: one lazily resolved function pointer per icall.
 typedef float (*f_float)(void);
 typedef void (*f_set_float)(float);
@@ -70,6 +74,8 @@ f_bool slot_get_fog;
 f_int slot_get_mode;
 f_color slot_get_color, slot_get_equator;
 f_ptr slot_get_object;
+typedef int (*f_cull)(void*);
+f_cull slot_get_culling;
 
 #define RESOLVE(slot, type, name) type f = slot; if (!f) { f = (type)il2cpp_codegen_resolve_icall(name); slot = f; }
 
@@ -96,4 +102,7 @@ void UnityEngine_RenderSettings__get_ambientEquatorColor_Injected(Color* ret, co
 }
 void* UnityEngine_RenderSettings__GetRenderSettings_Injected(const void* method) {
     RESOLVE(slot_get_object, f_ptr, "UnityEngine.RenderSettings::GetRenderSettings_Injected()"); return f();
+}
+int UnityEngine_Animator__get_cullingMode_Injected(void* self, const void* method) {
+    RESOLVE(slot_get_culling, f_cull, "UnityEngine.Animator::get_cullingMode_Injected(System.IntPtr)"); return f(self);
 }

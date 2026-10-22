@@ -3,6 +3,7 @@
 #include "../CMath/CGameMath.hpp"
 #include "../CGame/CPlayer.hpp"
 #include "../CGame/CCamera.hpp"
+#include "../CGame/CAnimCull.hpp"
 #include "../CMenu/Theme/CTheme.hpp"
 #include "../CConfigs/CConfig.hpp"
 #include "../CProtection/COxorany.hpp"
@@ -253,6 +254,7 @@ void visuals::draw() {
     enemy_objects.reserve(frame_enemies.size());
     for (const auto& Enemy : frame_enemies) enemy_objects.push_back(Enemy.object);
     if (cfg::esp::skeleton) draw_skeletons(ViewMatrix, ProjectionMatrix, enemy_objects);
+    else animcull::tick({}, false);  // skeleton off: give the animators their culling back
     draw_world_items(ViewMatrix, ProjectionMatrix, LocalPosition);
 
     static long long frame_log = 0;

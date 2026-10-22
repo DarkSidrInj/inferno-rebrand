@@ -10,9 +10,9 @@
 // Per field, in order:
 //   1. getter wrapper   (works once the game has called it, so its icall slot is filled)
 //   2. setter wrapper   (the store of the argument gives the address)
-//   3. icall by name    (libunity registers "UnityEngine.RenderSettings::get_fog..." with its
-//                        function; found by the name string, then a {name, fn} table, parallel
-//                        name/function arrays, or an ADRP/ADD x0, ADRP/ADD x1 call site)
+//   3. icall by name    (CIcalls.hpp: libunity registers "UnityEngine.RenderSettings::get_fog..."
+//                        with its function; every candidate is traced and must behave)
+// A wrapper whose icall slot is still empty (the game never called it) is skipped outright.
 // A field still missing after that is placed from fog start with Unity's member order
 // (m_Fog, m_FogColor, m_FogMode, m_FogDensity, m_LinearFogStart, m_LinearFogEnd) and kept
 // only if its value is sane. The object moves on scene loads, so fog start is re-read every
@@ -22,6 +22,7 @@
 #include "CGameContext.hpp"
 #include "COffsets.hpp"
 #include "../CUtils/CArm64.hpp"
+#include "CIcalls.hpp"
 #include "../CConfigs/CConfig.hpp"
 #include <algorithm>
 #include <atomic>
@@ -78,12 +79,10 @@ namespace worldfog {
     inline long long g_last_resolve = 0, g_last_check = 0, g_last_write = 0;
     inline bool g_applied = false;
     inline Original g_original{};
-    inline bool g_icalls_scanned = false;
     inline bool g_dumped = false;            // wrapper code logged once per process
     // Resolution can walk deep into il2cpp (an empty icall slot leads into the resolver), so it
     // runs on its own thread; the frame only picks up the result.
     inline std::atomic<bool> g_resolving{false};
-    inline std::vector<std::pair<std::string, uint64_t>> g_icalls;  // icall name -> native function
 
     // ---- reading the game's code ------------------------------------------------------------
 
@@ -145,203 +144,15 @@ namespace worldfog {
         return 0;
     }
 
-    inline uint64_t trace_object(std::string& why) {
+    inline uint64_t trace_object(uint64_t entry, std::string& why) {
         a64::Session session;
         a64::Machine start;
-        start.pc = proc::lib + v100::rs_get_render_settings_injected;
+        start.pc = entry;
         start.x[0] = {0, true, 0, 0};
         auto goal = [](const a64::Machine& m) { return m.returned && m.x[0].known && outside(m.x[0].value); };
         a64::Machine found;
         if (a64::explore(session, start, goal, found)) return found.x[0].value;
         why = session.why;
-        return 0;
-    }
-
-    // ---- icall registration lookup in libunity ------------------------------------------------
-
-    struct Segment { uint64_t begin, end; bool exec; };
-
-    inline std::vector<Segment> unity_segments() {
-        std::vector<Segment> out;
-        char path[64];
-        std::snprintf(path, sizeof(path), "/proc/%d/maps", proc::pid);
-        FILE* file = std::fopen(path, "r");
-        if (!file) return out;
-        char line[1024];
-        std::string lib_path;
-        std::vector<std::pair<Segment, std::string>> all;
-        while (std::fgets(line, sizeof(line), file)) {
-            unsigned long long begin = 0, end = 0;
-            char perms[5]{};
-            if (std::sscanf(line, "%llx-%llx %4s", &begin, &end, perms) != 3 || perms[0] != 'r') continue;
-            const char* slash = std::strchr(line, '/');
-            std::string name = slash ? std::string(slash) : std::string();
-            while (!name.empty() && (name.back() == '\n' || name.back() == ' ')) name.pop_back();
-            if (begin == proc::lib && !name.empty()) lib_path = name;
-            all.push_back({{begin, end, perms[2] == 'x'}, name});
-        }
-        std::fclose(file);
-        for (const auto& entry : all) {
-            const std::string& name = entry.second;
-            if (name.empty()) continue;
-            if (name.find("libunity.so") != std::string::npos || (!lib_path.empty() && name == lib_path))
-                out.push_back(entry.first);
-        }
-        return out;
-    }
-
-    // Validates a candidate native function by tracing it like the wrapper would be.
-    inline bool icall_traces(uint64_t fn, const std::string& icall) {
-        for (int f = 0; f < kFields; ++f) {
-            const Spec& spec = kSpecs[f];
-            std::string why;
-            if (icall == spec.icall_get) return trace_getter(fn, spec.kind, why) != 0;
-            if (icall == spec.icall_set) return trace_setter(fn, spec.kind, why) != 0;
-        }
-        return false;
-    }
-
-    inline void scan_icalls() {
-        g_icalls_scanned = true;
-        g_icalls.clear();
-        const std::vector<Segment> segments = unity_segments();
-        if (segments.empty()) { diag::log("WARN", "FOG icall scan: no libunity mappings found"); return; }
-        static const char kPrefix[] = "UnityEngine.RenderSettings::";
-        const size_t prefix_len = sizeof(kPrefix) - 1;
-
-        // 1. the name strings
-        std::vector<std::pair<std::string, uint64_t>> names;  // icall short name -> string address
-        std::vector<uint8_t> buffer;
-        uint64_t scanned = 0;
-        for (const Segment& seg : segments) {
-            for (uint64_t at = seg.begin; at < seg.end;) {
-                const size_t chunk = size_t(std::min<uint64_t>(seg.end - at, 1024 * 1024));
-                buffer.assign(chunk + 128, 0);
-                const size_t len = size_t(std::min<uint64_t>(seg.end - at, chunk + 128));
-                if (mem_read(at, buffer.data(), len)) {
-                    for (size_t i = 0; i + prefix_len < chunk;) {
-                        const void* hit = memmem(buffer.data() + i, chunk - i, kPrefix, prefix_len);
-                        if (!hit) break;
-                        const size_t off = size_t(static_cast<const uint8_t*>(hit) - buffer.data());
-                        const char* tail = reinterpret_cast<const char*>(buffer.data() + off + prefix_len);
-                        for (int f = 0; f < kFields; ++f) {
-                            for (const char* icall : {kSpecs[f].icall_get, kSpecs[f].icall_set}) {
-                                const size_t n = std::strlen(icall);
-                                if (off + prefix_len + n < len && std::strncmp(tail, icall, n) == 0 && (tail[n] == 0 || tail[n] == '('))
-                                    names.push_back({icall, at + off});
-                            }
-                        }
-                        i = off + 1;
-                    }
-                }
-                scanned += chunk;
-                at += chunk;
-            }
-        }
-        if (names.empty()) {
-            diag::log("WARN", "FOG icall scan: no RenderSettings icall names in %zu libunity segments (%.1f MiB)",
-                      segments.size(), double(scanned) / 1048576.0);
-            return;
-        }
-        std::vector<uint64_t> wanted;
-        for (const auto& n : names) wanted.push_back(n.second);
-        std::sort(wanted.begin(), wanted.end());
-        auto name_at = [&](uint64_t a) -> const std::string* {
-            for (const auto& n : names) if (n.second == a) return &n.first;
-            return nullptr;
-        };
-        auto accept = [&](const std::string& icall, uint64_t fn, const char* how) {
-            for (const auto& known : g_icalls) if (known.first == icall) return;
-            if (!plausible(fn) || !icall_traces(fn, icall)) return;
-            g_icalls.push_back({icall, fn});
-            diag::log("FOG", "icall %s = 0x%llx (%s)", icall.c_str(), (unsigned long long)fn, how);
-        };
-        size_t refs = 0, sites = 0;
-        auto is_name_ptr = [&](uint64_t v) {
-            char text[12]{};
-            return plausible(v) && mem_read(v, text, 12) && std::strncmp(text, "UnityEngine.", 12) == 0;
-        };
-
-        // 2. data: {name, fn} pairs, or name and function arrays side by side
-        for (const Segment& seg : segments) {
-            if (seg.exec) continue;
-            for (uint64_t at = seg.begin; at < seg.end;) {
-                const size_t chunk = size_t(std::min<uint64_t>(seg.end - at, 1024 * 1024)) & ~size_t(7);
-                if (chunk < 16) break;
-                std::vector<uint64_t> words(chunk / 8);
-                if (mem_read(at, words.data(), chunk)) {
-                    for (size_t i = 0; i < words.size(); ++i) {
-                        if (!std::binary_search(wanted.begin(), wanted.end(), words[i])) continue;
-                        const std::string* icall = name_at(words[i]);
-                        if (!icall) continue;
-                        ++refs;
-                        const uint64_t slot = at + i * 8;
-                        accept(*icall, rpm<uint64_t>(slot + 8), "name/function pair");
-                        // parallel arrays: find this name array's end, functions follow it
-                        uint64_t last = slot;
-                        for (int guard = 0; guard < 2048 && is_name_ptr(rpm<uint64_t>(last + 8)); ++guard) last += 8;
-                        uint64_t first = slot;
-                        for (int guard = 0; guard < 2048 && is_name_ptr(rpm<uint64_t>(first - 8)); ++guard) first -= 8;
-                        const uint64_t count = (last - first) / 8 + 1, index = (slot - first) / 8;
-                        for (uint64_t gap : {uint64_t(0), uint64_t(8)})
-                            accept(*icall, rpm<uint64_t>(last + 8 + gap + index * 8), "name array + function array");
-                        (void)count;
-                    }
-                }
-                at += chunk;
-            }
-        }
-
-        // 3. code: adrp x0 / add x0 (name) followed by adrp x1 / add x1 (function)
-        for (const Segment& seg : segments) {
-            if (!seg.exec) continue;
-            for (uint64_t at = seg.begin; at + 8 < seg.end;) {
-                const size_t chunk = size_t(std::min<uint64_t>(seg.end - at, 4 * 1024 * 1024)) & ~size_t(3);
-                std::vector<uint32_t> code(chunk / 4 + 16, 0);
-                const size_t len = size_t(std::min<uint64_t>(seg.end - at, chunk + 64)) & ~size_t(3);
-                if (mem_read(at, code.data(), len)) {
-                    const size_t count = len / 4;
-                    auto adrp_add = [&](size_t k, int reg, uint64_t& out) {
-                        if (k + 1 >= count) return false;
-                        const uint32_t a = code[k], b = code[k + 1];
-                        if ((a & 0x9F00001F) != uint32_t(0x90000000 | reg)) return false;
-                        if ((b & 0xFFC003FF) != uint32_t(0x91000000 | (reg << 5) | reg)) return false;
-                        const uint64_t pc = at + k * 4;
-                        const uint64_t imm = a64::sext((uint64_t((a >> 5) & 0x7FFFF) << 2) | ((a >> 29) & 3), 21);
-                        out = (pc & ~uint64_t(0xFFF)) + (imm << 12) + ((b >> 10) & 0xFFF);
-                        return true;
-                    };
-                    // adrp x1 / ldr x1, [x1, #lo]: the function pointer comes from the GOT
-                    auto adrp_ldr = [&](size_t k, int reg, uint64_t& out) {
-                        if (k + 1 >= count) return false;
-                        const uint32_t a = code[k], b = code[k + 1];
-                        if ((a & 0x9F00001F) != uint32_t(0x90000000 | reg)) return false;
-                        if ((b & 0xFFC003FF) != uint32_t(0xF9400000 | (reg << 5) | reg)) return false;
-                        const uint64_t pc = at + k * 4;
-                        const uint64_t imm = a64::sext((uint64_t((a >> 5) & 0x7FFFF) << 2) | ((a >> 29) & 3), 21);
-                        out = rpm<uint64_t>((pc & ~uint64_t(0xFFF)) + (imm << 12) + uint64_t((b >> 10) & 0xFFF) * 8);
-                        return true;
-                    };
-                    for (size_t k = 0; k + 1 < std::min(count, chunk / 4); ++k) {
-                        uint64_t text = 0;
-                        if (!adrp_add(k, 0, text) || !std::binary_search(wanted.begin(), wanted.end(), text)) continue;
-                        const std::string* icall = name_at(text);
-                        ++sites;
-                        for (size_t j = k + 2; icall && j < k + 10; ++j) {
-                            uint64_t fn = 0;
-                            if (adrp_add(j, 1, fn) || adrp_ldr(j, 1, fn)) { accept(*icall, fn, "registration call site"); break; }
-                        }
-                    }
-                }
-                at += chunk;
-            }
-        }
-        diag::log("FOG", "icall scan: %zu names, %zu data references, %zu code references, %zu functions resolved",
-                  names.size(), refs, sites, g_icalls.size());
-    }
-
-    inline uint64_t icall(const char* name) {
-        for (const auto& known : g_icalls) if (known.first == name) return known.second;
         return 0;
     }
 
@@ -393,42 +204,54 @@ namespace worldfog {
         }
     }
 
-    inline bool resolve_field(Field f, bool allow_icall_scan) {
+    inline std::string full_name(const char* icall) { return std::string("UnityEngine.RenderSettings::") + icall; }
+
+    // Wrapper first (only when its icall slot is filled; an empty one leads into il2cpp's
+    // resolver), then the native icall found by name in libunity.
+    inline bool resolve_field(Field f) {
         const Spec& spec = kSpecs[f];
         Resolved& r = g_fields[f];
         r = Resolved{};
-        std::string why_get, why_set;
-        if (uint64_t a = trace_getter(proc::lib + spec.getter, spec.kind, why_get)) {
-            r = {a, "getter wrapper", proc::lib + spec.getter, false};
-            return true;
+        std::string why_get = "icall slot empty", why_set = "icall slot empty";
+        if (!icalls::slot_empty(proc::lib + spec.getter)) {
+            if (uint64_t a = trace_getter(proc::lib + spec.getter, spec.kind, why_get)) {
+                r = {a, "getter wrapper", proc::lib + spec.getter, false};
+                return true;
+            }
         }
-        if (uint64_t a = trace_setter(proc::lib + spec.setter, spec.kind, why_set)) {
-            r = {a, "setter wrapper", proc::lib + spec.setter, true};
-            return true;
+        if (!icalls::slot_empty(proc::lib + spec.setter)) {
+            if (uint64_t a = trace_setter(proc::lib + spec.setter, spec.kind, why_set)) {
+                r = {a, "setter wrapper", proc::lib + spec.setter, true};
+                return true;
+            }
         }
-        if (allow_icall_scan && !g_icalls_scanned) scan_icalls();
         std::string why;
-        if (uint64_t fn = icall(spec.icall_get)) {
-            if (uint64_t a = trace_getter(fn, spec.kind, why)) { r = {a, "icall getter", fn, false}; return true; }
+        for (const auto& c : icalls::candidates(full_name(spec.icall_get))) {
+            if (uint64_t a = trace_getter(c.fn, spec.kind, why)) { r = {a, std::string("icall getter, ") + c.how, c.fn, false}; return true; }
         }
-        if (uint64_t fn = icall(spec.icall_set)) {
-            if (uint64_t a = trace_setter(fn, spec.kind, why)) { r = {a, "icall setter", fn, true}; return true; }
+        for (const auto& c : icalls::candidates(full_name(spec.icall_set))) {
+            if (uint64_t a = trace_setter(c.fn, spec.kind, why)) { r = {a, std::string("icall setter, ") + c.how, c.fn, true}; return true; }
         }
-        r.how = "missing (getter: " + why_get + ", setter: " + why_set + ")";
+        r.how = "missing (getter: " + why_get + ", setter: " + why_set + (why.empty() ? std::string() : ", icall: " + why) + ")";
         return false;
     }
 
     inline void resolve_all() {
         g_ready = false;
         g_applied = false;
-        std::string why;
-        g_object = trace_object(why);
+        std::string why = "icall slot empty";
+        g_object = 0;
+        const uint64_t object_wrapper = proc::lib + v100::rs_get_render_settings_injected;
+        if (!icalls::slot_empty(object_wrapper)) g_object = trace_object(object_wrapper, why);
+        if (!g_object)
+            for (const auto& c : icalls::candidates(full_name("GetRenderSettings_Injected")))
+                if ((g_object = trace_object(c.fn, why))) break;
         if (g_object) diag::log("FOG", "GetRenderSettings -> 0x%llx", (unsigned long long)g_object);
         else diag::log("FOG", "GetRenderSettings not readable (%s)", why.c_str());
 
         // Fog start first: it anchors the inference of the rest.
-        resolve_field(Start, true);
-        for (int f = 0; f < kFields; ++f) if (f != Start) resolve_field(Field(f), true);
+        resolve_field(Start);
+        for (int f = 0; f < kFields; ++f) if (f != Start) resolve_field(Field(f));
 
         const uint64_t start = g_fields[Start].address;
         for (int f = 0; f < kFields; ++f) {
@@ -537,9 +360,7 @@ namespace worldfog {
             if (g_resolving.load()) return;  // let the old resolution finish first
             g_pid = proc::pid;
             g_ready = g_applied = false;
-            g_icalls_scanned = false;
             g_dumped = false;
-            g_icalls.clear();
             g_last_resolve = 0;
             for (auto& f : g_fields) f = Resolved{};
         }
@@ -585,7 +406,6 @@ namespace worldfog {
         if (g_resolving.load()) return;
         if (g_applied) restore();
         g_ready = g_applied = false;
-        g_icalls_scanned = false;
         g_last_resolve = 0;
     }
 }

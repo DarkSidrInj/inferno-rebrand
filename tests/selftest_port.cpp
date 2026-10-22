@@ -7,6 +7,7 @@
 #include "CGame/CWorld.hpp"
 #include "CGame/CSkeleton.hpp"
 #include "CGame/CFog.hpp"
+#include "CGame/CAnimCull.hpp"
 #include "fixtures/rs_accessors.h"
 #include "CConfigs/CConfig.hpp"
 #include <sys/mman.h>
@@ -162,11 +163,34 @@ int main() {
                 std::fabs(ref.x - node.position.x) + std::fabs(ref.y - node.position.y) + std::fabs(ref.z - node.position.z) < 1e-3f) ++matched;
             if (node.parent >= 0) {
                 ++linked;
-                CHECK(pose.nodes[size_t(node.parent)].index == parents[node.index], "parent link index=%d", node.index);
+                bool ancestor = false;
+                for (int i = parents[node.index], guard = 0; i >= 0 && guard < 64; i = parents[i], ++guard)
+                    if (i == pose.nodes[size_t(node.parent)].index) { ancestor = true; break; }
+                CHECK(ancestor, "parent link index=%d -> %d is not an ancestor", node.index, pose.nodes[size_t(node.parent)].index);
             }
         }
         CHECK(matched == int(pose.nodes.size()), "rig matched %d of %zu", matched, pose.nodes.size());
-        CHECK(linked >= int(pose.nodes.size()) - 1, "linked=%d nodes=%zu", linked, pose.nodes.size());
+        int expected = 0;  // nodes with any drawn ancestor in this tree
+        for (const auto& node : pose.nodes) {
+            bool has = false;
+            for (int i = parents[node.index], guard = 0; i >= 0 && guard < 64 && !has; i = parents[i], ++guard)
+                for (const auto& other : pose.nodes) if (other.index == i) { has = true; break; }
+            expected += has;
+        }
+        CHECK(linked == expected, "linked=%d expected=%d nodes=%zu", linked, expected, pose.nodes.size());
+
+        // A weapon parented under the right hand is never part of the drawn rig.
+        skeleton::Cache armed = cache;
+        armed.plan_stamp = -1;
+        for (int b = 0; b < skeleton::kCount; ++b) armed.mapped.emplace_back(b, int(armed.index_of[b]));
+        const int weapon = 30;                                  // a transform below RHand in the test tree
+        armed.mapped.emplace_back(51, 3 + skeleton::LHand);    // a mapped finger-like bone (a humanoid key above 20)
+        skeleton::Pose armed_pose{};
+        CHECK(skeleton::update(armed, armed_pose), "armed update");
+        bool weapon_drawn = false;
+        for (const auto& node : armed_pose.nodes) if (node.index == weapon) weapon_drawn = true;
+        CHECK(!weapon_drawn, "weapon transform drawn");
+        CHECK(armed_pose.nodes.size() <= size_t(skeleton::kCount + 1), "only mapped bones drawn: %zu", armed_pose.nodes.size());
 
         // A hierarchy this far into a big scene must still compose: bones at index 9000+.
         const int big = 12000;
@@ -328,7 +352,8 @@ int main() {
         if (sky_reachable) {
             const uint32_t words[] = {0xD503201F, adrp(0, site + 4, reinterpret_cast<uint64_t>(unity + 0x200)),
                                       add_imm(0, 0, uint32_t(reinterpret_cast<uint64_t>(unity + 0x200) & 0xFFF)),
-                                      adrp(1, site + 12, sky_fn), add_imm(1, 1, uint32_t(sky_fn & 0xFFF)), 0xD65F03C0};
+                                      adrp(1, site + 12, sky_fn), add_imm(1, 1, uint32_t(sky_fn & 0xFFF)),
+                                      branch(site + 20, site) /* b scripting_add_internal_call */, 0xD65F03C0};
             std::memcpy(unity + 0x1000, words, sizeof(words));
         }
         const bool exec_ok = mprotect(unity + 0x1000, 0x1000, PROT_READ | PROT_EXEC) == 0;
@@ -385,6 +410,46 @@ int main() {
         std::memcpy(&f, rs2 + 0x60, 4);
         std::memcpy(&mode, rs2 + 0x54, 4);
         CHECK(rs2[0x40] == 0 && mode == 3 && f == 300.f, "restored fog=%d mode=%d end=%.1f", rs2[0x40], mode, f);
+
+        // Occlusion bypass: the culling offset comes from tracing Animator.get_cullingMode_Injected
+        // on a real enemy animator; enemies go to AlwaysAnimate and come back when switched off.
+        {
+            route(v100::animator_get_culling_injected, base + fx::UnityEngine_Animator__get_cullingMode_Injected);
+            route(v100::animator_set_culling_injected, 0);
+            *at(fx::slot_get_culling) = base + fx::Animator_get_cullingMode_Injected;
+            const uint64_t jgi_class = rpm<uint64_t>(proc::lib + v100::model_typeinfo);
+            auto make_enemy = [&](int32_t mode, uint8_t*& native_out) {
+                uint8_t* native = static_cast<uint8_t*>(calloc(1, 0x100));
+                std::memcpy(native + 0x58, &mode, 4);
+                uint8_t* managed = static_cast<uint8_t*>(calloc(1, 0x40));
+                *reinterpret_cast<uint64_t*>(managed + v100::unity_cached_ptr) = reinterpret_cast<uint64_t>(native);
+                uint8_t* model = static_cast<uint8_t*>(calloc(1, 0x80));
+                *reinterpret_cast<uint64_t*>(model) = jgi_class;
+                *reinterpret_cast<uint64_t*>(model + v100::model_animator) = reinterpret_cast<uint64_t>(managed);
+                uint8_t* array = static_cast<uint8_t*>(calloc(1, 0x30));
+                *reinterpret_cast<uint64_t*>(array + v100::array_length) = 1;
+                *reinterpret_cast<uint64_t*>(array + v100::array_data) = reinterpret_cast<uint64_t>(model);
+                uint8_t* wmz = static_cast<uint8_t*>(calloc(1, 0x100));
+                *reinterpret_cast<uint64_t*>(wmz + v100::wmz_first_array) = reinterpret_cast<uint64_t>(array);
+                uint8_t* net = static_cast<uint8_t*>(calloc(1, 0x100));
+                *reinterpret_cast<uint64_t*>(net + v100::net_systems) = reinterpret_cast<uint64_t>(wmz);
+                native_out = native;
+                return reinterpret_cast<uint64_t>(net);
+            };
+            uint8_t *a1 = nullptr, *a2 = nullptr;
+            const std::vector<uint64_t> enemies{make_enemy(1, a1), make_enemy(2, a2)};
+            animcull::g_pid = -1;
+            animcull::tick(enemies, true);          // starts resolution
+            animcull::wait();
+            animcull::tick(enemies, true);          // applies
+            int32_t m1 = -1, m2 = -1;
+            std::memcpy(&m1, a1 + 0x58, 4); std::memcpy(&m2, a2 + 0x58, 4);
+            CHECK(animcull::g_offset.load() == 0x58, "culling offset +0x%x", animcull::g_offset.load());
+            CHECK(m1 == 0 && m2 == 0, "AlwaysAnimate applied (%d %d)", m1, m2);
+            animcull::tick(enemies, false);
+            std::memcpy(&m1, a1 + 0x58, 4); std::memcpy(&m2, a2 + 0x58, 4);
+            CHECK(m1 == 1 && m2 == 2, "culling restored (%d %d)", m1, m2);
+        }
 
         // Every slot empty: no trace may invent an address, and the code dump must run.
         for (uint64_t slot : {fx::slot_get_start, fx::slot_set_end, fx::slot_get_fog, fx::slot_get_mode, fx::slot_get_color,

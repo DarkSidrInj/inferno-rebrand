@@ -72,6 +72,14 @@ namespace v100 {
     inline constexpr uint64_t rs_set_ambient_sky_injected = 0x75E48DC;        // 123619548
     inline constexpr uint64_t rs_get_render_settings_injected = 0x75E7F30;    // 123633456
 
+    // --- Animator culling (dump.cs RVAs; read by the interpreter, never called) -----------------
+    inline constexpr uint64_t model_animator = 0x28;                          // jgi.<fjwo> : Animator
+    inline constexpr uint64_t bindings_animator = 0x30;                       // CharacterBindings.<Animator>
+    inline constexpr uint64_t animator_get_culling_injected = 0x88323C4;      // static get_cullingMode_Injected(IntPtr)
+    inline constexpr uint64_t animator_set_culling_injected = 0x882E280;      // static set_cullingMode_Injected(IntPtr, mode)
+    inline constexpr uint64_t animator_get_culling = 0x88342A0;               // instance get_cullingMode()
+    inline constexpr uint64_t animator_set_culling = 0x882E200;               // instance set_cullingMode(mode)
+
     // --- Optional TypeInfo RVAs (ARM64 libunity). 0 = unknown, class name is used. ---
     // FILL (optional): script.json -> cim_TypeInfo / qak_TypeInfo / njg_TypeInfo / xmt_TypeInfo
     inline constexpr uint64_t grenade_typeinfo = 0;

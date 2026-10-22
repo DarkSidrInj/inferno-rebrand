@@ -17,7 +17,8 @@ namespace esp {
     inline ImVec4 distance_col = ImVec4(162/255.f, 144/255.f, 225/255.f, 1.f);
 
     inline bool skeleton = false;
-    inline bool skeleton_all = true;   // every bone of the rig, not just the humanoid ones
+    inline bool skeleton_all = true;   // every mapped bone (fingers, toes, jaw), never the weapon
+    inline bool skeleton_occlusion = true;  // keep enemy animators running behind walls
     inline float skeleton_thickness = 1.5f;
     inline ImVec4 skeleton_col = ImVec4(1.f, 1.f, 1.f, 1.f);
 

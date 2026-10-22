@@ -13,6 +13,7 @@
 #include <array>
 #include <cstring>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -30,19 +31,19 @@ namespace skeleton {
     struct Pose {
         std::array<Vector3, kCount> position{};
         std::array<bool, kCount> valid{};
-        std::vector<Node> nodes;  // every transform below the hips; empty unless g_all_bones
+        std::vector<Node> nodes;  // every mapped bone (fingers, toes...); empty unless g_all_bones
         long long stamp{};
         bool live{};  // false = last good pose being held
     };
 
     // What to read for one rig: the bones, every ancestor up to the hierarchy root and, with
-    // g_all_bones, everything below the root bone. Parents do not change, so a plan is made once
+    // g_all_bones, every other mapped bone. Parents do not change, so a plan is made once
     // per rebuild and a frame is only a few reads of the entries.
     struct Run { int first{}; int count{}; int start{}; int span{}; };  // read entries [start, start+span)
     struct Plan {
         std::vector<int> index;   // ascending hierarchy indices that are read
         std::vector<int> parent;  // position in `index` of the parent, -1 = none
-        std::vector<char> rig;    // 1 = at or below the root bone
+        std::vector<char> rig;    // 1 = a mapped bone drawn by "All bones"
         std::array<int, kCount> bone_pos{};  // position in `index`, -1 = bone not usable
         int root_pos{-1};
         std::vector<Run> runs;
@@ -61,6 +62,10 @@ namespace skeleton {
         Plan plan{};
         Pose pose{};
         std::string stage = "new";  // where the last attempt stopped, logged by draw_skeletons
+        // Every bone of the BonesDictionary in this rig (HumanBodyBones key, hierarchy index):
+        // fingers, toes, jaw and upper chest too. "All bones" draws exactly these, so props
+        // parented under a bone (the weapon in the hand) are never drawn.
+        std::vector<std::pair<int, int>> mapped;
     };
 
     inline std::unordered_map<uint64_t, Cache> g_cache;
@@ -70,7 +75,7 @@ namespace skeleton {
     inline constexpr int kMaxIndex = 262144;  // sanity bound for a transform index
     inline constexpr int kRunGap = 32;        // entries read between two indices rather than starting a new read
     inline constexpr float kRigRadius = 3.f;  // meters from the head; rejects transforms read past the end of the hierarchy
-    inline bool g_all_bones = true;           // compose and draw the whole rig
+    inline bool g_all_bones = true;           // also draw the non-humanoid-21 mapped bones (fingers, toes, jaw)
 
     struct BoneRef { int key{}; uint64_t managed{}; };
 
@@ -176,6 +181,7 @@ namespace skeleton {
         cache.min_index = 0;
         cache.max_index = 0;
         std::array<uint64_t, kCount> data_of{};
+        std::vector<std::tuple<int, int, uint64_t>> all;  // key, index, hierarchy
         int bad_native = 0, bad_data = 0, bad_index = 0;
         char trace[200] = "";
         int index_offset = -1;
@@ -187,10 +193,13 @@ namespace skeleton {
         const bool measured = index_offset >= 0;
         if (!measured) index_offset = l->index_offset;
         for (const BoneRef& ref : refs) {
-            if (ref.key >= kCount) continue;
             const uint64_t native = rpm<uint64_t>(ref.managed + v100::unity_cached_ptr);
             const uint64_t data = plausible(native) ? rpm<uint64_t>(native + uint64_t(l->data_offset)) : 0;
             const int index = plausible(native) ? rpm<int>(native + uint64_t(index_offset)) : -1;
+            if (ref.key >= kCount) {
+                if (plausible(data) && index >= 0 && index < kMaxIndex) all.emplace_back(ref.key, index, data);
+                continue;
+            }
             if (ref.key == Hips || (ref.key == Head && !trace[0]))
                 std::snprintf(trace, sizeof(trace), "bone %d managed=0x%llx native=0x%llx data=0x%llx index=%d",
                               ref.key, (unsigned long long)ref.managed, (unsigned long long)native,
@@ -201,6 +210,7 @@ namespace skeleton {
             data_of[ref.key] = data;
             cache.index_of[ref.key] = uint64_t(index);
             cache.known[ref.key] = true;
+            all.emplace_back(ref.key, index, data);
         }
         // The rig is one hierarchy; a bone that points elsewhere is not part of it.
         cache.data = data_of[Hips] ? data_of[Hips] : data_of[Head];
@@ -221,6 +231,9 @@ namespace skeleton {
             cache.max_index = std::max(cache.max_index, int(cache.index_of[i]));
         }
         if (usable == 0) cache.min_index = 0;
+        cache.mapped.clear();
+        for (const auto& bone : all)
+            if (std::get<2>(bone) == cache.data) cache.mapped.emplace_back(std::get<0>(bone), std::get<1>(bone));
         cache.built = now;
         cache.stage = usable >= 8 ? "rig found" : "fewer than 8 bones usable";
         return usable >= 8;
@@ -234,7 +247,8 @@ namespace skeleton {
     }
 
     // Reads the parents array only where the bones are: each bone's chain up to the hierarchy
-    // root, plus a window around the bones to find everything below the root bone.
+    // root. Only bones from the BonesDictionary are planned, so nothing parented under them
+    // (weapons, attachments) is ever read or drawn.
     inline bool make_plan(const Cache& cache, Plan& plan) {
         plan = Plan{};
         plan.bone_pos.fill(-1);
@@ -256,50 +270,34 @@ namespace skeleton {
 
         std::vector<int> wanted;
         std::array<bool, kCount> chain_ok{};
-        for (int bone = 0; bone < kCount; ++bone) {
-            if (!cache.known[bone]) continue;
-            int i = int(cache.index_of[bone]);
+        // A bone is usable when its parent chain reaches the hierarchy root.
+        auto chain = [&](int i) {
             for (int guard = 0; guard < 128; ++guard) {
                 wanted.push_back(i);
                 const int p = parent_at(i);
-                if (p == -1) { chain_ok[bone] = true; break; }
-                if (p < 0) break;
+                if (p == -1) return true;
+                if (p < 0) return false;
                 i = p;
             }
-        }
+            return false;
+        };
+        for (int bone = 0; bone < kCount; ++bone)
+            if (cache.known[bone]) chain_ok[bone] = chain(int(cache.index_of[bone]));
 
+        // The rig drawn by "All bones": every mapped bone with a full chain (the 21 humanoid
+        // bones when the cache carries no mapping, as in hand-built caches).
+        std::vector<int> rig_bones;
+        if (g_all_bones) {
+            if (!cache.mapped.empty()) {
+                for (const auto& bone : cache.mapped) if (chain(bone.second)) rig_bones.push_back(bone.second);
+            } else {
+                for (int bone = 0; bone < kCount; ++bone)
+                    if (cache.known[bone] && chain_ok[bone]) rig_bones.push_back(int(cache.index_of[bone]));
+            }
+        }
         int root = -1;
         for (int bone : {Hips, Spine, Chest, Neck, Head})
             if (cache.known[bone] && chain_ok[bone]) { root = int(cache.index_of[bone]); break; }
-        std::vector<int> below;
-        if (g_all_bones && root >= 0) {
-            const int lo = std::max(0, cache.min_index - 64);
-            int span = std::min(cache.max_index + 512 - lo, 4096);
-            std::vector<int> window;
-            for (; span >= 64; span /= 2) {
-                window.assign(size_t(span), -2);
-                if (mem_read(parents + uint64_t(lo) * 4, window.data(), size_t(span) * 4)) break;
-                window.clear();
-            }
-            for (size_t k = 0; k < window.size(); ++k) {
-                int p = window[k];
-                const int i = lo + int(k);
-                if (p < -1 || p >= kMaxIndex || p == i) p = -2;
-                parent_of.emplace(i, p);
-            }
-            for (size_t k = 0; k < window.size(); ++k) {
-                std::vector<int> path;
-                int cur = lo + int(k);
-                bool under = false;
-                for (int guard = 0; guard < 64 && cur >= 0; ++guard) {
-                    path.push_back(cur);
-                    if (cur == root) { under = true; break; }
-                    cur = parent_at(cur);
-                }
-                if (under) below.insert(below.end(), path.begin(), path.end());
-            }
-            wanted.insert(wanted.end(), below.begin(), below.end());
-        }
 
         std::sort(wanted.begin(), wanted.end());
         wanted.erase(std::unique(wanted.begin(), wanted.end()), wanted.end());
@@ -315,8 +313,8 @@ namespace skeleton {
             const auto found = p >= 0 ? pos_of.find(p) : pos_of.end();
             plan.parent[k] = found != pos_of.end() ? found->second : -1;
         }
-        for (int i : below) plan.rig[size_t(pos_of[i])] = 1;
-        if (root >= 0) { plan.root_pos = pos_of[root]; plan.rig[size_t(plan.root_pos)] = 1; }
+        for (int i : rig_bones) plan.rig[size_t(pos_of[i])] = 1;
+        if (root >= 0) plan.root_pos = pos_of[root];
         int placed = 0;
         for (int bone = 0; bone < kCount; ++bone) {
             if (!cache.known[bone] || !chain_ok[bone]) continue;
@@ -411,7 +409,7 @@ namespace skeleton {
         const bool ok = composed >= 8 && out.valid[Head];
 
         out.nodes.clear();
-        if (g_all_bones && ok && plan.root_pos >= 0) {
+        if (g_all_bones && ok) {
             const Vector3& head = out.position[Head];
             std::vector<int> node_of(count, -1);
             for (size_t pos = 0; pos < count; ++pos) {
@@ -421,9 +419,12 @@ namespace skeleton {
                 node_of[pos] = int(out.nodes.size());
                 out.nodes.push_back({wpos[pos], plan.index[pos], -1});
             }
+            // Link each drawn bone to its nearest drawn ancestor (fingers to the hand, the hand
+            // to the lower arm), skipping unmapped helper transforms in between.
             for (size_t pos = 0; pos < count; ++pos) {
-                if (node_of[pos] < 0 || int(pos) == plan.root_pos) continue;
-                const int p = plan.parent[pos];
+                if (node_of[pos] < 0) continue;
+                int p = plan.parent[pos];
+                for (int guard = 0; p >= 0 && node_of[size_t(p)] < 0 && guard < 64; ++guard) p = plan.parent[size_t(p)];
                 if (p >= 0) out.nodes[size_t(node_of[pos])].parent = node_of[size_t(p)];
             }
         }

@@ -3,6 +3,7 @@
 #include "../CMath/CGameMath.hpp"
 #include "../CGame/CPlayer.hpp"
 #include "../CGame/CSkeleton.hpp"
+#include "../CGame/CAnimCull.hpp"
 #include "../CGame/CWorld.hpp"
 #include "../CMenu/Theme/CTheme.hpp"
 #include "../CConfigs/CConfig.hpp"
@@ -116,6 +117,7 @@ namespace {
 void visuals::draw_skeletons(const matrix& view, const matrix& projection, const std::vector<uint64_t>& enemies) {
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
     skeleton::g_all_bones = cfg::esp::skeleton_all;
+    animcull::tick(enemies, cfg::esp::skeleton_occlusion);
     for (uint64_t enemy : enemies) {
         const Vector3 feet = player::position(enemy);
         Pose pose;
