@@ -22,9 +22,13 @@ namespace skeleton {
         kCount
     };
 
+    // One transform of the animated rig, for drawing every bone and not just the humanoid ones.
+    struct Node { Vector3 position; int index{}; int parent{-1}; };  // parent = index into Pose::nodes, -1 = none
+
     struct Pose {
         std::array<Vector3, kCount> position{};
         std::array<bool, kCount> valid{};
+        std::vector<Node> nodes;  // every transform below the hips; empty unless g_all_bones
         long long stamp{};
         bool live{};  // false = last good pose being held
     };
@@ -44,6 +48,8 @@ namespace skeleton {
     inline uint64_t g_dict_offset = 0;
     inline constexpr long long kRebuildMs = 1000;
     inline constexpr long long kHoldMs = 1000;
+    inline constexpr float kRigRadius = 3.f;  // meters from the head; rejects transforms read past the end of the hierarchy
+    inline bool g_all_bones = true;           // compose and draw the whole rig
 
     struct BoneRef { int key{}; uint64_t managed{}; };
 
@@ -147,6 +153,84 @@ namespace skeleton {
         return usable >= 8;
     }
 
+    inline Vector4 qmul(const Vector4& a, const Vector4& b) {
+        return Vector4(a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+                       a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+                       a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+                       a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z);
+    }
+
+    // Every transform below the hips (or the highest humanoid bone that is mapped): the whole
+    // animated rig, with each node linked to its parent. World transforms are composed once per
+    // node from its parent's, so the cost is one pass over the hierarchy.
+    inline void compose_rig(const Cache& cache, const std::vector<player::TransformEntry>& table,
+                            const std::vector<int>& parent_of, int n, Pose& out) {
+        out.nodes.clear();
+        int root = -1;
+        for (int bone : {Hips, Spine, Chest, Neck, Head})
+            if (cache.known[bone]) { root = int(cache.index_of[bone]); break; }
+        if (root < 0 || root >= n) return;
+
+        const size_t count = size_t(n);
+        std::vector<Vector3> wpos(count);
+        std::vector<Vector4> wrot(count), wscale(count);
+        std::vector<uint8_t> state(count, 0);  // 0 = todo, 1 = composed, 2 = unusable
+        std::vector<int> chain;
+        auto resolve = [&](int i) {
+            chain.clear();
+            int cur = i, guard = 0;
+            while (cur >= 0 && cur < n && state[size_t(cur)] == 0 && guard++ < 128) {
+                chain.push_back(cur);
+                cur = parent_of[size_t(cur)];
+            }
+            bool ok = guard < 128 && (cur < 0 || (cur < n && state[size_t(cur)] == 1));
+            for (size_t k = chain.size(); k-- > 0;) {
+                const int idx = chain[k];
+                const auto& e = table[size_t(idx)];
+                const int p = parent_of[size_t(idx)];
+                if (!ok || !player::entry_valid(e) || (p >= 0 && (p >= n || state[size_t(p)] != 1))) {
+                    state[size_t(idx)] = 2;
+                    ok = false;
+                    continue;
+                }
+                if (p < 0) {
+                    wpos[size_t(idx)] = Vector3(e.position.x, e.position.y, e.position.z);
+                    wrot[size_t(idx)] = e.rotation;
+                    wscale[size_t(idx)] = e.scale;
+                } else {
+                    const Vector4& ps = wscale[size_t(p)];
+                    const Vector3 scaled(e.position.x * ps.x, e.position.y * ps.y, e.position.z * ps.z);
+                    wpos[size_t(idx)] = wpos[size_t(p)] + player::rotate(wrot[size_t(p)], scaled);
+                    wrot[size_t(idx)] = qmul(wrot[size_t(p)], e.rotation);
+                    wscale[size_t(idx)] = Vector4(ps.x * e.scale.x, ps.y * e.scale.y, ps.z * e.scale.z, 0.f);
+                }
+                state[size_t(idx)] = 1;
+            }
+            return state[size_t(i)] == 1;
+        };
+        auto below_root = [&](int i) {
+            for (int cur = i, guard = 0; cur >= 0 && cur < n && guard++ < 64; cur = parent_of[size_t(cur)])
+                if (cur == root) return true;
+            return false;
+        };
+
+        const Vector3& head = out.position[Head];
+        std::vector<int> node_of(count, -1);
+        for (int i = 0; i < n; ++i) {
+            if (!below_root(i) || !resolve(i)) continue;
+            const Vector3& at = wpos[size_t(i)];
+            if (!std::isfinite(at.x) || !std::isfinite(at.y) || !std::isfinite(at.z)) continue;
+            const float dx = at.x - head.x, dy = at.y - head.y, dz = at.z - head.z;
+            if (dx * dx + dy * dy + dz * dz > kRigRadius * kRigRadius) continue;
+            node_of[size_t(i)] = int(out.nodes.size());
+            out.nodes.push_back({at, i, -1});
+        }
+        for (Node& node : out.nodes) {
+            const int p = parent_of[size_t(node.index)];
+            node.parent = (p >= 0 && p < n && node.index != root) ? node_of[size_t(p)] : -1;
+        }
+    }
+
     // Composes every cached bone from one read of the hierarchy arrays.
     inline bool update(Cache& cache, Pose& out) {
         const auto* l = layout();
@@ -196,7 +280,10 @@ namespace skeleton {
             out.valid[bone] = true;
             ++composed;
         }
-        return composed >= 8 && out.valid[Head];
+        const bool ok = composed >= 8 && out.valid[Head];
+        if (g_all_bones && ok) compose_rig(cache, table, parent_of, n, out);
+        else out.nodes.clear();
+        return ok;
     }
 
     // A culled animator stops updating the bones of players you cannot see. Accept a pose

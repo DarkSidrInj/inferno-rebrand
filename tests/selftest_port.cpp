@@ -146,6 +146,36 @@ int main() {
     CHECK(r3.holder == reinterpret_cast<uint64_t>(holder), "holder");
     CHECK(game_camera::acquire(players, reinterpret_cast<uint64_t>(net), r3), "cached acquire");
 
+    // ---- 9. whole rig: every node below the hips, composed like the reference decode --------------
+    {
+        skeleton::Pose rig{};
+        rig.position[skeleton::Head] = Vector3(0.f, 0.f, 0.f);  // radius test is exercised below
+        std::vector<player::TransformEntry> table(entries, entries + n);
+        std::vector<int> parent_of(parents, parents + n);
+        skeleton::compose_rig(cache, table, parent_of, n, rig);
+        CHECK(rig.nodes.empty() || rig.nodes.size() < size_t(n), "radius around a far head keeps few nodes");
+
+        skeleton::Pose full{};
+        full.position[skeleton::Head] = pose.position[skeleton::Head];
+        skeleton::compose_rig(cache, table, parent_of, n, full);
+        CHECK(full.nodes.size() > 5, "rig nodes=%zu", full.nodes.size());
+        int linked = 0, matched = 0;
+        for (const auto& node : full.nodes) {
+            uint8_t* nativ = static_cast<uint8_t*>(calloc(1, 0x100));
+            *reinterpret_cast<uint64_t*>(nativ + 0x38) = reinterpret_cast<uint64_t>(hierarchy);
+            *reinterpret_cast<int*>(nativ + 0x40) = node.index;
+            Vector3 ref{};
+            if (player::decode_transform(reinterpret_cast<uint64_t>(nativ), 0x38, 0x40, 0x18, 0x20, ref) &&
+                std::fabs(ref.x - node.position.x) + std::fabs(ref.y - node.position.y) + std::fabs(ref.z - node.position.z) < 1e-3f) ++matched;
+            if (node.parent >= 0) {
+                ++linked;
+                CHECK(full.nodes[size_t(node.parent)].index == parents[node.index], "parent link index=%d", node.index);
+            }
+        }
+        CHECK(matched == int(full.nodes.size()), "rig matched %d of %zu", matched, full.nodes.size());
+        CHECK(linked >= int(full.nodes.size()) - 1, "linked=%d nodes=%zu", linked, full.nodes.size());
+    }
+
     // ---- 7. find_model: jgi directly in the parts, and jgi behind a vds part at +0x58 ------------
     {
         const uint64_t jgi_class = rpm<uint64_t>(proc::lib + v100::model_typeinfo);

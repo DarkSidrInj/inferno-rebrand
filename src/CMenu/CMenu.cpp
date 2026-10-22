@@ -63,6 +63,8 @@ namespace ui::menu {
         separator(a);
         checkbox("Skeleton", &cfg::esp::skeleton, a);
         separator(a);
+        checkbox("All bones", &cfg::esp::skeleton_all, a);
+        separator(a);
         checkbox("Grenades", &cfg::esp::grenade, a);
         separator(a);
         checkbox("Dropped weapons", &cfg::esp::dropped, a);

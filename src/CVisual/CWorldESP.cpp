@@ -53,17 +53,34 @@ namespace {
         const ImU32 outline = IM_COL32(0, 0, 0, int(190.f * alpha));
         const ImU32 bone = tint(cfg::esp::skeleton_col, alpha);
 
-        // Outline first, so no dark seam cuts the joints of the coloured pass.
-        for (const Link& link : links) {
-            if (link.a == link.b || !visible[link.a] || !visible[link.b]) continue;
-            dl->AddLine(screen[link.a], screen[link.b], outline, width + 2.2f);
+        if (cfg::esp::skeleton_all && pose.nodes.size() > 1) {
+            // Whole rig: every transform below the hips, each linked to its parent.
+            std::vector<ImVec2> rig(pose.nodes.size());
+            std::vector<char> rig_visible(pose.nodes.size());
+            for (size_t i = 0; i < pose.nodes.size(); ++i)
+                rig_visible[i] = world_to_screen(pose.nodes[i].position, view, projection, rig[i]);
+            for (int pass = 0; pass < 2; ++pass) {
+                const ImU32 color = pass == 0 ? outline : bone;
+                const float line = pass == 0 ? width + 2.2f : width;
+                for (size_t i = 0; i < pose.nodes.size(); ++i) {
+                    const int parent = pose.nodes[i].parent;
+                    if (parent < 0 || !rig_visible[i] || !rig_visible[size_t(parent)]) continue;
+                    dl->AddLine(rig[i], rig[size_t(parent)], color, line);
+                }
+            }
+        } else {
+            // Outline first, so no dark seam cuts the joints of the coloured pass.
+            for (const Link& link : links) {
+                if (link.a == link.b || !visible[link.a] || !visible[link.b]) continue;
+                dl->AddLine(screen[link.a], screen[link.b], outline, width + 2.2f);
+            }
+            for (const Link& link : links) {
+                if (link.a == link.b || !visible[link.a] || !visible[link.b]) continue;
+                dl->AddLine(screen[link.a], screen[link.b], bone, width);
+            }
+            for (int i = 0; i < kCount; ++i)
+                if (visible[i] && i != Head) dl->AddCircleFilled(screen[i], width * .75f, bone, 10);
         }
-        for (const Link& link : links) {
-            if (link.a == link.b || !visible[link.a] || !visible[link.b]) continue;
-            dl->AddLine(screen[link.a], screen[link.b], bone, width);
-        }
-        for (int i = 0; i < kCount; ++i)
-            if (visible[i] && i != Head) dl->AddCircleFilled(screen[i], width * .75f, bone, 10);
 
         // Head ring, sized by the neck-to-head distance on screen.
         if (visible[Head] && visible[Neck]) {
@@ -98,6 +115,7 @@ namespace {
 
 void visuals::draw_skeletons(const matrix& view, const matrix& projection, const std::vector<uint64_t>& enemies) {
     ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    skeleton::g_all_bones = cfg::esp::skeleton_all;
     for (uint64_t enemy : enemies) {
         const Vector3 feet = player::position(enemy);
         Pose pose;
