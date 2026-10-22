@@ -27,6 +27,13 @@ namespace esp {
     inline float world_distance = 60.f;  // meters, grenades and dropped weapons
 }
 
+namespace fog {
+    inline bool enabled = false;
+    inline float min_distance = 20.f;    // meters: closer than this keeps its own color
+    inline float max_distance = 150.f;   // meters: at or beyond this it is fully fogged
+    inline ImVec4 color = ImVec4(0.12f, 0.13f, 0.16f, 1.f);  // estimated fog color
+}
+
 }
 
 

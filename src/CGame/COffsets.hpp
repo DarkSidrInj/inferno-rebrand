@@ -43,6 +43,8 @@ namespace v100 {
     // --- Player model -> bones -------------------------------------------------------
     inline constexpr uint64_t model_bindings = 0x30;        // jgi.CharacterBindings    (skeed 0x18)
     inline constexpr uint64_t bindings_bones = 0x20;        // CharacterBindings._bones (skeed 0x10)
+    // jgi is not always a direct parts entry: the chx part vds keeps it at +0x58 (vds.jyfd).
+    inline constexpr uint64_t part_model = 0x58;            // vds.jyfd : jgi           (dump.cs)
     // BonesDictionary = SerializableDictionary<HumanBodyBones, Transform>. Its inner
     // Dictionary sits at 0x10 (skeed 0x08). Generic layout is not in the dump, so the
     // reader probes 0x10..0x30 and logs the offset it settles on (verify).

@@ -7,6 +7,7 @@
 
 #include "CGameContext.hpp"
 #include "CPlayer.hpp"
+#include "CCamera.hpp"
 #include "COffsets.hpp"
 #include <array>
 #include <cstring>
@@ -45,16 +46,18 @@ namespace skeleton {
 
     struct BoneRef { int key{}; uint64_t managed{}; };
 
+    // jgi is either a parts entry itself or the field vds.jyfd (+0x58) of a chx part, and
+    // chx parts live in the wmz arrays as well as the rct list. Search all of them.
     inline uint64_t find_model(uint64_t p) {
         const uint64_t model_class = rpm<uint64_t>(proc::lib + v100::model_typeinfo);
-        const uint64_t container = rpm<uint64_t>(p + v100::player_parts);
-        const uint64_t list = rpm<uint64_t>(container + v100::parts_list);
-        const int count = rpm<int>(list + v100::list_count);
-        const uint64_t array = rpm<uint64_t>(list + v100::list_items);
-        if (!model_class || !plausible(array) || count <= 0 || count > 64) return 0;
-        for (int i = 0; i < count; ++i) {
-            const uint64_t part = rpm<uint64_t>(array + v100::array_data + uint64_t(i) * 8);
+        if (!plausible(model_class)) return 0;
+        std::vector<uint64_t> parts;
+        parts.reserve(128);
+        game_camera::collect_parts(p, parts);
+        for (uint64_t part : parts) {
             if (exact_class(part, model_class)) return part;
+            const uint64_t model = rpm<uint64_t>(part + v100::part_model);
+            if (plausible(model) && exact_class(model, model_class)) return model;
         }
         return 0;
     }

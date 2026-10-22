@@ -79,6 +79,11 @@ namespace ui::menu {
         separator(a);
         colorpick("Distance color", &cfg::esp::distance_col, a);
         separator(a);
+        checkbox("Distance fog", &cfg::fog::enabled, a);
+        slider("Fog min distance", &cfg::fog::min_distance, 0.f, 200.f, a, "%.0f m");
+        slider("Fog max distance", &cfg::fog::max_distance, 10.f, 400.f, a, "%.0f m");
+        colorpick("Fog color", &cfg::fog::color, a);
+        separator(a);
         slider("Skeleton width", &cfg::esp::skeleton_thickness, 1.f, 4.f, a, "%.1f");
         separator(a);
         colorpick("Skeleton color", &cfg::esp::skeleton_col, a);
