@@ -51,6 +51,27 @@ namespace v100 {
     inline constexpr uint64_t bones_dict_probe_first = 0x10;
     inline constexpr uint64_t bones_dict_probe_last = 0x30;
 
+    // --- UnityEngine.RenderSettings il2cpp wrappers (script.json, same base as the TypeInfo RVAs) ---
+    // Only read, never called: the interpreter in CUtils/CArm64.hpp walks them to the native
+    // RenderSettings fields.
+    inline constexpr uint64_t rs_get_fog = 0x7612954;                         // 123808084
+    inline constexpr uint64_t rs_set_fog = 0x75F0BD4;                         // 123669460
+    inline constexpr uint64_t rs_get_fog_start = 0x7616F70;                   // 123826032
+    inline constexpr uint64_t rs_set_fog_start = 0x760D93C;                   // 123787580
+    inline constexpr uint64_t rs_get_fog_end = 0x7601480;                     // 123737216
+    inline constexpr uint64_t rs_set_fog_end = 0x76134EC;                     // 123811052
+    inline constexpr uint64_t rs_get_fog_mode = 0x76145A0;                    // 123815328
+    inline constexpr uint64_t rs_set_fog_mode = 0x75EA52C;                    // 123643180
+    inline constexpr uint64_t rs_get_fog_density = 0x760B268;                 // 123777640
+    inline constexpr uint64_t rs_set_fog_density = 0x76096D0;                 // 123770576
+    inline constexpr uint64_t rs_get_fog_color_injected = 0x760C044;          // 123781188
+    inline constexpr uint64_t rs_set_fog_color_injected = 0x75FDE94;          // 123723412
+    inline constexpr uint64_t rs_get_ambient_equator_injected = 0x760993C;    // 123771196
+    inline constexpr uint64_t rs_set_ambient_equator_injected = 0x76030B8;    // 123744440
+    inline constexpr uint64_t rs_get_ambient_sky_injected = 0x7609EF4;        // 123772660
+    inline constexpr uint64_t rs_set_ambient_sky_injected = 0x75E48DC;        // 123619548
+    inline constexpr uint64_t rs_get_render_settings_injected = 0x75E7F30;    // 123633456
+
     // --- Optional TypeInfo RVAs (ARM64 libunity). 0 = unknown, class name is used. ---
     // FILL (optional): script.json -> cim_TypeInfo / qak_TypeInfo / njg_TypeInfo / xmt_TypeInfo
     inline constexpr uint64_t grenade_typeinfo = 0;
