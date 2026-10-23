@@ -19,6 +19,12 @@
 #include <string>
 #include <vector>
 
+// Normally defined by draw.cpp (ImGui_init loads the fonts there). The weak definitions keep the menu building and
+// running, with the default font and without icons, when an older draw.cpp / draw.h is still in the tree.
+__attribute__((weak)) ImFont* nlText = nullptr;
+__attribute__((weak)) ImFont* nlBold = nullptr;
+__attribute__((weak)) ImFont* nlIcons = nullptr;
+
 namespace ui::menu {
 namespace {
     constexpr ImVec2 kShell(748.f, 576.f);
@@ -92,7 +98,8 @@ namespace {
     float Z(float v) { return v * fr.s; }
     ImFont* text_font() { return nlText ? nlText : ImGui::GetFont(); }
     ImFont* bold_font() { return nlBold ? nlBold : ImGui::GetFont(); }
-    ImFont* icon_font() { return nlIcons ? nlIcons : ImGui::GetFont(); }
+    // An icon of the icon font; nothing when that font is not there (its codes would be boxes in the others).
+    void icon(float x, float y, float h, ImU32 color, const char* glyph, float size);
 
     ImU32 mix(ImU32 a, ImU32 b, float t) {
         return ImGui::ColorConvertFloat4ToU32(ImLerp(ImGui::ColorConvertU32ToFloat4(a), ImGui::ColorConvertU32ToFloat4(b), ImSaturate(t)));
@@ -118,6 +125,10 @@ namespace {
         ImFont* f = font ? font : text_font();
         const float th = f->CalcTextSizeA(Z(size), FLT_MAX, 0.f, value).y / fr.s;
         text(x, y + std::floor((h - th) * 0.5f), color, value, size, f);
+    }
+
+    void icon(float x, float y, float h, ImU32 color, const char* glyph, float size) {
+        if (nlIcons) text_mid(x, y, h, color, glyph, size, nlIcons);
     }
 
     void rect(float x, float y, float w, float h, ImU32 color, float r = 0.f, ImDrawFlags flags = 0) {
@@ -150,11 +161,6 @@ namespace {
     void chevron_down(float x, float y, ImU32 color) {
         line(x, y, x + 4, y + 4, color, 1.f);
         line(x + 4, y + 4, x + 8, y, color, 1.f);
-    }
-
-    void check(float x, float y, ImU32 color) {
-        line(x, y, x + 3, y + 3, color, 1.5f);
-        line(x + 3, y + 3, x + 8, y - 3, color, 1.5f);
     }
 
     // ---- controls ----------------------------------------------------------------------------------
@@ -711,7 +717,7 @@ namespace {
         line(10, 56, 147, 56, C(28, 31, 41));
         text(16, 67, C(91, 96, 108), "COMMON", kCaption);
 
-        auto nav = [&](int id, const char* icon, const char* label, float y, Page target, bool selected, float indent = 0.f) {
+        auto nav = [&](int id, const char* glyph, const char* label, float y, Page target, bool selected, float indent = 0.f) {
             const float x = 7 + indent, w = 140 - indent;
             ImGui::PushID(id);
             bool hover = false;
@@ -720,7 +726,7 @@ namespace {
             ImGui::PopID();
             if (clicked) change_page(target);
             if (r > 0.001f) rect(x, y, w, 30, mix(C(18, 21, 30, 0), C(39, 43, 54), r), 6);
-            text_mid(x + 10, y, 30, mix(C(137, 142, 153), C(82, 141, 255), r), icon, kIcon, icon_font());
+            icon(x + 10, y, 30, mix(C(137, 142, 153), C(82, 141, 255), r), glyph, kIcon);
             text_mid(x + 31, y, 30, mix(C(145, 149, 159), C(226, 228, 235), r), label, kBody);
         };
 
@@ -780,7 +786,7 @@ namespace {
         line(158, 56, 748, 56, C(27, 30, 39));
         rect(169, 14, 166, 30, C(17, 19, 27), 6);
         outline(169, 14, 166, 30, C(28, 31, 41), 6);
-        text_mid(181, 14, 30, C(194, 197, 206), page_icon(), kIcon, icon_font());
+        icon(181, 14, 30, C(194, 197, 206), page_icon(), kIcon);
         text_mid(217, 14, 30, C(184, 187, 197), page_title(), kControl);
         chevron(317, 25, C(130, 135, 146));
         // the search glass of the original, here the status of the bar toggle
