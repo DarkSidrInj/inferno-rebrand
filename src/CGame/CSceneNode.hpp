@@ -116,7 +116,57 @@ namespace scenenode {
     }
 
     // ---- AoS ----------------------------------------------------------------------------------------
-    inline bool find_aos(const std::vector<Ref>& refs, Layout& out) {
+    // Renderers without a scene index (index < 0) are found in the node array by their pointer, once
+    // the array's geometry is known from the ones that have one.
+    inline constexpr int kMaxNodes = 4096;  // nodes searched for a renderer pointer
+
+    inline int node_slot_index(const Layout& l, uint64_t renderer) {
+        if (l.soa || l.stride <= 0) return -1;
+        std::vector<uint64_t> words;
+        for (int first = 0; first < kMaxNodes; first += 128) {
+            const int count = 128;
+            std::vector<uint8_t> raw(size_t(count) * size_t(l.stride));
+            if (!mem_read(l.base + uint64_t(first) * uint64_t(l.stride), raw.data(), raw.size())) continue;
+            for (int k = 0; k < count; ++k) {
+                uint64_t ptr = 0;
+                std::memcpy(&ptr, raw.data() + size_t(k) * size_t(l.stride), 8);
+                if (ptr == renderer) return first + k;
+            }
+        }
+        return -1;
+    }
+
+    // Is `index` still this renderer's node?
+    inline bool node_is(const Layout& l, int index, uint64_t renderer) {
+        if (index < 0) return false;
+        if (l.soa) return index_of(renderer) == index;
+        return rpm<uint64_t>(l.base + uint64_t(index) * uint64_t(l.stride)) == renderer;
+    }
+
+    // The scene node of a renderer: its index field when the node holds its pointer, otherwise a search
+    // of the node array (cached; a miss is not searched again for two seconds).
+    inline int node_index(const Layout& l, uint64_t renderer) {
+        const int index = index_of(renderer);
+        if (l.soa) return index;
+        auto holds = [&](int i) { return i >= 0 && rpm<uint64_t>(l.base + uint64_t(i) * uint64_t(l.stride)) == renderer; };
+        if (holds(index)) return index;
+        struct Entry { int index; long long when; };
+        static std::unordered_map<uint64_t, Entry> cache;
+        static uint64_t cache_base = 0;
+        if (cache_base != l.base) { cache.clear(); cache_base = l.base; }
+        const long long now = diag::now_ms();
+        const auto it = cache.find(renderer);
+        if (it != cache.end()) {
+            if (holds(it->second.index)) return it->second.index;
+            if (now - it->second.when < 2000) return -1;
+        }
+        const int found = node_slot_index(l, renderer);
+        cache[renderer] = {found, now};
+        if (cache.size() > 256) cache.clear();
+        return found;
+    }
+
+    inline bool find_aos(std::vector<Ref> refs, Layout& out) {
         if (refs.size() < 6) return false;
         std::vector<uint64_t> sorted;
         for (const Ref& r : refs) sorted.push_back(r.renderer);
@@ -142,12 +192,33 @@ namespace scenenode {
                 at += chunk;
             }
         }
-        // Node size from pairs of renderers, verified against all of them.
+        {
+            size_t with_hits = 0, total_hits = 0;
+            for (const Ref& r : refs) { const auto it = hits.find(r.renderer); if (it != hits.end() && !it->second.empty()) { ++with_hits; total_hits += it->second.size(); } }
+            diag::log("SCENE", "pointer search: %zu renderers, %zu with a pointer somewhere in memory (%zu pointers)", refs.size(), with_hits, total_hits);
+            int shown = 0;
+            for (const Ref& r : refs) {
+                const auto it = hits.find(r.renderer);
+                if (it == hits.end() || it->second.empty() || shown >= 3) continue;
+                ++shown;
+                const uint64_t at = it->second.front();
+                uint64_t around[12]{};
+                mem_read(at - 32, around, sizeof(around));
+                diag::log("SCENE", "  renderer 0x%llx index %d layer %d: pointer at 0x%llx: %016llx %016llx %016llx %016llx [%016llx] %016llx %016llx %016llx",
+                          (unsigned long long)r.renderer, r.index, r.layer, (unsigned long long)at,
+                          (unsigned long long)around[0], (unsigned long long)around[1], (unsigned long long)around[2], (unsigned long long)around[3],
+                          (unsigned long long)around[4], (unsigned long long)around[5], (unsigned long long)around[6], (unsigned long long)around[7]);
+            }
+        }
+        // Node size from pairs of renderers that have an index, verified against all of them.
         Layout best;
-        int best_matched = 0;
+        int best_matched = 0, indexed = 0;
         uint64_t best_slot0 = 0;
+        for (const Ref& r : refs) indexed += r.index >= 0;
         for (size_t a = 0; a < refs.size(); ++a) {
+            if (refs[a].index < 0) continue;
             for (size_t b = a + 1; b < refs.size(); ++b) {
+                if (refs[b].index < 0) continue;
                 const int di = refs[a].index - refs[b].index;
                 if (di == 0) continue;
                 for (uint64_t ha : hits[refs[a].renderer]) {
@@ -159,6 +230,7 @@ namespace scenenode {
                         const uint64_t slot0 = ha - uint64_t(refs[a].index) * uint64_t(stride);
                         int matched = 0;
                         for (const Ref& r : refs) {
+                            if (r.index < 0) continue;
                             const uint64_t want = slot0 + uint64_t(r.index) * uint64_t(stride);
                             const auto& list = hits[r.renderer];
                             matched += std::find(list.begin(), list.end(), want) != list.end();
@@ -173,21 +245,40 @@ namespace scenenode {
                 }
             }
         }
-        if (best_matched < 6 || best_matched * 5 < int(refs.size()) * 4) return false;
-        // The layer field: the bytes of every verified node, one offset that reproduces all layers.
+        if (best_matched < 6 || best_matched * 5 < indexed * 4) {
+            diag::log("SCENE", "no node array: best stride %d matched %d of %d indexed renderers", best.stride, best_matched, indexed);
+            return false;
+        }
         const int stride = best.stride;
+        // The renderers without an index: their pointer sitting on a node boundary of this array.
+        int derived = 0;
+        for (Ref& r : refs) {
+            if (r.index >= 0) continue;
+            for (uint64_t h : hits[r.renderer]) {
+                if (h < best_slot0 || (h - best_slot0) % uint64_t(stride)) continue;
+                const uint64_t k = (h - best_slot0) / uint64_t(stride);
+                if (k >= uint64_t(kMaxNodes)) continue;
+                r.index = int(k);
+                ++derived;
+                break;
+            }
+        }
+        diag::log("SCENE", "node array: stride %d, %d renderers matched, %d more placed by their pointer", stride, best_matched, derived);
+        // The layer field: the bytes of every node, one offset that reproduces all layers.
         std::vector<std::vector<uint8_t>> nodes;
         std::vector<const Ref*> used;
         for (const Ref& r : refs) {
+            if (r.index < 0) continue;
             const uint64_t slot = best_slot0 + uint64_t(r.index) * uint64_t(stride);
-            const auto& list = hits[r.renderer];
-            if (std::find(list.begin(), list.end(), slot) == list.end()) continue;
+            if (rpm<uint64_t>(slot) != r.renderer) continue;
             std::vector<uint8_t> bytes(size_t(stride) * 3);
             if (!mem_read(slot - uint64_t(stride), bytes.data(), bytes.size())) continue;
             nodes.push_back(std::move(bytes));
             used.push_back(&r);
         }
-        if (used.size() < 6) return false;
+        int eights = 0, zeros = 0;
+        for (const Ref* r : used) { eights += r->layer == 8; zeros += r->layer == 0; }
+        if (used.size() < 6) { diag::log("SCENE", "too few nodes to read a layer field (%zu)", used.size()); return false; }
         const struct { int width; bool mask; } forms[] = {{1, false}, {4, false}, {4, true}};
         for (const auto& form : forms) {
             for (int rel = -stride; rel + form.width <= 2 * stride; rel += form.width == 4 ? 4 : 1) {
@@ -204,7 +295,23 @@ namespace scenenode {
                 out.mask = form.mask;
                 out.refs = int(used.size());
                 out.how = "AoS";
+                diag::log("SCENE", "layer field at %+d bytes from the renderer pointer, %d byte(s), %s, verified on %zu nodes (%d on layer 8, %d on layer 0)",
+                          rel, form.width, form.mask ? "mask" : "layer", used.size(), eights, zeros);
                 return true;
+            }
+        }
+        diag::log("SCENE", "no layer field reproduces the layers of %zu nodes (%d on layer 8, %d on layer 0)", used.size(), eights, zeros);
+        if (!nodes.empty()) {
+            // The first node of each kind, as bytes, to read the structure offline.
+            for (int want : {8, 0}) {
+                for (size_t k = 0; k < used.size(); ++k) {
+                    if (used[k]->layer != want) continue;
+                    std::string text;
+                    char b[12];
+                    for (int i = 0; i < stride; i += 4) { uint32_t v; std::memcpy(&v, nodes[k].data() + stride + i, 4); std::snprintf(b, sizeof(b), "%08x ", v); text += b; }
+                    diag::log("SCENE", "  node of a layer-%d renderer (index %d): %s", want, used[k]->index, text.c_str());
+                    break;
+                }
             }
         }
         return false;
@@ -219,12 +326,14 @@ namespace scenenode {
     }
 
     inline bool calibrate(const std::vector<Ref>& refs, Layout& out) {
-        // At least a few of each kind or the layers prove nothing.
-        int eights = 0, zeros = 0;
-        for (const Ref& r : refs) { eights += r.layer == 8; zeros += r.layer == 0; }
-        if (eights < 1 || zeros < 3) return false;
+        // Every candidate layout must reproduce the layer of all renderers, so a few are enough for nodes
+        // (matched by pointer); a flat array is matched by values alone and needs more.
+        int eights = 0;
+        for (const Ref& r : refs) eights += r.layer == 8;
         if (find_aos(refs, out)) return true;
         // A flat array is matched by values alone, so it needs enough renderers to be unambiguous.
-        return refs.size() >= 10 && eights >= 3 && find_soa(refs, out);
+        std::vector<Ref> indexed;
+        for (const Ref& r : refs) if (r.index >= 0) indexed.push_back(r);
+        return indexed.size() >= 10 && eights >= 3 && find_soa(indexed, out);
     }
 }

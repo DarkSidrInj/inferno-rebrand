@@ -331,7 +331,7 @@ namespace localview {
         if (g_layout.ok) {
             for (const auto& e : g_node_moved) {
                 const NodeMoved& m = e.second;
-                if (rpm<uint64_t>(e.first) == m.vtable && scenenode::index_of(e.first) == m.index &&
+                if (rpm<uint64_t>(e.first) == m.vtable && scenenode::node_is(g_layout, m.index, e.first) &&
                     scenenode::read_field(g_layout, m.index) == m.written)
                     scenenode::write_field(g_layout, m.index, m.original);
             }
@@ -359,7 +359,7 @@ namespace localview {
         auto add = [&](uint64_t r, bool fp) {
             if (!r || !seen.emplace(r, true).second) return;
             const int index = scenenode::index_of(r), layer = chams::layer_of(r);
-            if (index < 0 || layer < 0) return;
+            if (layer < 0) return;  // an index of -1 is placed by the renderer's pointer later
             refs.push_back({r, index, layer});
             if (fp) first_person.push_back(refs.back());
         };
@@ -369,6 +369,20 @@ namespace localview {
         for (uint64_t r : mates) add(r, false);
         int eights = 0, zeros = 0;
         for (const auto& r : refs) { eights += r.layer == 8; zeros += r.layer == 0; }
+        {
+            // What the index field holds on each kind of renderer (raw qword at +0x198).
+            auto line = [&](const char* kind, const std::vector<uint64_t>& list) {
+                std::string text;
+                int valid = 0, shown = 0;
+                for (uint64_t r : list) {
+                    const uint64_t raw = rpm<uint64_t>(r + scenenode::kIndexField);
+                    valid += scenenode::index_of(r) >= 0;
+                    if (shown++ < 6) { char b[24]; std::snprintf(b, sizeof(b), "%016llx ", (unsigned long long)raw); text += b; }
+                }
+                diag::log("SCENE", "%s: %zu renderers, %d with a scene index; +0x198: %s", kind, list.size(), valid, text.c_str());
+            };
+            line("enemies", enemies); line("teammates", mates); line("arms", arms); line("weapon parts", weapons);
+        }
         scenenode::Layout layout;
         const bool ok = scenenode::calibrate(refs, layout);
         if (ok) {
@@ -436,7 +450,7 @@ namespace localview {
         const uint32_t value = scenenode::expect(int(kMoveLayer), g_layout.mask);
         std::unordered_map<uint64_t, bool> current;
         for (uint64_t r : enemy_renderers) {
-            const int index = scenenode::index_of(r);
+            const int index = scenenode::node_index(g_layout, r);
             if (index < 0) continue;
             current[r] = true;
             const uint32_t now_value = scenenode::read_field(g_layout, index);
@@ -448,7 +462,7 @@ namespace localview {
         for (auto it = g_node_moved.begin(); it != g_node_moved.end();) {  // players that are no longer enemies
             if (current.count(it->first)) { ++it; continue; }
             const NodeMoved& m = it->second;
-            if (rpm<uint64_t>(it->first) == m.vtable && scenenode::index_of(it->first) == m.index &&
+            if (rpm<uint64_t>(it->first) == m.vtable && scenenode::node_is(g_layout, m.index, it->first) &&
                 scenenode::read_field(g_layout, m.index) == m.written)
                 scenenode::write_field(g_layout, m.index, m.original);
             it = g_node_moved.erase(it);

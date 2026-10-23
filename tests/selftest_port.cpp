@@ -872,7 +872,13 @@ int main() {
                 std::vector<uint64_t> enemies_r, mates_r, arms_r;
                 std::vector<uint8_t*> enemy_ptrs;
                 const int enemy_index[] = {7, 19, 23, 31}, mate_index[] = {11, 13, 29}, arm_index[] = {41, 42};
-                for (int idx : enemy_index) { uint8_t* r = make_ref(idx, 0); enemy_ptrs.push_back(r); enemies_r.push_back(reinterpret_cast<uint64_t>(r)); }
+                for (int idx : enemy_index) {
+                    uint8_t* r = make_ref(idx, 0);
+                    // Some enemies carry no scene index (as on device): the node array is searched for their pointer.
+                    if (shape == 0 && (idx == 19 || idx == 23)) *reinterpret_cast<int32_t*>(r + 0x198) = -1;
+                    enemy_ptrs.push_back(r);
+                    enemies_r.push_back(reinterpret_cast<uint64_t>(r));
+                }
                 for (int idx : mate_index) mates_r.push_back(reinterpret_cast<uint64_t>(make_ref(idx, 0)));
                 for (int idx : arm_index) arms_r.push_back(reinterpret_cast<uint64_t>(make_ref(idx, 8)));
                 if (shape == 1)  // a flat array needs more renderers to be unambiguous: add layer-8 parts
