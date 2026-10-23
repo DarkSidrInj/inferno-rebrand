@@ -148,3 +148,11 @@ f_count slot_get_material_count;
 int UnityEngine_Renderer__GetMaterialCount_Injected(void* self, const void* method) {
     RESOLVE(slot_get_material_count, f_count, "UnityEngine.Renderer::GetMaterialCount_Injected(System.IntPtr)"); return f(self);
 }
+
+// Canvas: the default UI material, created once and handed out.
+void* g_default_ui_material;
+void* Canvas_GetDefaultCanvasMaterial_Injected(void) { return g_default_ui_material; }
+f_ptr slot_get_default_ui_material;
+void* UnityEngine_Canvas__GetDefaultCanvasMaterial_Injected(const void* method) {
+    RESOLVE(slot_get_default_ui_material, f_ptr, "UnityEngine.Canvas::GetDefaultCanvasMaterial_Injected()"); return f();
+}

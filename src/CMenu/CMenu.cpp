@@ -73,6 +73,8 @@ namespace ui::menu {
         separator(a);
         combo("Chams material", &cfg::chams::material, {"Flat", "Untouchable", "Outline"}, a);
         separator(a);
+        checkbox("Chams through walls", &cfg::chams::through_walls, a);
+        separator(a);
         checkbox("Grenades", &cfg::esp::grenade, a);
         separator(a);
         checkbox("Dropped weapons", &cfg::esp::dropped, a);

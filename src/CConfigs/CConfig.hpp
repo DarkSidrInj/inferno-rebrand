@@ -33,6 +33,7 @@ namespace chams {
     inline bool enabled = false;
     inline bool team_check = true;   // enemies only
     inline int material = 0;         // 0 flat (material id 0, as the legacy chams), 1 untouchable, 2 outline
+    inline bool through_walls = true; // Unity's default UI material: ZWrite Off, no depth test
 }
 
 namespace fog {

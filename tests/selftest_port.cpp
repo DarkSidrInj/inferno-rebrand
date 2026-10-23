@@ -545,7 +545,13 @@ int main() {
             const uint64_t mate = make_player(2, false, mate_ids, 1, mate_r, -9000);
             const uint64_t enemy = make_player(1, false, enemy_ids, 2, enemy_r, -9000);
             const std::vector<uint64_t> players{local, mate, enemy};
-            cfg::chams::enabled = true; cfg::chams::team_check = true; cfg::chams::material = 0;
+            route(v100::canvas_default_material_injected, base + fx::UnityEngine_Canvas__GetDefaultCanvasMaterial_Injected);
+            *at(fx::slot_get_default_ui_material) = base + fx::Canvas_GetDefaultCanvasMaterial_Injected;
+            uint8_t* ui_material = static_cast<uint8_t*>(calloc(1, 0x40));
+            const int32_t ui_id = -11000;
+            std::memcpy(ui_material + v100::native_instance_id, &ui_id, 4);
+            *at(fx::g_default_ui_material) = reinterpret_cast<uint64_t>(ui_material);
+            cfg::chams::enabled = true; cfg::chams::team_check = true; cfg::chams::material = 0; cfg::chams::through_walls = false;
             chams::g_pid = -1;
             chams::tick(players, local, 2);   // starts resolution
             chams::wait();
@@ -558,6 +564,12 @@ int main() {
             chams::g_last_apply = 0;
             chams::tick(players, local, 2);
             CHECK(enemy_ids[0] == -9000 && enemy_ids[1] == -9000, "outline material id (%d %d)", enemy_ids[0], enemy_ids[1]);
+            CHECK(chams::g_ui_material.load() == ui_id, "default UI material traced: %d", chams::g_ui_material.load());
+            cfg::chams::through_walls = true;
+            chams::g_last_apply = 0;
+            chams::tick(players, local, 2);
+            CHECK(enemy_ids[0] == ui_id && enemy_ids[1] == ui_id, "through-walls material (%d %d)", enemy_ids[0], enemy_ids[1]);
+            cfg::chams::through_walls = false;
             cfg::chams::team_check = false;
             chams::g_last_apply = 0;
             chams::tick(players, local, 2);

@@ -13,6 +13,14 @@
 // Material choice: 0 = flat (id 0, the legacy behaviour), or one of the game's own materials
 // from CharacterBindings (UntouchableMaterial, OutlineMaterial) by their instance id. Every
 // slot of every patched renderer is remembered and put back when chams are switched off.
+//
+// Through walls: internal chams swap in a shader with ZTest Always / ZWrite Off. From outside
+// no shader can be compiled, but Unity ships one: the default UI material (UI/Default). It has
+// ZWrite Off, sits in the Transparent queue (drawn after the opaque walls) and takes its depth
+// test from unity_GUIZTestMode, which nothing sets on the shared asset, so it reads 0 =
+// CompareFunction.Disabled: no depth test. On an enemy renderer it draws flat white over the
+// walls. Its native pointer comes from tracing Canvas.GetDefaultCanvasMaterial_Injected (uGUI
+// calls it for every default Graphic, so the wrapper's icall slot is normally filled).
 
 #include "CGameContext.hpp"
 #include "COffsets.hpp"
@@ -37,6 +45,7 @@ namespace chams {
     inline std::atomic<int> g_size_offset{-1};  // m_Materials size, -1 = unknown (one slot is patched)
     inline long long g_last_resolve = 0, g_last_apply = 0;
     inline bool g_logged_material = false;
+    inline std::atomic<int32_t> g_ui_material{0};  // instance id of Unity's default UI material, 0 = unknown
 
     struct Patched {
         uint64_t array{};                // material id array the originals were read from
@@ -96,7 +105,38 @@ namespace chams {
         return -1;
     }
 
+    inline uint64_t trace_pointer(uint64_t entry, std::string& why) {
+        a64::Session session;
+        a64::Machine start;
+        start.pc = entry;
+        start.x[0] = {0, true, 0, 0};
+        auto goal = [](const a64::Machine& m) { return m.returned && m.x[0].known && plausible(m.x[0].value); };
+        a64::Machine found;
+        if (a64::explore(session, start, goal, found)) return found.x[0].value;
+        why = session.why;
+        return 0;
+    }
+
+    inline void resolve_ui_material() {
+        std::vector<std::pair<uint64_t, const char*>> entries;
+        const uint64_t wrapper = proc::lib + v100::canvas_default_material_injected;
+        if (!icalls::slot_empty(wrapper)) entries.push_back({wrapper, "wrapper"});
+        for (const auto& c : icalls::candidates("UnityEngine.Canvas::GetDefaultCanvasMaterial_Injected")) entries.push_back({c.fn, c.how});
+        std::string why = entries.empty() ? "no accessor" : "";
+        for (const auto& e : entries) {
+            const uint64_t material = trace_pointer(e.first, why);
+            const int32_t id = material ? rpm<int32_t>(material + v100::native_instance_id) : 0;
+            if (!id) continue;
+            g_ui_material = id;
+            diag::log("CHAMS", "through-walls material (Unity default UI) native=0x%llx id=%d via %s",
+                      (unsigned long long)material, id, e.second);
+            return;
+        }
+        diag::log("WARN", "CHAMS default UI material not found (%s); through walls unavailable", why.c_str());
+    }
+
     inline void resolve(uint64_t native) {
+        resolve_ui_material();
         std::vector<std::pair<uint64_t, const char*>> entries;
         const uint64_t wrapper = proc::lib + v100::renderer_material_count_injected;
         if (!icalls::slot_empty(wrapper)) entries.push_back({wrapper, "wrapper"});
@@ -142,6 +182,7 @@ namespace chams {
     }
 
     inline int32_t desired_id(uint64_t bindings) {
+        if (cfg::chams::through_walls && g_ui_material.load()) return g_ui_material.load();
         if (cfg::chams::material == 0 || !bindings) return 0;
         const uint64_t field = cfg::chams::material == 1 ? v100::bindings_untouchable_material : v100::bindings_outline_material;
         const uint64_t native = native_of(rpm<uint64_t>(bindings + field));
@@ -176,6 +217,7 @@ namespace chams {
             g_pid = proc::pid;
             g_data_offset = -1;
             g_size_offset = -1;
+            g_ui_material = 0;
             g_patched.clear();
             g_last_resolve = 0;
             g_logged_material = false;

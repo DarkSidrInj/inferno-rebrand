@@ -87,6 +87,7 @@ namespace v100 {
     inline constexpr uint64_t native_instance_id = 0x08;                     // native Object.m_InstanceID (device: -132432 style ids)
     inline constexpr uint64_t renderer_material_count_injected = 0x75EF534;  // static GetMaterialCount_Injected(IntPtr)
     inline constexpr uint64_t legacy_renderer_materials = 0x140;             // pre-Unity-6 m_Materials data (legacy chams)
+    inline constexpr uint64_t canvas_default_material_injected = 0x7A6957C;  // static Canvas.GetDefaultCanvasMaterial_Injected()
 
     // --- Optional TypeInfo RVAs (ARM64 libunity). 0 = unknown, class name is used. ---
     // FILL (optional): script.json -> cim_TypeInfo / qak_TypeInfo / njg_TypeInfo / xmt_TypeInfo
