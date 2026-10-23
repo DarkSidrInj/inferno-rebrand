@@ -32,56 +32,105 @@ namespace {
         return std::clamp(1.f - (age - .25f) / .75f, 0.f, 1.f);
     }
 
-    // Overlay chams: the body drawn on screen as filled limbs along the bones, so it shows through
-    // walls whatever the renderer does. Each limb is a capsule whose radius is a body-part width
-    // in meters, projected at the limb's depth.
+    // Overlay chams: the body drawn on screen from the bones, so it shows through walls whatever
+    // the renderer does. A torso polygon (shoulders to hips), tapered capsules for neck and limbs,
+    // and an ellipse-ish head, sized in meters and projected at each bone's depth. Drawn twice:
+    // every part a little larger in the outline color, then every part in the fill color, so the
+    // outline only shows around the whole silhouette. With an opaque fill (the default) overlaps
+    // inside it do not show; a see-through fill darkens where parts overlap.
+    struct Capsule { ImVec2 a, b; float ra, rb; };
+
+    void fill_capsule(ImDrawList* dl, const Capsule& c, float grow, ImU32 color) {
+        const float ra = c.ra + grow, rb = c.rb + grow;
+        const float dx = c.b.x - c.a.x, dy = c.b.y - c.a.y, len = std::hypot(dx, dy);
+        if (len > .5f) {
+            // Tangent quad between the two end circles (outer tangents for different radii).
+            const float ux = dx / len, uy = dy / len;
+            const float sin_t = std::clamp((ra - rb) / len, -1.f, 1.f), cos_t = std::sqrt(1.f - sin_t * sin_t);
+            const float nx = -uy * cos_t + ux * sin_t, ny = ux * cos_t + uy * sin_t;
+            const float mx = uy * cos_t + ux * sin_t, my = -ux * cos_t + uy * sin_t;
+            dl->AddQuadFilled(ImVec2(c.a.x + nx * ra, c.a.y + ny * ra), ImVec2(c.b.x + nx * rb, c.b.y + ny * rb),
+                              ImVec2(c.b.x + mx * rb, c.b.y + my * rb), ImVec2(c.a.x + mx * ra, c.a.y + my * ra), color);
+        }
+        dl->AddCircleFilled(c.a, ra, color, 20);
+        dl->AddCircleFilled(c.b, rb, color, 20);
+    }
+
     void draw_overlay(ImDrawList* dl, const Pose& pose, const matrix& view, const matrix& projection) {
         const float alpha = pose_alpha(pose);
         if (alpha <= 0.f) return;
         const float* m = reinterpret_cast<const float*>(&view);
         const Vector3 up(m[1], m[5], m[9]);  // camera up, from the view matrix
-        auto project = [&](int bone, float radius, ImVec2& at, float& r) {
-            if (!pose.valid[bone] || !world_to_screen(pose.position[bone], view, projection, at)) return false;
+        ImVec2 at[kCount];
+        float px[kCount]{};  // pixels per meter at each bone
+        bool ok[kCount]{};
+        for (int i = 0; i < kCount; ++i) {
             ImVec2 edge;
-            if (!world_to_screen(pose.position[bone] + up * radius, view, projection, edge)) return false;
-            r = std::max(1.f, std::hypot(edge.x - at.x, edge.y - at.y));
-            return r < 400.f;
-        };
-        const ImU32 fill = tint(cfg::chams::overlay_col, alpha);
-        const int upper = pose.valid[Chest] ? Chest : (pose.valid[Spine] ? Spine : Neck);
-        struct Limb { int a, b; float ra, rb; };
-        const Limb limbs[] = {
-            {Hips, upper, .15f, .17f}, {upper, Neck, .15f, .06f},
-            {LUpperLeg, LLowerLeg, .085f, .065f}, {RUpperLeg, RLowerLeg, .085f, .065f},
-            {LLowerLeg, LFoot, .065f, .05f}, {RLowerLeg, RFoot, .065f, .05f},
-            {LFoot, LToes, .05f, .04f}, {RFoot, RToes, .05f, .04f},
-            {Hips, LUpperLeg, .1f, .09f}, {Hips, RUpperLeg, .1f, .09f},
-            {LShoulder, LUpperArm, .06f, .055f}, {RShoulder, RUpperArm, .06f, .055f},
-            {LUpperArm, LLowerArm, .055f, .045f}, {RUpperArm, RLowerArm, .055f, .045f},
-            {LLowerArm, LHand, .045f, .04f}, {RLowerArm, RHand, .045f, .04f},
-            {upper, LShoulder, .08f, .06f}, {upper, RShoulder, .08f, .06f},
-        };
-        for (const Limb& l : limbs) {
-            ImVec2 a, b;
-            float ra = 0.f, rb = 0.f;
-            if (!project(l.a, l.ra, a, ra) || !project(l.b, l.rb, b, rb)) continue;
-            // Tapered capsule: quad between the two end circles, plus the circles.
-            const float dx = b.x - a.x, dy = b.y - a.y, len = std::hypot(dx, dy);
-            if (len > .5f) {
-                const float nx = -dy / len, ny = dx / len;
-                dl->AddQuadFilled(ImVec2(a.x + nx * ra, a.y + ny * ra), ImVec2(b.x + nx * rb, b.y + ny * rb),
-                                  ImVec2(b.x - nx * rb, b.y - ny * rb), ImVec2(a.x - nx * ra, a.y - ny * ra), fill);
-            }
-            dl->AddCircleFilled(a, ra, fill, 16);
-            dl->AddCircleFilled(b, rb, fill, 16);
+            if (!pose.valid[i] || !world_to_screen(pose.position[i], view, projection, at[i]) ||
+                !world_to_screen(pose.position[i] + up * .1f, view, projection, edge)) continue;
+            px[i] = std::hypot(edge.x - at[i].x, edge.y - at[i].y) * 10.f;
+            ok[i] = px[i] > .5f && px[i] < 4000.f;
         }
-        ImVec2 head;
-        float rh = 0.f;
-        if (project(Head, .12f, head, rh)) {
-            // The head bone sits at the skull base: the skull is centered a bit above it.
+        const int upper = ok[Chest] ? Chest : (ok[Spine] ? Spine : Neck);
+        std::vector<Capsule> parts;
+        auto limb = [&](int a, int b, float ra, float rb) {
+            if (ok[a] && ok[b]) parts.push_back({at[a], at[b], ra * px[a], rb * px[b]});
+        };
+        limb(Neck, upper, .055f, .07f);
+        limb(LUpperArm, LLowerArm, .05f, .042f);  limb(RUpperArm, RLowerArm, .05f, .042f);
+        limb(LLowerArm, LHand, .042f, .035f);     limb(RLowerArm, RHand, .042f, .035f);
+        limb(LUpperLeg, LLowerLeg, .08f, .058f);  limb(RUpperLeg, RLowerLeg, .08f, .058f);
+        limb(LLowerLeg, LFoot, .058f, .045f);     limb(RLowerLeg, RFoot, .058f, .045f);
+        limb(LFoot, LToes, .045f, .04f);          limb(RFoot, RToes, .045f, .04f);
+        limb(LShoulder, LUpperArm, .055f, .05f);  limb(RShoulder, RUpperArm, .055f, .05f);
+
+        // Torso: shoulders and hips as a convex quad, pushed out by the body's half depth.
+        std::vector<ImVec2> torso;
+        const int corners[4] = {LUpperArm, RUpperArm, RUpperLeg, LUpperLeg};
+        bool torso_ok = true;
+        for (int c : corners) torso_ok &= ok[c];
+        if (torso_ok) for (int c : corners) torso.push_back(at[c]);
+        if (!torso_ok) limb(Hips, upper, .14f, .16f);
+        // Chest / spine / hips capsules round the torso's sides.
+        limb(Hips, ok[Spine] ? Spine : upper, .12f, .12f);
+        if (ok[Spine]) limb(Spine, upper, .12f, .13f);
+
+        // Head: centered above the head bone (the bone sits at the skull base).
+        Capsule head{};
+        bool head_ok = false;
+        if (ok[Head]) {
             ImVec2 top;
-            if (pose.valid[Head] && world_to_screen(pose.position[Head] + up * .09f, view, projection, top)) head = top;
-            dl->AddCircleFilled(head, rh, fill, 24);
+            if (world_to_screen(pose.position[Head] + up * .2f, view, projection, top)) {
+                const ImVec2 mid((at[Head].x + top.x) * .5f, (at[Head].y + top.y) * .5f);
+                head = {at[Head], mid, .085f * px[Head], .1f * px[Head]};
+                head_ok = true;
+            }
+        }
+
+        auto grown_torso = [&](float grow) {
+            ImVec2 center(0.f, 0.f);
+            for (const ImVec2& p : torso) { center.x += p.x * .25f; center.y += p.y * .25f; }
+            std::vector<ImVec2> out;
+            for (const ImVec2& p : torso) {
+                const float dx = p.x - center.x, dy = p.y - center.y, d = std::max(std::hypot(dx, dy), 1.f);
+                out.push_back(ImVec2(p.x + dx / d * grow, p.y + dy / d * grow));
+            }
+            return out;
+        };
+        const float edge = std::max(1.5f, cfg::chams::overlay_outline);
+        const ImU32 outline = tint(cfg::chams::overlay_outline_col, alpha);
+        const ImU32 fill = tint(cfg::chams::overlay_col, alpha);
+        for (int pass = 0; pass < 2; ++pass) {
+            const float grow = pass == 0 ? edge : 0.f;
+            const ImU32 color = pass == 0 ? outline : fill;
+            if (pass == 0 && cfg::chams::overlay_outline <= 0.f) continue;
+            if (torso_ok) {
+                const float side = .09f * (px[LUpperArm] + px[RUpperLeg]) * .5f;  // torso half depth on screen
+                const std::vector<ImVec2> poly = grown_torso(grow + side);
+                dl->AddConvexPolyFilled(poly.data(), int(poly.size()), color);
+            }
+            for (const Capsule& c : parts) fill_capsule(dl, c, grow, color);
+            if (head_ok) fill_capsule(dl, head, grow, color);
         }
     }
 

@@ -39,7 +39,9 @@ namespace chams {
     inline int material = 0;         // 0 flat (material id 0, as the legacy chams), 1 untouchable, 2 outline
     inline bool through_walls = true; // enemies / teammates get a material drawn without depth test
     inline bool overlay = false;      // filled limbs drawn on screen along the skeleton (through walls, any material)
-    inline ImVec4 overlay_col = ImVec4(1.f, .25f, .35f, .55f);
+    inline ImVec4 overlay_col = ImVec4(1.f, .25f, .35f, 1.f);
+    inline float overlay_outline = 1.5f;  // pixels, 0 = none
+    inline ImVec4 overlay_outline_col = ImVec4(0.f, 0.f, 0.f, 1.f);
     inline bool no_occlusion = true;  // camera occlusion culling off while through walls is on
     inline int wall_material = 0;     // 0 / 1 the game's outline mask materials (rdj +0x38 / +0x40), 2 Unity default UI
 }

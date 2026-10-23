@@ -91,6 +91,9 @@ namespace ui::menu {
         separator(a);
         colorpick("Overlay color", &cfg::chams::overlay_col, a);
         separator(a);
+        slider("Overlay outline", &cfg::chams::overlay_outline, 0.f, 4.f, a, "%.1f px");
+        colorpick("Overlay outline color", &cfg::chams::overlay_outline_col, a);
+        separator(a);
         checkbox("Grenades", &cfg::esp::grenade, a);
         separator(a);
         checkbox("Dropped weapons", &cfg::esp::dropped, a);
