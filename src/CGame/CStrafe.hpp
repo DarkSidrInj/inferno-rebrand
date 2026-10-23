@@ -46,6 +46,21 @@ namespace strafe {
         double variation() const { return n > 1 && ratio_mean > 1e-6 ? std::sqrt(ratio_m2 / (n - 1)) / ratio_mean : 1e9; }
     };
 
+    // Correlation of two series (the player's vertical speed and one vector's y).
+    struct Correlation {
+        int n = 0;
+        double sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
+        void add(double x, double y) { ++n; sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y; }
+        double covariance() const { return n ? sxy / n - (sx / n) * (sy / n) : 0; }
+        double variance_x() const { return n ? sxx / n - (sx / n) * (sx / n) : 0; }
+        double variance_y() const { return n ? syy / n - (sy / n) * (sy / n) : 0; }
+        double r() const {
+            const double d = std::sqrt(variance_x() * variance_y());
+            return d > 1e-9 ? covariance() / d : 0.0;
+        }
+        double slope() const { return variance_x() > 1e-9 ? covariance() / variance_x() : 0.0; }
+    };
+
     struct Pose { long long t; Vector3 position; float yaw; };
 
     inline int g_pid = -1;
@@ -54,6 +69,13 @@ namespace strafe {
     inline std::deque<Pose> g_poses;
     inline Candidate g_candidates[3];
     inline int g_locked = -1;
+    // Set by the bunnyhop: measure the vectors (g_request) and turn the velocity with the view (g_turn), even
+    // with the Auto strafe switch off.
+    inline bool g_request = false, g_turn = false;
+    // The vertical speed: which vector's y follows the player's real vertical movement, and by what factor.
+    inline Correlation g_vertical[3];
+    inline int g_vert = -1;
+    inline double g_vert_scale = 1.0;
     inline double g_scale = 1.0;
     inline float g_written_yaw = 0.f;
     inline bool g_have_yaw = false;
@@ -82,6 +104,8 @@ namespace strafe {
         g_poses.clear();
         for (auto& c : g_candidates) c = Candidate{};
         g_locked = -1;
+        for (auto& c : g_vertical) c = Correlation{};
+        g_vert = -1;
         g_have_yaw = false;
         g_writes = g_kept = 0;
         g_check_vector = -1;
@@ -114,10 +138,20 @@ namespace strafe {
         return g_tof && mem_read(g_tof + kVector[i], out, 12) && std::isfinite(out[0]) && std::isfinite(out[1]) && std::isfinite(out[2]);
     }
 
+    // An upward speed (m/s) into the vector whose y was found to follow the vertical movement. False when there
+    // is none (not measured yet): the bunnyhop then cannot jump this way.
+    inline bool kick(float speed) {
+        if (g_vert < 0 || !g_tof) return false;
+        float v[3];
+        if (!read_vector(g_vert, v)) return false;
+        v[1] = float(speed * g_vert_scale);
+        return mem_write(g_tof + kVector[g_vert] + 4, &v[1], 4);
+    }
+
     // One call per frame with the local player, its position and the camera's view matrix.
     inline void tick(uint64_t local, const Vector3& position, const matrix* view) {
         if (g_pid != proc::pid) { g_pid = proc::pid; forget(); }
-        if (!cfg::strafe::enabled || !local || !view || proc::pid <= 0) {
+        if (!(cfg::strafe::enabled || g_request) || !local || !view || proc::pid <= 0) {
             if (g_tof) forget();
             return;
         }
@@ -143,6 +177,30 @@ namespace strafe {
         float v[3][3]{};
         bool readable[3];
         for (int i = 0; i < 3; ++i) readable[i] = read_vector(i, v[i]);
+
+        // Which y follows the vertical movement (for the bunnyhop's jump): while really rising or falling.
+        float vy_short = velocity.y;   // over the last ~40 ms, less lag than the 100 ms window
+        for (const Pose& pose : g_poses) {
+            if (now - pose.t > 45) continue;
+            if (now - pose.t >= 20) vy_short = (position.y - pose.position.y) / (float(now - pose.t) / 1000.f);
+            break;
+        }
+        if (g_vert < 0 && std::fabs(vy_short) > 1.0f) {
+            for (int i = 0; i < 3; ++i)
+                if (readable[i]) g_vertical[i].add(vy_short, v[i][1]);
+            // The speed seen from positions is a ~50 ms average, so the match is loose; the others do not match at all.
+            int best = -1;
+            for (int i = 0; i < 3; ++i) {
+                const Correlation& c = g_vertical[i];
+                if (c.n < 15 || c.r() < 0.75 || c.slope() < 0.05 || c.slope() > 20.0) continue;
+                if (best < 0 || c.r() > g_vertical[best].r()) best = i;
+            }
+            if (best >= 0) {
+                g_vert = best;
+                g_vert_scale = g_vertical[best].slope();
+                diag::log("STRAFE", "vertical speed is tof+0x%llx y: factor %.3f (correlation %.3f)", (unsigned long long)kVector[best], g_vert_scale, g_vertical[best].r());
+            }
+        }
 
         // Did the game keep our last write? (read back a little after it)
         if (g_check_vector >= 0 && now - g_check_at >= 12) {
@@ -181,6 +239,7 @@ namespace strafe {
             return;
         }
 
+        if (!(cfg::strafe::enabled || g_turn)) return;   // measuring only
         if (!yaw_ok || !readable[g_locked]) return;
         if (!g_have_yaw) { g_written_yaw = yaw; g_have_yaw = true; return; }
         if (!airborne || speed < cfg::strafe::min_speed) { g_written_yaw = yaw; return; }   // on the ground: only follow the view

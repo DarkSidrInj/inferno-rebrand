@@ -9,6 +9,7 @@
 #include "../CGame/CAntiAim.hpp"
 #include "../CGame/CSkins.hpp"
 #include "../CGame/CStrafe.hpp"
+#include "../CGame/CBhop.hpp"
 #include "../CGame/CLocalView.hpp"
 #include "../CMenu/Theme/CTheme.hpp"
 #include "../CConfigs/CConfig.hpp"
@@ -26,10 +27,11 @@ static void esp_wait(const char* stage) {
 }
 
 void visuals::draw() {
+    bhop::calibration_step();   // the finger that shows where the jump button is, whatever else is on
     bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health || cfg::esp::distance ||
                cfg::esp::skeleton || cfg::esp::grenade || cfg::esp::dropped || cfg::chams::enabled ||
                cfg::chams::overlay || cfg::thirdperson::enabled || cfg::antiaim::enabled ||
-               cfg::skins::enabled || cfg::esp::armor || cfg::esp::helmet || cfg::strafe::enabled;
+               cfg::skins::enabled || cfg::esp::armor || cfg::esp::helmet || cfg::strafe::enabled || cfg::bhop::enabled;
     if (!any) {
         chams::tick({}, 0, 0);
         chams::occlusion_tick(0);
@@ -40,6 +42,7 @@ void visuals::draw() {
         localview::tick(0, false);
         antiaim::tick(0, {});
         skins::tick(0, {});
+        bhop::tick(0, Vector3{});
         strafe::tick(0, Vector3{}, nullptr);
         esp_wait("all ESP options disabled");
         return;
@@ -260,6 +263,7 @@ void visuals::draw() {
 
     }
 
+    bhop::tick(LocalPlayer, LocalPosition);
     strafe::tick(LocalPlayer, LocalPosition, &ViewMatrix);
 
     for (const auto& Enemy : frame_enemies) {

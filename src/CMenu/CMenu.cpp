@@ -8,6 +8,7 @@
 #include "Theme/CTheme.hpp"
 #include "../CGame/CSkins.hpp"
 #include "../CGame/CFog.hpp"
+#include "../CGame/CBhop.hpp"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "Android_draw/draw.h"
@@ -293,8 +294,10 @@ namespace {
             break;
         }
         case K::Info: {
-            const float w = text_width(r.text.c_str(), kControl);
-            text_mid(cx + cw - 14 - w, y, kRow, C(150, 154, 166), r.text.c_str(), kControl);
+            float size = kControl;
+            while (size > 8.f && text_width(r.text.c_str(), size) > cw * 0.55f) size -= 1.f;
+            const float w = text_width(r.text.c_str(), size);
+            text_mid(cx + cw - 14 - w, y, kRow, C(150, 154, 166), r.text.c_str(), size);
             break;
         }
         }
@@ -434,6 +437,18 @@ namespace {
     void misc_page() {
         static const char* const kYaw[] = {"Legacy", "Spin", "Jitter", "Backwards", "None"};
         static const char* const kPitch[] = {"None", "Down", "Up"};
+        char button[48];
+        if (bhop::jump_button_set()) std::snprintf(button, sizeof(button), "%.0f, %.0f", cfg::bhop::jump_x, cfg::bhop::jump_y);
+        else std::snprintf(button, sizeof(button), "not set");
+        card(0, "BUNNYHOP", {
+            toggle_row("Bunnyhop", &cfg::bhop::enabled),
+            toggle_row("Strafe While Holding", &cfg::bhop::strafe),
+            button_row("Set Jump Button", [] { bhop::start_calibration(); }),
+            info_row("Jump Button", button),
+            slider_row("Button Radius", &cfg::bhop::radius, 40.f, 260.f, "%.0f"),
+            info_row("Jump Held", bhop::g_held ? "yes" : "no"),
+            info_row("Vertical Speed", strafe::g_vert >= 0 ? "found" : "measuring"),
+        });
         card(0, "MOVEMENT", {
             toggle_row("Auto Strafe", &cfg::strafe::enabled),
             slider_row("Turn Per Step", &cfg::strafe::turn, 0.5f, 15.f, "%.1f"),
@@ -849,6 +864,25 @@ void render() {
     if (ma < 0.01f) { st.popup.open = false; st.color.open = false; return; }
     const float game = bar::game_alpha();
     const float alpha = ma * game;
+
+    // Setting the jump button: the menu steps aside so the game's own button is in view; the next finger is the one.
+    if (bhop::g_calibrating) {
+        ImDrawList* fg = ImGui::GetForegroundDrawList();
+        const char* line1 = "Tap and hold your jump button";
+        const char* line2 = "the menu comes back by itself";
+        const float size = ImClamp(g_sw * 0.02f, 18.f, 40.f);
+        ImFont* f = bold_font();
+        const ImVec2 t1 = f->CalcTextSizeA(size, FLT_MAX, 0.f, line1), t2 = text_font()->CalcTextSizeA(size * 0.7f, FLT_MAX, 0.f, line2);
+        const float w = ImMax(t1.x, t2.x) + size * 2.f, h = t1.y + t2.y + size * 1.6f;
+        const ImVec2 a((g_sw - w) * 0.5f, g_sh * 0.06f), b(a.x + w, a.y + h);
+        fg->AddRectFilled(a, b, C(13, 15, 22, 235), size * 0.6f);
+        fg->AddRect(a, b, C(75, 126, 255, 200), size * 0.6f);
+        fg->AddText(f, size, ImVec2(a.x + (w - t1.x) * 0.5f, a.y + size * 0.6f), C(228, 230, 236), line1);
+        fg->AddText(text_font(), size * 0.7f, ImVec2(a.x + (w - t2.x) * 0.5f, a.y + size * 0.6f + t1.y + size * 0.3f), C(150, 154, 166), line2);
+        st.popup.open = false;
+        st.color.open = false;
+        return;
+    }
 
     // The dim behind the menu.
     ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), ImVec2(g_sw, g_sh), IM_COL32(0, 0, 0, int(130 * alpha)));

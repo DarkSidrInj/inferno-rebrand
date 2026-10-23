@@ -1,13 +1,18 @@
 #include <cstdio>
 #include <cstring>
+#include <cerrno>
+#include <mutex>
 #include <thread>
 #include <dirent.h>
 #include <fcntl.h>
 #include <linux/input.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <cmath>
 #include <unistd.h>
 #include <vector>
 #include "imgui.h"
+#include "Android_touch/Touch.hpp"
 
 #define TOUCH_MODE 2
 
@@ -58,11 +63,58 @@ namespace touch {
     ImGuiIO *imgui_io;
     std::vector<input> inputs;
 
+    // ---- every finger on the screen (multi-touch protocol B), in display pixels ---------------------
+    // The menu works with the last pointer only; this keeps all of them, so "is a finger on that button"
+    // can be asked while the other thumb turns the camera.
+    constexpr int kSlots = 16;
+    std::mutex g_finger_mutex;
+    Finger g_fingers[kSlots];
+    int g_finger_count = 0;
+
+    // Raw panel coordinates of one device to display pixels (the same mapping the pointer uses).
+    static void to_display(const input &in, float x, float y, float &sx, float &sy) {
+        switch (orientation) {
+            case 1: sx = y; sy = (float) in.absX.maximum - x; break;
+            case 2: sx = (float) in.absX.maximum - x; sy = (float) in.absY.maximum - y; break;
+            case 3: sx = (float) in.absY.maximum - y; sy = x; break;
+            default: sx = x; sy = y; break;
+        }
+        sx *= in.absXMultiplier;
+        sy *= in.absYMultiplier;
+    }
+
+    struct SlotTracker {
+        struct Slot { bool down = false; float x = 0.f, y = 0.f; } slots[kSlots];
+        int current = 0;
+        void feed(const input &in, const input_event &event) {
+            if (event.type == EV_ABS) {
+                if (event.code == ABS_MT_SLOT) {
+                    current = event.value < 0 ? 0 : (event.value >= kSlots ? kSlots - 1 : event.value);
+                } else if (event.code == ABS_MT_TRACKING_ID) {
+                    slots[current].down = event.value != -1;
+                } else if (event.code == ABS_MT_POSITION_X) {
+                    slots[current].x = (float) event.value;
+                } else if (event.code == ABS_MT_POSITION_Y) {
+                    slots[current].y = (float) event.value;
+                }
+            } else if (event.type == EV_SYN && event.code == SYN_REPORT) {
+                std::lock_guard<std::mutex> lock(g_finger_mutex);
+                g_finger_count = 0;
+                for (const Slot &slot: slots) {
+                    if (!slot.down) continue;
+                    to_display(in, slot.x, slot.y, g_fingers[g_finger_count].x, g_fingers[g_finger_count].y);
+                    ++g_finger_count;
+                }
+            }
+        }
+    };
+
     void input_thread(const input &_input) {
         sleep(1);
         if (!imgui_io)
             imgui_io = &ImGui::GetIO();
         input_event events[64]{0};
+        SlotTracker tracker;
         while (_input.fd > 0 && imgui_io && imgui_io->BackendRendererUserData) {
             auto event_readed_count = read(_input.fd, events, sizeof(events));
             if (event_readed_count == -1)
@@ -73,6 +125,7 @@ namespace touch {
             static float x = 0.0f, y = 0.0f;
             for (long j = 0; j < event_readed_count; j++) {
                 auto &event = events[j];
+                tracker.feed(_input, event);
                 if (event.type == EV_ABS) {
 #if TOUCH_MODE == 2
                     if (_input.trackingIDPresent && event.code == ABS_MT_TRACKING_ID) {
@@ -163,6 +216,14 @@ namespace touch {
 
     void updateOrientation(uint8_t _orientation) {
         orientation = _orientation;
+    }
+
+
+    int fingers(Finger *out, int max) {
+        std::lock_guard<std::mutex> lock(g_finger_mutex);
+        const int n = g_finger_count < max ? g_finger_count : max;
+        for (int i = 0; i < n; ++i) out[i] = g_fingers[i];
+        return n;
     }
 
     void shutdown() {

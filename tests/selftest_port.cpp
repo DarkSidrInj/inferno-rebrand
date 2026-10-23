@@ -15,6 +15,7 @@
 #include "CGame/CSceneNode.hpp"
 #include "CGame/CSkins.hpp"
 #include "CGame/CStrafe.hpp"
+#include "CGame/CBhop.hpp"
 #include "fixtures/rs_accessors.h"
 #include "CConfigs/CConfig.hpp"
 #include <sys/mman.h>
@@ -33,6 +34,17 @@ extern "C" __attribute__((noinline)) uint64_t remote_target(volatile uint64_t* p
 
 static int failures = 0;
 #define CHECK(c, ...) do { if (!(c)) { ++failures; std::printf("FAIL %s:%d ", __FILE__, __LINE__); std::printf(__VA_ARGS__); std::printf("\n"); } } while (0)
+
+// The touch screen of the host build: a finger list the tests set.
+namespace touch {
+    static int g_fake_count = 0;
+    static Finger g_fake[4];
+    int fingers(Finger* out, int max) {
+        const int n = g_fake_count < max ? g_fake_count : max;
+        for (int i = 0; i < n; ++i) out[i] = g_fake[i];
+        return n;
+    }
+}
 
 int main() {
     proc::pid = getpid();
@@ -1397,6 +1409,72 @@ int main() {
         CHECK(std::fabs(speed - 8.f) < 0.4f, "speed kept (%.2f)", speed);
         CHECK(strafe::g_writes > 3 && strafe::g_kept > 0, "writes %d, kept %d", strafe::g_writes, strafe::g_kept);
         cfg::strafe::enabled = false;
+        strafe::tick(0, Vector3{}, nullptr);
+    }
+
+    // Bunnyhop: with a finger on the jump button the player hops again on every landing; without it, never.
+    {
+        uint8_t* tof = static_cast<uint8_t*>(calloc(1, 0x80));
+        *reinterpret_cast<uint64_t*>(tof) = reinterpret_cast<uint64_t>(make_class("tof"));
+        uint8_t* nip = static_cast<uint8_t*>(calloc(1, 0x80));
+        *reinterpret_cast<uint64_t*>(nip) = reinterpret_cast<uint64_t>(make_class("nip"));
+        *reinterpret_cast<uint64_t*>(nip + 0x48) = reinterpret_cast<uint64_t>(tof);
+        uint8_t* array = static_cast<uint8_t*>(calloc(1, 0x30));
+        *reinterpret_cast<uint64_t*>(array + v100::array_length) = 1;
+        *reinterpret_cast<uint64_t*>(array + v100::array_data) = reinterpret_cast<uint64_t>(nip);
+        uint8_t* wmz = static_cast<uint8_t*>(calloc(1, 0x100));
+        *reinterpret_cast<uint64_t*>(wmz + v100::wmz_first_array) = reinterpret_cast<uint64_t>(array);
+        uint8_t* net = static_cast<uint8_t*>(calloc(1, 0x200));
+        *reinterpret_cast<uint64_t*>(net + v100::net_systems) = reinterpret_cast<uint64_t>(wmz);
+        const uint64_t local = reinterpret_cast<uint64_t>(net);
+        float* a_vec = reinterpret_cast<float*>(tof + 0x10);
+        float* b_vec = reinterpret_cast<float*>(tof + 0x1C);   // velocity: x, y (vertical), z
+        a_vec[0] = 1.f; a_vec[1] = 2.f; a_vec[2] = 3.f;
+        b_vec[0] = 8.f; b_vec[1] = 0.f; b_vec[2] = 0.f;
+        cfg::strafe::enabled = false; cfg::strafe::log = false;
+        cfg::bhop::enabled = true; cfg::bhop::strafe = true; cfg::bhop::log = false;
+        cfg::bhop::jump_x = 100.f; cfg::bhop::jump_y = 100.f; cfg::bhop::radius = 50.f;
+        strafe::g_pid = -1; bhop::g_pid = -1;
+        Vector3 position(0.f, 0.f, 0.f);
+        long long last = diag::now_ms();
+        auto step = [&] {   // the game: gravity, the ground at y = 0
+            usleep(10000);
+            const long long now = diag::now_ms();
+            const float dt = float(now - last) / 1000.f;
+            last = now;
+            if (position.y > 0.f || b_vec[1] > 0.f) b_vec[1] -= 20.f * dt;
+            position.x += b_vec[0] * dt; position.y += b_vec[1] * dt; position.z += b_vec[2] * dt;
+            if (position.y <= 0.f) { position.y = 0.f; if (b_vec[1] < 0.f) b_vec[1] = 0.f; }
+            const matrix view = matrix{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+            bhop::tick(local, position);
+            strafe::tick(local, position, &view);
+        };
+        // no finger on the button: running on the ground, then your own jump; nothing is added
+        touch::g_fake_count = 0;
+        for (int i = 0; i < 60; ++i) step();
+        b_vec[1] = 5.5f;   // your jump
+        for (int i = 0; i < 120; ++i) step();
+        CHECK(bhop::g_jumps == 0 && !bhop::g_held, "no finger: no hops (%d)", bhop::g_jumps);
+        CHECK(strafe::g_vert == 1, "vertical speed found in vector %d", strafe::g_vert);
+        // finger on the button: hops on every landing
+        touch::g_fake_count = 1; touch::g_fake[0] = {110.f, 95.f};
+        for (int i = 0; i < 260; ++i) step();
+        CHECK(bhop::g_held && bhop::g_jumps >= 2, "finger on the jump button: %d hops", bhop::g_jumps);
+        // a finger elsewhere does not count
+        const int before = bhop::g_jumps;
+        touch::g_fake[0] = {700.f, 400.f};
+        for (int i = 0; i < 150; ++i) step();
+        CHECK(!bhop::g_held && bhop::g_jumps == before, "finger elsewhere: no more hops (%d)", bhop::g_jumps - before);
+        // setting the button: the next finger down after all were up
+        bhop::start_calibration();
+        touch::g_fake_count = 1;            // still down: the finger that pressed the menu
+        bhop::calibration_step();
+        CHECK(bhop::g_calibrating, "calibration waits for the old finger to come up");
+        touch::g_fake_count = 0; bhop::calibration_step();
+        touch::g_fake_count = 1; touch::g_fake[0] = {1800.f, 900.f}; bhop::calibration_step();
+        CHECK(!bhop::g_calibrating && cfg::bhop::jump_x == 1800.f && cfg::bhop::jump_y == 900.f, "jump button set at (%.0f, %.0f)", cfg::bhop::jump_x, cfg::bhop::jump_y);
+        cfg::bhop::enabled = false;
+        bhop::tick(0, Vector3{});
         strafe::tick(0, Vector3{}, nullptr);
     }
 

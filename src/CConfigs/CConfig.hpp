@@ -102,6 +102,14 @@ namespace night {
     inline float strength = 0.8f;   // 0 = the map's own light, 1 = darkest
 }
 
+namespace bhop {
+    inline bool enabled = false;
+    inline bool strafe = true;      // the movement turns with the camera while the jump is held
+    inline float jump_x = -1.f, jump_y = -1.f;   // the game's jump button on the screen (set in the menu)
+    inline float radius = 110.f;    // px around it that count as "the jump is held"
+    inline bool log = true;
+}
+
 namespace strafe {
     inline bool enabled = false;
     inline float turn = 4.f;        // degrees the horizontal velocity may turn per frame
