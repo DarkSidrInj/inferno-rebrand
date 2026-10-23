@@ -16,10 +16,9 @@
 //
 // Through walls: internal chams swap in a shader with ZTest Always / ZWrite Off. From outside
 // no shader can be compiled, so an existing material that draws through walls is used:
-//   1. the game's own CharacterBindings.OutlineMaterial: the teammate silhouette, made to be
-//      seen through walls. Taken from any player whose bindings carry one, so enemies whose own
-//      bindings leave it empty get it too.
-//   2. Unity's default UI material (UI/Default) as the fallback. It has
+//   Unity's default UI material (UI/Default). (The game's OutlineMaterial was tried on device:
+//   as a body material it does not draw through walls, the teammate x-ray is a separate pass.)
+//   It has
 // ZWrite Off, sits in the Transparent queue (drawn after the opaque walls) and takes its depth
 // test from unity_GUIZTestMode, which nothing sets on the shared asset, so it reads 0 =
 // CompareFunction.Disabled: no depth test. On an enemy renderer it draws flat white over the
@@ -71,7 +70,6 @@ namespace chams {
     }
 
     inline int32_t g_shared_ids[3]{};               // material id per mode found on any player (index 1, 2)
-    inline int g_logged_source = -1;
 
     inline int32_t material_id(uint64_t bindings, uint64_t field) {
         if (!bindings) return 0;
@@ -149,6 +147,43 @@ namespace chams {
         return 0;
     }
 
+    // uGUI's own default material: Graphic.s_DefaultUI, the first static field of
+    // UnityEngine.UI.Graphic. The class is found among libunity's TypeInfo globals by its Il2Cpp
+    // name; the static must be a material (native object with a non-zero instance id).
+    inline int32_t ui_material_from_graphic() {
+        if (!klass::calibrate()) return 0;
+        std::unordered_map<uint64_t, bool> checked;
+        std::vector<uint64_t> words;
+        for (const auto& seg : icalls::unity_segments()) {
+            if (seg.exec) continue;
+            for (uint64_t at = seg.begin; at < seg.end;) {
+                const size_t chunk = size_t(std::min<uint64_t>(seg.end - at, 1024 * 1024)) & ~size_t(7);
+                if (chunk < 8) break;
+                words.assign(chunk / 8, 0);
+                if (mem_read(at, words.data(), chunk)) {
+                    for (uint64_t v : words) {
+                        if (!plausible(v) || !checked.emplace(v, true).second) continue;
+                        char name[16];
+                        if (!klass::name_at(v, klass::g_name_offset, name, sizeof(name)) || std::strcmp(name, "Graphic") != 0) continue;
+                        for (uint64_t off : {v100::il2cpp_class_static_fields_profile, v100::il2cpp_class_static_fields_compat}) {
+                            const uint64_t statics = rpm<uint64_t>(v + off);
+                            if (!plausible(statics)) continue;
+                            const uint64_t native = native_of(rpm<uint64_t>(statics));  // s_DefaultUI
+                            if (!native || !plausible(rpm<uint64_t>(native))) continue;
+                            const int32_t id = rpm<int32_t>(native + v100::native_instance_id);
+                            if (!id) continue;
+                            diag::log("CHAMS", "through-walls material: Graphic.s_DefaultUI class=0x%llx native=0x%llx id=%d",
+                                      (unsigned long long)v, (unsigned long long)native, id);
+                            return id;
+                        }
+                    }
+                }
+                at += chunk;
+            }
+        }
+        return 0;
+    }
+
     inline void resolve_ui_material() {
         std::vector<std::pair<uint64_t, const char*>> entries;
         const uint64_t wrapper = proc::lib + v100::canvas_default_material_injected;
@@ -160,12 +195,13 @@ namespace chams {
             const int32_t id = material ? rpm<int32_t>(material + v100::native_instance_id) : 0;
             if (!id) continue;
             g_ui_material = id;
-            diag::log("CHAMS", "through-walls material (Unity default UI) native=0x%llx id=%d via %s",
+            diag::log("CHAMS", "through-walls material: Canvas default material native=0x%llx id=%d via %s",
                       (unsigned long long)material, id, e.second);
             return;
         }
-        diag::log("WARN", "CHAMS default UI material not found (%s, %zu accessors)", why.empty() ? "no object returned" : why.c_str(),
-                  entries.size());
+        if (const int32_t id = ui_material_from_graphic()) { g_ui_material = id; return; }
+        diag::log("WARN", "CHAMS default UI material not found (accessor: %s, %zu accessors; Graphic.s_DefaultUI not found)",
+                  why.empty() ? "no object returned" : why.c_str(), entries.size());
     }
 
     inline void resolve(uint64_t native) {
@@ -214,24 +250,24 @@ namespace chams {
         diag::log("WARN", "CHAMS material array not found in renderer 0x%llx (%s)", (unsigned long long)native, why.c_str());
     }
 
+    inline int g_logged_sources[2] = {-1, -1};  // [through-walls targets, local targets]
+
     inline int32_t desired_id(uint64_t bindings, bool through_walls = true) {
         int source = 0;
         int32_t id = 0;
-        if (through_walls && cfg::chams::through_walls) {
-            if ((id = g_shared_ids[2])) source = 2;                   // the game's x-ray (outline) material
-            else if ((id = g_ui_material.load())) source = 3;         // Unity's default UI material
-        }
+        if (through_walls && cfg::chams::through_walls && (id = g_ui_material.load())) source = 3;
         if (!id && cfg::chams::material != 0) {
             const int mode = cfg::chams::material;
             id = material_id(bindings, mode == 1 ? v100::bindings_untouchable_material : v100::bindings_outline_material);
             if (!id) id = g_shared_ids[mode];
             source = id ? mode : 0;
         }
-        if (source != g_logged_source) {
-            g_logged_source = source;
-            static const char* names[] = {"flat (id 0)", "untouchable", "outline", "Unity default UI"};
-            diag::log("CHAMS", "material: %s, id %d%s", names[source], id,
-                      cfg::chams::through_walls && source < 2 ? " (no through-walls material found)" : "");
+        int& logged = g_logged_sources[through_walls ? 0 : 1];
+        if (source != logged) {
+            logged = source;
+            static const char* names[] = {"flat (id 0)", "untouchable", "outline", "Unity default UI (through walls)"};
+            diag::log("CHAMS", "%s targets: %s, id %d%s", through_walls ? "player" : "local", names[source], id,
+                      through_walls && cfg::chams::through_walls && source != 3 ? " (through-walls material not found)" : "");
         }
         return id;
     }
@@ -349,7 +385,7 @@ namespace chams {
             g_size_offset = -1;
             g_ui_material = 0;
             g_shared_ids[1] = g_shared_ids[2] = 0;
-            g_logged_source = -1;
+            g_logged_sources[0] = g_logged_sources[1] = -1;
             g_patched.clear();
             g_last_resolve = 0;
             g_weapon_objects.clear();

@@ -546,12 +546,23 @@ int main() {
             const uint64_t enemy = make_player(1, false, enemy_ids, 2, enemy_r, -9000);
             const std::vector<uint64_t> players{local, mate, enemy};
             route(v100::canvas_default_material_injected, base + fx::UnityEngine_Canvas__GetDefaultCanvasMaterial_Injected);
-            *at(fx::slot_get_default_ui_material) = base + fx::Canvas_GetDefaultCanvasMaterial_Injected;
+            // The Canvas accessor's icall slot stays empty here: the material comes from uGUI's
+            // Graphic.s_DefaultUI, through a TypeInfo global in libunity's data.
             uint8_t* ui_material = static_cast<uint8_t*>(calloc(1, 0x40));
             const int32_t ui_id = -11000;
             std::memcpy(ui_material + v100::native_instance_id, &ui_id, 4);
             *reinterpret_cast<uint64_t*>(ui_material) = reinterpret_cast<uint64_t>(ui_material) + 0x20;  // a vtable pointer
             *at(fx::g_default_ui_material) = reinterpret_cast<uint64_t>(ui_material);
+            uint8_t* graphic_class = static_cast<uint8_t*>(calloc(1, 0x300));
+            char* graphic_name = static_cast<char*>(calloc(1, 16));
+            std::strcpy(graphic_name, "Graphic");
+            *reinterpret_cast<uint64_t*>(graphic_class + klass::g_name_offset) = reinterpret_cast<uint64_t>(graphic_name);
+            uint8_t* graphic_statics = static_cast<uint8_t*>(calloc(1, 0x40));
+            uint8_t* managed_ui = static_cast<uint8_t*>(calloc(1, 0x40));
+            *reinterpret_cast<uint64_t*>(managed_ui + v100::unity_cached_ptr) = reinterpret_cast<uint64_t>(ui_material);
+            *reinterpret_cast<uint64_t*>(graphic_statics) = reinterpret_cast<uint64_t>(managed_ui);  // s_DefaultUI
+            *reinterpret_cast<uint64_t*>(graphic_class + v100::il2cpp_class_static_fields_profile) = reinterpret_cast<uint64_t>(graphic_statics);
+            *reinterpret_cast<uint64_t*>(unity + 0x600) = reinterpret_cast<uint64_t>(graphic_class);  // UnityEngine_UI_Graphic_TypeInfo
             cfg::chams::enabled = true; cfg::chams::enemies = true; cfg::chams::teammates = false; cfg::chams::local_body = false;
             cfg::chams::local_arms = false; cfg::chams::local_weapon = false; cfg::chams::material = 0; cfg::chams::through_walls = false;
             chams::g_pid = -1;
@@ -570,8 +581,7 @@ int main() {
             cfg::chams::through_walls = true;
             chams::g_last_apply = 0;
             chams::tick(players, local, 2);
-            // The game's own x-ray (outline) material wins over the UI fallback.
-            CHECK(enemy_ids[0] == -9000 && enemy_ids[1] == -9000, "through-walls uses the outline material (%d %d)", enemy_ids[0], enemy_ids[1]);
+            CHECK(enemy_ids[0] == ui_id && enemy_ids[1] == ui_id, "through walls uses the UI material (%d %d)", enemy_ids[0], enemy_ids[1]);
             cfg::chams::through_walls = false;
             cfg::chams::teammates = true;
             chams::g_last_apply = 0;

@@ -470,8 +470,12 @@ namespace worldfog {
     // value (computed from the map's own fog) and rewritten directly, so fog changes even when
     // a setter cannot be replayed. The map's fog mode decides what is written: linear uses
     // start/end, exponential modes get a density that fades out at the max distance.
-    struct ParamsCopy { uint64_t address; float original[4]; };
-    struct ColorCopy { uint64_t address; float original[4]; bool linear; };
+    // `ring` = a per-frame copy (constant ring buffer) Unity refills from the source; written once
+    // to tell it apart, then left to follow the source.
+    struct ParamsCopy { uint64_t address; float original[4]; bool ring = false; };
+    struct ColorCopy { uint64_t address; float original[4]; bool linear; bool ring = false; };
+    inline long long g_params_probe = 0;  // when every copy was written once, 0 = not yet
+    inline bool g_params_sorted = false;
     inline std::vector<ParamsCopy> g_params;
     inline std::vector<ColorCopy> g_colors;
     inline bool g_params_logged = false;
@@ -494,6 +498,8 @@ namespace worldfog {
     inline void scan_params() {
         g_params.clear();
         g_colors.clear();
+        g_params_probe = 0;
+        g_params_sorted = false;
         float want[4];
         params_for(g_original.density, g_original.start, g_original.end, want);
         if (want[2] == 0.f && want[3] == 0.f) { diag::log("FOG", "renderer params: map has no linear fog range to search for"); return; }
@@ -504,7 +510,7 @@ namespace worldfog {
         std::vector<uint8_t> buffer;
         uint64_t scanned = 0;
         for (const auto& range : ranges) {
-            for (uint64_t at = range.first; at < range.second && g_params.size() < 16;) {
+            for (uint64_t at = range.first; at < range.second && g_params.size() < 1024;) {
                 const size_t chunk = size_t(std::min<uint64_t>(range.second - at, 1024 * 1024));
                 buffer.assign(chunk, 0);
                 if (mem_read(at, buffer.data(), chunk)) {
@@ -512,7 +518,7 @@ namespace worldfog {
                         float v[4];
                         std::memcpy(v, buffer.data() + i, 16);
                         if (!close(v[2], want[2]) || !close(v[3], want[3]) || !close(v[0], want[0]) || !close(v[1], want[1])) continue;
-                        ParamsCopy copy{at + i, {}};
+                        ParamsCopy copy{at + i, {}, false};
                         std::memcpy(copy.original, v, 16);
                         g_params.push_back(copy);
                         // unity_FogColor sits near unity_FogParams in the built-in parameter block
@@ -525,7 +531,7 @@ namespace worldfog {
                                 lin &= close(c[k], to_linear(g_original.color[k]), 0.f, 3e-3f);
                             }
                             if (!(gamma || lin) || (g_original.color[0] == 0.f && g_original.color[1] == 0.f && g_original.color[2] == 0.f)) continue;
-                            ColorCopy cc{at + i + uint64_t(d), {}, !gamma && lin};
+                            ColorCopy cc{at + i + uint64_t(d), {}, !gamma && lin, false};
                             std::memcpy(cc.original, c, 16);
                             g_colors.push_back(cc);
                             break;
@@ -538,8 +544,8 @@ namespace worldfog {
         }
         diag::log("FOG", "renderer params: %zu copies of unity_FogParams (%.4f %.4f %.6f %.4f), %zu fog colors, %.0f MiB searched",
                   g_params.size(), want[0], want[1], want[2], want[3], g_colors.size(), double(scanned) / 1048576.0);
-        for (const auto& p : g_params) diag::log("FOG", "  params at 0x%llx", (unsigned long long)p.address);
-        for (const auto& c : g_colors) diag::log("FOG", "  color at 0x%llx (%s)", (unsigned long long)c.address, c.linear ? "linear" : "gamma");
+        for (size_t i = 0; i < g_params.size() && i < 8; ++i) diag::log("FOG", "  params at 0x%llx", (unsigned long long)g_params[i].address);
+        if (g_params.size() > 8) diag::log("FOG", "  ... %zu more", g_params.size() - 8);
     }
 
     inline void write_params(float start, float end, const float color[3]) {
@@ -549,16 +555,41 @@ namespace worldfog {
         else if (g_original.mode == 3) density = 2.146f / std::max(end, 1.f);  // exp2: same
         float want[4];
         params_for(density, start, end, want);
+        float rgbs[2][3];
+        for (int k = 0; k < 3; ++k) { rgbs[0][k] = color[k]; rgbs[1][k] = to_linear(color[k]); }
+        const long long now = diag::now_ms();
+
+        // Unity refills its per-frame copies from the source every frame; writing those too only
+        // fights it (flicker). Every copy is written once, and 300 ms later the ones that went
+        // back are known to be refilled copies and are left alone.
+        if (!g_params_sorted && g_params_probe && now - g_params_probe >= 300) {
+            size_t kept = 0, colors_kept = 0;
+            for (auto& p : g_params) {
+                float v[4];
+                p.ring = !(mem_read(p.address, v, 16) && std::memcmp(v, want, 16) == 0);
+                kept += !p.ring;
+            }
+            for (auto& c : g_colors) {
+                float v[3];
+                c.ring = !(mem_read(c.address, v, 12) && std::memcmp(v, rgbs[c.linear ? 1 : 0], 12) == 0);
+                colors_kept += !c.ring;
+            }
+            g_params_sorted = true;
+            diag::log("FOG", "renderer params: %zu of %zu copies hold their value (sources), the rest are refilled every frame; colors %zu of %zu",
+                      kept, g_params.size(), colors_kept, g_colors.size());
+        }
         for (const auto& p : g_params) {
-            float now[4];
-            if (mem_read(p.address, now, 16) && std::memcmp(now, want, 16) != 0) mem_write(p.address, want, 16);
+            if (p.ring && g_params_sorted) continue;
+            float v[4];
+            if (mem_read(p.address, v, 16) && std::memcmp(v, want, 16) != 0) mem_write(p.address, want, 16);
         }
         for (const auto& c : g_colors) {
-            float rgb[3];
-            for (int k = 0; k < 3; ++k) rgb[k] = c.linear ? to_linear(color[k]) : color[k];
-            float now[3];
-            if (mem_read(c.address, now, 12) && std::memcmp(now, rgb, 12) != 0) mem_write(c.address, rgb, 12);
+            if (c.ring && g_params_sorted) continue;
+            float v[3];
+            const float* rgb = rgbs[c.linear ? 1 : 0];
+            if (mem_read(c.address, v, 12) && std::memcmp(v, rgb, 12) != 0) mem_write(c.address, rgb, 12);
         }
+        if (!g_params_probe) g_params_probe = now;
         if (!g_params_logged) {
             g_params_logged = true;
             diag::log("FOG", "renderer params written: mode=%d density=%.4f start=%.1f end=%.1f", g_original.mode, density, start, end);
@@ -566,8 +597,8 @@ namespace worldfog {
     }
 
     inline void restore_params() {
-        for (const auto& p : g_params) mem_write(p.address, p.original, 16);
-        for (const auto& c : g_colors) mem_write(c.address, c.original, 16);
+        for (const auto& p : g_params) if (!p.ring) mem_write(p.address, p.original, 16);
+        for (const auto& c : g_colors) if (!c.ring) mem_write(c.address, c.original, 16);
         g_params_logged = false;
     }
 
