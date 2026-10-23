@@ -815,6 +815,7 @@ int main() {
             const int* scene_count = reinterpret_cast<const int*>(base + fx::g_scene_count);
 
             cfg::thirdperson::show_body = true;
+            cfg::thirdperson::try_enable_body = true;
             cfg::chams::enabled = false;
             localview::g_pid = -1;
             localview::tick(me, true, reinterpret_cast<uint64_t>(main_cam));

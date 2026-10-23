@@ -297,6 +297,8 @@ void visuals::draw() {
     if (tp_guard.active) animate.push_back(LocalPlayer);
     animcull::tick(animate, !animate.empty());
     if (posed) draw_skeletons(ViewMatrix, ProjectionMatrix, enemy_objects);
+    if (tp_guard.active && cfg::thirdperson::show_body && cfg::thirdperson::model_overlay)
+        draw_local_model(ViewMatrix, ProjectionMatrix, LocalPlayer);
     draw_world_items(ViewMatrix, ProjectionMatrix, LocalPosition);
 
     static long long frame_log = 0;

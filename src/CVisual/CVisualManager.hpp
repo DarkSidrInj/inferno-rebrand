@@ -10,6 +10,8 @@ namespace visuals {
     void draw();
     // Called from draw() with the camera that was picked for this frame.
     void draw_skeletons(const matrix& view, const matrix& projection, const std::vector<uint64_t>& enemies);
+    // Third person: the own character drawn from its bones (the real body is not in the render scene).
+    void draw_local_model(const matrix& view, const matrix& projection, uint64_t local);
     void draw_world_items(const matrix& view, const matrix& projection, const Vector3& local_position);
     void dbox(const ImVec2& t, const ImVec2& b, float a);
     void dhp(int hp, const ImVec2& t, const ImVec2& b, float box_h, float a);

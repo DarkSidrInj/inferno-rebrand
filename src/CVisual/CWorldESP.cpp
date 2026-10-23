@@ -56,7 +56,8 @@ namespace {
         dl->AddCircleFilled(c.b, rb, color, 20);
     }
 
-    void draw_overlay(ImDrawList* dl, const Pose& pose, const matrix& view, const matrix& projection) {
+    void draw_overlay(ImDrawList* dl, const Pose& pose, const matrix& view, const matrix& projection,
+                      const ImVec4& fill_col, const ImVec4& outline_col, float outline_px) {
         const float alpha = pose_alpha(pose);
         if (alpha <= 0.f) return;
         const float* m = reinterpret_cast<const float*>(&view);
@@ -100,7 +101,11 @@ namespace {
         bool head_ok = false;
         if (ok[Head]) {
             ImVec2 top;
-            if (world_to_screen(pose.position[Head] + up * .2f, view, projection, top)) {
+            // Along the neck-to-head direction, so the skull sits right when the body leans or lies.
+            Vector3 along = pose.valid[Neck] ? pose.position[Head] - pose.position[Neck] : Vector3(0.f, .2f, 0.f);
+            const float along_len = std::max(std::sqrt(along.x * along.x + along.y * along.y + along.z * along.z), .001f);
+            along = along * (.2f / along_len);
+            if (world_to_screen(pose.position[Head] + along, view, projection, top)) {
                 const ImVec2 mid((at[Head].x + top.x) * .5f, (at[Head].y + top.y) * .5f);
                 head = {at[Head], mid, .085f * px[Head], .1f * px[Head]};
                 head_ok = true;
@@ -117,13 +122,13 @@ namespace {
             }
             return out;
         };
-        const float edge = std::max(1.5f, cfg::chams::overlay_outline);
-        const ImU32 outline = tint(cfg::chams::overlay_outline_col, alpha);
-        const ImU32 fill = tint(cfg::chams::overlay_col, alpha);
+        const float edge = std::max(1.5f, outline_px);
+        const ImU32 outline = tint(outline_col, alpha);
+        const ImU32 fill = tint(fill_col, alpha);
         for (int pass = 0; pass < 2; ++pass) {
             const float grow = pass == 0 ? edge : 0.f;
             const ImU32 color = pass == 0 ? outline : fill;
-            if (pass == 0 && cfg::chams::overlay_outline <= 0.f) continue;
+            if (pass == 0 && outline_px <= 0.f) continue;
             if (torso_ok) {
                 const float side = .09f * (px[LUpperArm] + px[RUpperLeg]) * .5f;  // torso half depth on screen
                 const std::vector<ImVec2> poly = grown_torso(grow + side);
@@ -223,7 +228,8 @@ void visuals::draw_skeletons(const matrix& view, const matrix& projection, const
         const Vector3 feet = player::position(enemy);
         Pose pose;
         if (!skeleton::get(enemy, feet, pose)) continue;
-        if (cfg::chams::enabled && cfg::chams::overlay) draw_overlay(dl, pose, view, projection);
+        if (cfg::chams::enabled && cfg::chams::overlay)
+            draw_overlay(dl, pose, view, projection, cfg::chams::overlay_col, cfg::chams::overlay_outline_col, cfg::chams::overlay_outline);
         if (cfg::esp::skeleton) draw_pose(dl, pose, view, projection);
     }
     skeleton::prune(diag::now_ms());
@@ -261,4 +267,15 @@ void visuals::draw_world_items(const matrix& view, const matrix& projection, con
     if (diag::every(log_stamp, 5000))
         diag::log("WORLD", "entities=%zu grenades=%zu drops=%zu classNameOffset=%d", world::entities().size(),
                   grenades, drops, klass::g_name_offset);
+}
+
+// Third person: the own character, drawn from its bones. Its real body renderer is not part of the
+// render scene in first person (scene handle -1) and registering it needs the game's own allocator,
+// so the model is drawn here, from the same pose the skeleton uses.
+void visuals::draw_local_model(const matrix& view, const matrix& projection, uint64_t local) {
+    if (!local) return;
+    Pose pose;
+    if (!skeleton::get(local, player::position(local), pose)) return;
+    draw_overlay(ImGui::GetBackgroundDrawList(), pose, view, projection, cfg::thirdperson::model_col,
+                 cfg::thirdperson::model_outline_col, cfg::thirdperson::model_outline);
 }

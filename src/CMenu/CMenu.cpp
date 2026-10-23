@@ -146,6 +146,10 @@ namespace ui::menu {
         separator(a);
         checkbox("Show own body, hide first-person arms", &cfg::thirdperson::show_body, a);
         separator(a);
+        checkbox("Own model overlay", &cfg::thirdperson::model_overlay, a);
+        separator(a);
+        colorpick("Own model color", &cfg::thirdperson::model_col, a);
+        separator(a);
         checkbox("Anti-aim", &cfg::antiaim::enabled, a);
         separator(a);
         combo("Yaw", &cfg::antiaim::yaw_mode, {"Legacy", "Spin", "Jitter", "Backwards", "None"}, a);

@@ -439,24 +439,20 @@ namespace localview {
             g_checked_body = body;
             const int on = is_enabled(body);
             if (on == 0) {
-                std::string why;
-                const bool replayed = set_enabled(body, true, why);
-                if (replayed) { g_enabled_body = body; g_enabled_vtable = rpm<uint64_t>(body); }
-                diag::log("TP", "body renderer was disabled: %s (now enabled=%d)", replayed ? "switched on" : why.c_str(), is_enabled(body));
-                if (!replayed && g_enabled_getter) {
-                    uint64_t addr = 0;
-                    int bit = -1;
-                    if (find_flag(body, addr, bit)) {
-                        g_flag_addr = addr;
-                        g_flag_bit = bit;
-                        wpm<uint8_t>(addr, uint8_t(rpm<uint8_t>(addr) | (1 << bit)));
-                        g_enabled_body = body;
-                        g_enabled_vtable = rpm<uint64_t>(body);
-                        diag::log("TP", "body renderer flag written directly: byte 0x%llx (renderer+0x%llx) bit %d, now enabled=%d",
-                                  (unsigned long long)addr, (unsigned long long)(addr - body), bit, is_enabled(body));
-                    } else {
-                        diag::log("TP", "body renderer enabled flag not found: the body stays hidden");
-                    }
+                // Measured: the body renderer's scene handle (renderer+0x198, low dword) is -1, it is not in
+                // the render scene at all; set_enabled would register it through the game's allocator, which
+                // cannot be replayed from outside, and writing the flag alone shows nothing. The own model is
+                // drawn by the overlay instead (CWorldESP.cpp). The replay is tried once per process.
+                const uint32_t handle = rpm<uint32_t>(body + 0x198);
+                diag::log("TP", "body renderer is disabled and %s (scene handle 0x%08x): drawn as an overlay",
+                          handle == 0xFFFFFFFFu ? "not in the render scene" : "has a scene handle", handle);
+                static bool tried = false;
+                if (!tried && cfg::thirdperson::try_enable_body) {
+                    tried = true;
+                    std::string why;
+                    const bool replayed = set_enabled(body, true, why);
+                    if (replayed) { g_enabled_body = body; g_enabled_vtable = rpm<uint64_t>(body); }
+                    diag::log("TP", "set_enabled replay: %s (now enabled=%d)", replayed ? "done" : why.c_str(), is_enabled(body));
                 }
             } else {
                 diag::log("TP", "body renderer enabled=%d", on);
