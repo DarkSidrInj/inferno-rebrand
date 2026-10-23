@@ -1206,7 +1206,8 @@ int main() {
                             *reinterpret_cast<uint32_t*>(site) = 0x12345678;   // another build: refused, the choice stays harmless
                             cfg::skins::code_patch = true;
                             skins::tick(local_s, {local_s});
-                            CHECK(!cfg::skins::code_patch && *reinterpret_cast<uint32_t*>(site) == 0x12345678, "unknown instruction: not patched");
+                            CHECK(!skins::g_patch.site && *reinterpret_cast<uint32_t*>(site) == 0x12345678, "unknown instruction: not patched");
+                            cfg::skins::code_patch = false;
                             *reinterpret_cast<uint32_t*>(site) = 0;
                             skins::g_cave_override = 0;
                         }

@@ -38,7 +38,10 @@
 #include "CClass.hpp"
 #include "../CConfigs/CConfig.hpp"
 #include <atomic>
+#include <cerrno>
 #include <cstdio>
+#include <fcntl.h>
+#include <unistd.h>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -420,6 +423,21 @@ namespace skins {
         return end;
     }
 
+    // Code pages are read-only for process_vm_writev, and the shared /proc/<pid>/mem handle is read-only:
+    // write through a handle of its own.
+    inline bool code_write(uint64_t address, const void* data, size_t size) {
+        char path[64];
+        std::snprintf(path, sizeof(path), "/proc/%d/mem", proc::pid);
+        const int fd = ::open(path, O_RDWR);
+        if (fd < 0) { diag::log("SKINS", "code patch: cannot open %s for writing (errno %d)", path, errno); return false; }
+        const ssize_t n = ::pwrite(fd, data, size, off_t(address));
+        const int err = errno;
+        ::close(fd);
+        if (n != ssize_t(size)) { diag::log("SKINS", "code patch: write of %zu bytes at 0x%llx gave %zd (errno %d)", size, (unsigned long long)address, n, err); return false; }
+        return true;
+    }
+    template <class T> inline bool code_write(uint64_t address, const T& value) { return code_write(address, &value, sizeof(T)); }
+
     inline uint32_t bl_word(uint64_t from, uint64_t to) { return 0x94000000u | uint32_t(((int64_t(to) - int64_t(from)) >> 2) & 0x3FFFFFF); }
 
     inline bool patch_install() {
@@ -442,10 +460,10 @@ namespace skins {
             for (uint8_t b : now) if (b) { diag::log("SKINS", "code patch: no zero padding at 0x%llx", (unsigned long long)cave); return false; }
             uint8_t blob[kCaveSize]{};
             std::memcpy(blob, kCave, sizeof(kCave));
-            if (!mem_write(cave, blob, sizeof(blob))) { diag::log("SKINS", "code patch: cannot write the cave"); return false; }
-            if (!wpm<uint32_t>(site, bl_word(site, cave)) || rpm<uint32_t>(site) != bl_word(site, cave)) {
-                mem_write(cave, std::vector<uint8_t>(kCaveSize, 0).data(), kCaveSize);
-                diag::log("SKINS", "code patch: cannot write the code");
+            if (!code_write(cave, blob, sizeof(blob))) return false;
+            if (!code_write(site, bl_word(site, cave)) || rpm<uint32_t>(site) != bl_word(site, cave)) {
+                code_write(cave, std::vector<uint8_t>(kCaveSize, 0).data(), kCaveSize);
+                diag::log("SKINS", "code patch: the code did not take the write");
                 return false;
             }
         }
@@ -457,15 +475,14 @@ namespace skins {
     // The WeaponId a knife loads as (0: its own).
     inline void patch_target(int weapon) {
         if (!g_patch.site || g_patch.target == weapon) return;
-        wpm<uint32_t>(g_patch.cave + kCaveData, uint32_t(weapon));
-        g_patch.target = weapon;
+        if (code_write(g_patch.cave + kCaveData, uint32_t(weapon))) g_patch.target = weapon;
     }
 
     inline void patch_remove() {
         if (!g_patch.site) return;
-        if (rpm<uint32_t>(g_patch.site) == bl_word(g_patch.site, g_patch.cave)) wpm<uint32_t>(g_patch.site, kPatchOriginal);
+        if (rpm<uint32_t>(g_patch.site) == bl_word(g_patch.site, g_patch.cave)) code_write(g_patch.site, kPatchOriginal);
         std::vector<uint8_t> zero(kCaveSize, 0);
-        mem_write(g_patch.cave, zero.data(), zero.size());
+        code_write(g_patch.cave, zero.data(), zero.size());
         diag::log("SKINS", "code patch removed");
         g_patch = {};
     }
@@ -553,8 +570,10 @@ namespace skins {
 
         // The knife's loading WeaponId (opt-in code patch): the model of the chosen skin's weapon.
         bool patch_changed = false;
-        if (cfg::skins::code_patch && !g_patch.site && !patch_install()) {
-            cfg::skins::code_patch = false;
+        static bool patch_failed = false;       // tried and refused: not again until the checkbox is switched off and on
+        if (!cfg::skins::code_patch) patch_failed = false;
+        else if (!g_patch.site && !patch_failed && !patch_install()) {
+            patch_failed = true;
             set_status("code patch not possible, see the log");
         }
         {
