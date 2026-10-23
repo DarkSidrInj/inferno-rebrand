@@ -1179,42 +1179,57 @@ int main() {
                         skins::tick(local_s, {local_s});
                         CHECK(*value_of(by_weapon[0], 0) == 0x7000 && field(knife_content, 2) == 0x7002, "force model off: tables back");
                         game_loads();
-                        // Code patch: the loader's WeaponId instruction becomes a call into a cave that answers 75 for knives.
+                        // Code patch: two instructions of the loader become calls into a cave that answers 75 and an
+                        // entry of our own for the local knife; the shared blank entry is left alone.
                         {
-                            const uint64_t site = proc::lib + skins::kPatchRva, cave = proc::lib + 0xC000000;
-                            *reinterpret_cast<uint32_t*>(site) = skins::kPatchOriginal;
+                            const uint64_t site1 = proc::lib + skins::kSite1Rva, site2 = proc::lib + skins::kSite2Rva, cave = proc::lib + 0xC000000;
+                            *reinterpret_cast<uint32_t*>(site1) = skins::kOriginal1;
+                            *reinterpret_cast<uint32_t*>(site2) = skins::kOriginal2;
                             skins::g_cave_override = cave;
+                            auto data = [&] { return *reinterpret_cast<skins::CaveData*>(cave + skins::kCaveData); };
+                            auto bl_target = [](uint64_t at) { const uint32_t w = *reinterpret_cast<uint32_t*>(at); return (w >> 26) == 0x25 ? at + (int64_t(int32_t(w << 6) >> 6) * 4) : 0; };
+                            auto count = [&] { return int(*reinterpret_cast<int32_t*>(list + 0x18)); };
+                            auto skin_at = [&](int i) { return reinterpret_cast<int32_t*>(items + 0x20 + i * 0x38 + 4); };
+                            const int count_before = count();
                             cfg::skins::code_patch = true;
                             cfg::skins::chosen[70] = 47502;
                             skins::tick(local_s, {local_s});
-                            const uint32_t word = *reinterpret_cast<uint32_t*>(site);
-                            CHECK((word >> 26) == 0x25 && site + (int64_t(int32_t(word << 6) >> 6) * 4) == cave, "site is a bl to the cave (0x%08x)", word);
-                            CHECK(std::memcmp(reinterpret_cast<void*>(cave), skins::kCave, sizeof(skins::kCave)) == 0 &&
-                                  *reinterpret_cast<uint32_t*>(cave + skins::kCaveData) == 75 && beh_meta() == 0xFFFE, "cave written, knives load as 75");
+                            CHECK(bl_target(site1) == cave && bl_target(site2) == cave + skins::kCaveEntryB, "both sites call the cave");
+                            CHECK(std::memcmp(reinterpret_cast<void*>(cave), skins::kCave, sizeof(skins::kCave)) == 0, "cave written");
+                            CHECK(data().beh == reinterpret_cast<uint64_t>(beh) && data().weapon == 75 && data().meta == uint32_t(count_before) &&
+                                  count() == count_before + 1 && *skin_at(count_before) == 47502, "knives load as 75 with entry %d (data %u/%u, count %d)",
+                                  count_before, data().weapon, data().meta, count());
+                            CHECK(entry0() == 0 && beh_meta() == 0xFFFE, "the blank entry is left alone, the knife reloads (entry0 %d)", entry0());
                             game_loads();
                             beh[0x40] = 75;   // the game now caches the knife as the Butterfly: still the knife for the choices
                             skins::g_reload_at = 0;
                             skins::tick(local_s, {local_s});
-                            CHECK(entry0() == 47502 && beh_meta() == 0 && skins::view().weapon == 70 && cfg::skins::chosen[75] == 0,
-                                  "loaded as 75: the skin id stays held (entry %d), menu weapon %d", entry0(), skins::view().weapon);
+                            CHECK(skins::view().weapon == 70 && cfg::skins::chosen[75] == 0 && beh_meta() == 0, "loaded as 75: still the knife for the menu (weapon %d)", skins::view().weapon);
+                            cfg::skins::chosen[70] = 240007;   // another skin: the same entry, rewritten, and the knife loads again
+                            skins::tick(local_s, {local_s});
+                            CHECK(*skin_at(count_before) == 240007 && count() == count_before + 1 && beh_meta() == 0xFFFE, "another skin in the same entry");
+                            game_loads();
                             cfg::skins::chosen[70] = 0;
                             skins::tick(local_s, {local_s});
-                            CHECK(*reinterpret_cast<uint32_t*>(cave + skins::kCaveData) == 0 && beh_meta() == 0xFFFE, "no skin: knives load as themselves again");
+                            CHECK(data().weapon == 0 && data().meta == 0 && data().beh == 0 && beh_meta() == 0xFFFE, "no skin: neutral cave data, knife reloads");
                             beh[0x40] = 70;
                             game_loads();
                             cfg::skins::chosen[70] = 47502;
                             skins::tick(local_s, {local_s});
                             game_loads();
-                            cfg::skins::code_patch = false;   // switched off: code back
+                            cfg::skins::code_patch = false;   // switched off: code back, our entry gone
                             skins::tick(local_s, {local_s});
-                            CHECK(*reinterpret_cast<uint32_t*>(site) == skins::kPatchOriginal && *reinterpret_cast<uint32_t*>(cave) == 0, "code patch switched off: instruction and cave back");
+                            CHECK(*reinterpret_cast<uint32_t*>(site1) == skins::kOriginal1 && *reinterpret_cast<uint32_t*>(site2) == skins::kOriginal2 &&
+                                  *reinterpret_cast<uint32_t*>(cave) == 0 && count() == count_before, "code patch switched off: both instructions, cave and entry back (count %d)", count());
                             game_loads();
-                            *reinterpret_cast<uint32_t*>(site) = 0x12345678;   // another build: refused, the choice stays harmless
+                            *reinterpret_cast<uint32_t*>(site2) = 0x12345678;   // another build: refused, nothing written
                             cfg::skins::code_patch = true;
                             skins::tick(local_s, {local_s});
-                            CHECK(!skins::g_patch.site && *reinterpret_cast<uint32_t*>(site) == 0x12345678, "unknown instruction: not patched");
+                            CHECK(!skins::g_patch.site1 && *reinterpret_cast<uint32_t*>(site1) == skins::kOriginal1 && *reinterpret_cast<uint32_t*>(site2) == 0x12345678 &&
+                                  *reinterpret_cast<uint32_t*>(cave) == 0, "unknown instruction: not patched");
                             cfg::skins::code_patch = false;
-                            *reinterpret_cast<uint32_t*>(site) = 0;
+                            *reinterpret_cast<uint32_t*>(site1) = 0;
+                            *reinterpret_cast<uint32_t*>(site2) = 0;
                             skins::g_cave_override = 0;
                         }
                         game_loads();

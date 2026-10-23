@@ -56,7 +56,7 @@ namespace skins {
     inline constexpr uint64_t kContentParams[3] = {0x10, 0x18, 0x20};    // dlz: mesh, animations, sounds
     inline constexpr uint64_t kDictEntries = 0x18, kDictCount = 0x20, kEntryStride = 0x18, kEntryKey = 0x8, kEntryValue = 0x10;
     inline constexpr const char* kParamNames[3] = {"mesh", "animations", "sounds"};
-    inline constexpr uint64_t kBehRegistry = 0x80, kRegistryList = 0x10, kMetaStride = 0x38, kMetaSkin = 0x4;
+    inline constexpr uint64_t kBehRegistry = 0x80, kRegistryList = 0x10, kMetaSkin = 0x4;
 
     inline constexpr const char* kButterflyModel = "skinTemplate/KnifeButterfly";
     struct Skin { int id; const char* name; const char* model; int weapon; };   // model: the game's skin template; weapon: the WeaponId it belongs to
@@ -364,6 +364,26 @@ namespace skins {
         diag::log("SKINS", "no reload after the state change: the skin shows from the next weapon switch");
     }
 
+    // The match's weapon meta registry (beh+0x80 -> List<WeaponMetaData> @+0x10): 0x38 bytes per entry,
+    // SkinId at +4. Entry 0 is the blank one that weapons without a skin use.
+    inline constexpr uint64_t kMetaDataStride = 0x38, kEntrySkin = 0x4;
+    struct Registry { uint64_t list{}, data{}; int count{}; };
+
+    inline bool registry_of(uint64_t beh, Registry& r) {
+        const uint64_t reg = rpm<uint64_t>(beh + kBehRegistry);
+        r.list = plausible(reg) ? rpm<uint64_t>(reg + kRegistryList) : 0;
+        const uint64_t items = plausible(r.list) ? rpm<uint64_t>(r.list + v100::list_items) : 0;
+        r.count = plausible(r.list) ? rpm<int>(r.list + v100::list_count) : 0;
+        const uint64_t length = plausible(items) ? rpm<uint64_t>(items + v100::array_length) : 0;
+        if (!plausible(items) || r.count <= 0 || r.count > 4096 || length < uint64_t(r.count)) return false;
+        r.data = items + v100::array_data;
+        return true;
+    }
+
+    inline uint64_t entry(const Registry& r, int index) {
+        return index >= 0 && index < r.count ? r.data + uint64_t(index) * kMetaDataStride : 0;
+    }
+
     // Registry entry (WeaponMetaData) of a meta id: index = meta id (entry 0 = the blank one that
     // weapons without a skin use; seen on device).
     inline uint64_t meta_entry(uint64_t beh, int meta) {
@@ -372,7 +392,7 @@ namespace skins {
         const uint64_t items = plausible(list) ? rpm<uint64_t>(list + v100::list_items) : 0;
         const int count = plausible(list) ? rpm<int>(list + v100::list_count) : 0;
         if (!plausible(items) || meta < 0 || meta >= count || count > 4096) return 0;
-        return items + v100::array_data + uint64_t(meta) * kMetaStride;
+        return items + v100::array_data + uint64_t(meta) * kMetaDataStride;
     }
 
     // What the game built for a weapon: every cached content of it, with its params and packs.
@@ -395,15 +415,24 @@ namespace skins {
         });
     }
 
-    // ---- the WeaponId the loader sees (opt-in code patch) ----------------------------------------
-    inline constexpr uint64_t kPatchRva = 0x98A9264;          // beh.plkc: ldrb w1, [x9, #0x10]
-    inline constexpr uint32_t kPatchOriginal = 0x39404121;
-    // ldrb w1,[x9,#0x10]; sub w17,w1,#70; cmp w17,#20; b.hs end; adr x16,data; ldr w17,[x16];
-    // cbz w17,end; mov w1,w17; end: ret; data: .word target
-    inline constexpr uint32_t kCave[9] = {0x39404121, 0x51011831, 0x7100523f, 0x540000a2, 0x100000b0,
-                                          0xb9400211, 0x34000051, 0x2a1103e1, 0xd65f03c0};
-    inline constexpr uint64_t kCaveData = 0x24, kCaveSize = 0x40;
-    struct CodePatch { uint64_t site{}, cave{}; int target{}; };
+    // ---- what the loader sees for the local knife (opt-in code patch) ----------------------------
+    // beh.plkc builds the loading tuple (WeaponId, WeaponMetaId, view) every frame. Two instructions of it
+    // become calls into a few instructions in the zero padding at the end of the code mapping:
+    //   site 1 (RVA 0x98A9264) ldrb w1,[x9,#0x10]  : the item's WeaponId  -> the skin's weapon (75)
+    //   site 2 (RVA 0x98A926C) and x2,x8,#0xffff   : the meta id          -> an entry of our own
+    // only for the local beh (x19 == data.beh), for knives (70..89), and for site 2 only when the game's own
+    // meta id is the blank 0. Everything else, every other player, passes through unchanged.
+    inline constexpr uint64_t kSite1Rva = 0x98A9264, kSite2Rva = 0x98A926C;
+    inline constexpr uint32_t kOriginal1 = 0x39404121, kOriginal2 = 0x92403d02;
+    inline constexpr uint32_t kCave[26] = {
+        0x39404121, 0x51011831, 0x7100523f, 0x54000102, 0x100002d0, 0xf9400211, 0xeb13023f, 0x54000081,
+        0xb9400a11, 0x34000051, 0x2a1103e1, 0xd65f03c0,                     // A: weapon id, ends with ret at 0x2c
+        0x92403d02, 0x51011831, 0x7100523f, 0x54000122, 0x10000150, 0xf9400211, 0xeb13023f, 0x540000a1,
+        0xb9400e11, 0x34000071, 0xb5000042, 0xaa1103e2, 0xd65f03c0,         // B (at 0x30): meta id, ret at 0x60
+        0xd503201f};
+    inline constexpr uint64_t kCaveEntryB = 0x30, kCaveData = 0x68, kCaveSize = 0x80;   // data: u64 beh, u32 weapon, u32 meta
+    struct CaveData { uint64_t beh{}; uint32_t weapon{}, meta{}; };
+    struct CodePatch { uint64_t site1{}, site2{}, cave{}; CaveData now{}; };
     inline CodePatch g_patch;
     inline uint64_t g_cave_override = 0;                      // tests
 
@@ -441,50 +470,112 @@ namespace skins {
     inline uint32_t bl_word(uint64_t from, uint64_t to) { return 0x94000000u | uint32_t(((int64_t(to) - int64_t(from)) >> 2) & 0x3FFFFFF); }
 
     inline bool patch_install() {
-        if (g_patch.site) return true;
-        const uint64_t site = proc::lib + kPatchRva;
-        const uint32_t word = rpm<uint32_t>(site);
+        if (g_patch.site1) return true;
+        const uint64_t site1 = proc::lib + kSite1Rva, site2 = proc::lib + kSite2Rva;
+        const uint32_t word1 = rpm<uint32_t>(site1), word2 = rpm<uint32_t>(site2);
         uint64_t cave = g_cave_override;
         if (!cave) {
-            const uint64_t end = exec_mapping_end(site);
+            const uint64_t end = exec_mapping_end(site1);
             if (!end) { diag::log("SKINS", "code patch: code mapping not found"); return false; }
             cave = (end - kCaveSize) & ~uint64_t(0xF);
         }
-        const int64_t distance = int64_t(cave) - int64_t(site);
-        if (distance > 0x7FFFFF0 || distance < -0x7FFFFF0) { diag::log("SKINS", "code patch: cave out of reach"); return false; }
+        for (uint64_t site : {site1, site2}) {
+            const int64_t distance = int64_t(cave) - int64_t(site);
+            if (distance > 0x7FFFFF0 || distance < -0x7FFFFF0) { diag::log("SKINS", "code patch: cave out of reach"); return false; }
+        }
         uint8_t now[kCaveSize];
         mem_read(cave, now, sizeof(now));
-        const bool ours = word == bl_word(site, cave) && std::memcmp(now, kCave, sizeof(kCave)) == 0;
+        const bool ours = word1 == bl_word(site1, cave) && word2 == bl_word(site2, cave + kCaveEntryB) &&
+                          std::memcmp(now, kCave, sizeof(kCave)) == 0;
         if (!ours) {
-            if (word != kPatchOriginal) { diag::log("SKINS", "code patch: instruction at the site is 0x%08x, not the known one (other build)", word); return false; }
+            if (word1 != kOriginal1 || word2 != kOriginal2) {
+                diag::log("SKINS", "code patch: instructions at the sites are 0x%08x 0x%08x, not the known ones (other build)", word1, word2);
+                return false;
+            }
             for (uint8_t b : now) if (b) { diag::log("SKINS", "code patch: no zero padding at 0x%llx", (unsigned long long)cave); return false; }
             uint8_t blob[kCaveSize]{};
             std::memcpy(blob, kCave, sizeof(kCave));
-            if (!code_write(cave, blob, sizeof(blob))) return false;
-            if (!code_write(site, bl_word(site, cave)) || rpm<uint32_t>(site) != bl_word(site, cave)) {
+            auto rollback = [&] {
+                if (rpm<uint32_t>(site1) != kOriginal1) code_write(site1, kOriginal1);
+                if (rpm<uint32_t>(site2) != kOriginal2) code_write(site2, kOriginal2);
                 code_write(cave, std::vector<uint8_t>(kCaveSize, 0).data(), kCaveSize);
+            };
+            if (!code_write(cave, blob, sizeof(blob))) return false;
+            if (!code_write(site1, bl_word(site1, cave)) || !code_write(site2, bl_word(site2, cave + kCaveEntryB)) ||
+                rpm<uint32_t>(site1) != bl_word(site1, cave) || rpm<uint32_t>(site2) != bl_word(site2, cave + kCaveEntryB)) {
+                rollback();
                 diag::log("SKINS", "code patch: the code did not take the write");
                 return false;
             }
         }
-        g_patch = {site, cave, int(rpm<uint32_t>(cave + kCaveData))};
-        diag::log("SKINS", "code patch: 0x%llx -> bl 0x%llx (cave %zu bytes)", (unsigned long long)site, (unsigned long long)cave, sizeof(kCave));
+        g_patch = {site1, site2, cave, {}};
+        mem_read(cave + kCaveData, &g_patch.now, sizeof(CaveData));
+        diag::log("SKINS", "code patch: 0x%llx and 0x%llx -> cave 0x%llx (%zu bytes)", (unsigned long long)site1, (unsigned long long)site2,
+                  (unsigned long long)cave, sizeof(kCave));
         return true;
     }
 
-    // The WeaponId a knife loads as (0: its own).
-    inline void patch_target(int weapon) {
-        if (!g_patch.site || g_patch.target == weapon) return;
-        if (code_write(g_patch.cave + kCaveData, uint32_t(weapon))) g_patch.target = weapon;
+    // What the local beh's knife loads as: the weapon id (0: its own) and the meta id entry (0: the game's).
+    // True when it changed.
+    inline bool patch_set(uint64_t beh, int weapon, int meta) {
+        if (!g_patch.site1) return false;
+        const CaveData want{weapon || meta ? beh : 0, uint32_t(weapon), uint32_t(meta)};
+        if (want.beh == g_patch.now.beh && want.weapon == g_patch.now.weapon && want.meta == g_patch.now.meta) return false;
+        if (!code_write(g_patch.cave + kCaveData, want)) return false;
+        const bool changed = want.weapon != g_patch.now.weapon || want.meta != g_patch.now.meta;
+        g_patch.now = want;
+        return changed;
     }
 
     inline void patch_remove() {
-        if (!g_patch.site) return;
-        if (rpm<uint32_t>(g_patch.site) == bl_word(g_patch.site, g_patch.cave)) code_write(g_patch.site, kPatchOriginal);
-        std::vector<uint8_t> zero(kCaveSize, 0);
-        code_write(g_patch.cave, zero.data(), zero.size());
+        if (!g_patch.site1) return;
+        if (rpm<uint32_t>(g_patch.site1) == bl_word(g_patch.site1, g_patch.cave)) code_write(g_patch.site1, kOriginal1);
+        if (rpm<uint32_t>(g_patch.site2) == bl_word(g_patch.site2, g_patch.cave + kCaveEntryB)) code_write(g_patch.site2, kOriginal2);
+        code_write(g_patch.cave, std::vector<uint8_t>(kCaveSize, 0).data(), kCaveSize);
         diag::log("SKINS", "code patch removed");
         g_patch = {};
+    }
+
+    // The registry entry the patched knife points at: a copy of the blank entry 0 with the chosen skin id,
+    // appended to the match's list (the game maps weapon data to ids locally and appends after it). Its index,
+    // or -1 when the list has no room. `rewritten`: the skin id was changed in place.
+    struct OwnEntry { uint64_t list{}; int index = -1; };
+    inline OwnEntry g_own;
+
+    inline int own_entry(uint64_t beh, int skin, bool& rewritten) {
+        Registry r;
+        if (!registry_of(beh, r)) return -1;
+        if (r.list != g_own.list) g_own = {r.list, -1};
+        if (g_own.index >= 0) {
+            if (const uint64_t e = entry(r, g_own.index)) {
+                if (rpm<int>(e + kEntrySkin) != skin) { wpm<int>(e + kEntrySkin, skin); rewritten = true; }
+                return g_own.index;
+            }
+            g_own.index = -1;   // the list shrank under us
+        }
+        const uint64_t items = rpm<uint64_t>(r.list + v100::list_items);
+        if (uint64_t(r.count) + 1 > rpm<uint64_t>(items + v100::array_length)) return -1;
+        uint8_t data[kMetaDataStride]{};
+        if (const uint64_t blank = entry(r, 0)) mem_read(blank, data, sizeof(data));
+        std::memcpy(data + kEntrySkin, &skin, 4);
+        if (!mem_write(r.data + uint64_t(r.count) * kMetaDataStride, data, sizeof(data))) return -1;
+        wpm<int>(r.list + v100::list_count, r.count + 1);
+        g_own.index = r.count;
+        rewritten = true;
+        diag::log("SKINS", "registry entry %d: skin %d (copy of the blank entry 0)", r.count, skin);
+        return g_own.index;
+    }
+
+    inline void own_entry_remove() {
+        if (g_own.index < 0 || !plausible(g_own.list)) { g_own = {}; return; }
+        const int count = rpm<int>(g_own.list + v100::list_count);
+        const uint64_t items = rpm<uint64_t>(g_own.list + v100::list_items);
+        if (count == g_own.index + 1 && plausible(items)) {
+            std::vector<uint8_t> zero(kMetaDataStride, 0);
+            mem_write(items + v100::array_data + uint64_t(g_own.index) * kMetaDataStride, zero.data(), zero.size());
+            wpm<int>(g_own.list + v100::list_count, g_own.index);
+        }
+        g_own = {};
     }
 
     inline void release_hold() {
@@ -493,8 +584,9 @@ namespace skins {
     }
 
     inline void restore() {
-        const bool patched = g_patch.site != 0 && g_patch.target != 0;
+        const bool patched = g_patch.site1 != 0 && (g_patch.now.weapon != 0 || g_patch.now.meta != 0);
         patch_remove();
+        own_entry_remove();
         const bool held = g_hold.at != 0 || patched;
         release_hold();
         if (g_swaps.empty() && !held) return;
@@ -520,6 +612,8 @@ namespace skins {
         g_reload_beh = 0;
         g_reload_at = 0;
         g_hold = {};
+        g_own = {};
+        g_patch = {};   // the patched process is gone
     }
 
     // Once per frame.
@@ -537,7 +631,7 @@ namespace skins {
         // With the code patch the knife in hands loads (and beh caches it) as the skin's weapon: it is still
         // the knife the choices are made for.
         int held = rpm<uint8_t>(b + kBehState);
-        if (g_patch.target && held == g_patch.target) held = 70;
+        if (g_patch.now.weapon && held == int(g_patch.now.weapon)) held = 70;
         g_held_weapon = held;
         if (!resolve(b)) { set_status("weapon content not found"); return; }
 
@@ -571,28 +665,30 @@ namespace skins {
         const int chosen = held < 256 && g_applied.count(held) ? cfg::skins::chosen[held] : 0;
         set_status("weapon " + std::to_string(held) + ": " + (chosen > 0 ? "skin " + std::to_string(chosen) : "original"));
 
-        // The knife's loading WeaponId (opt-in code patch): the model of the chosen skin's weapon.
-        bool patch_changed = false;
+        // The local knife's loading tuple (opt-in code patch): the skin's weapon and an entry of our own.
         static bool patch_failed = false;       // tried and refused: not again until the checkbox is switched off and on
         if (!cfg::skins::code_patch) patch_failed = false;
-        else if (!g_patch.site && !patch_failed && !patch_install()) {
+        else if (!g_patch.site1 && !patch_failed && !patch_install()) {
             patch_failed = true;
             set_status("code patch not possible, see the log");
         }
-        {
+        if (!cfg::skins::code_patch && g_patch.site1) { patch_remove(); own_entry_remove(); }
+        bool patch_changed = false, rewritten = false;
+        int own = -1;
+        if (g_patch.site1) {
+            const int skin = cfg::skins::chosen[70];
             int model = 0;
-            if (cfg::skins::code_patch && g_patch.site && cfg::skins::chosen[70] > 0)
-                for (const Skin& k : kSkins) if (k.id == cfg::skins::chosen[70]) model = k.weapon;
-            if (g_patch.site && model != g_patch.target) {
-                patch_target(model);
-                patch_changed = true;
-                diag::log("SKINS", "knives load as weapon %d", model ? model : 70);
+            if (skin > 0) {
+                for (const Skin& k : kSkins) if (k.id == skin) model = k.weapon;
+                own = own_entry(b, skin, rewritten);
             }
-            if (!cfg::skins::code_patch && g_patch.site) patch_remove();
+            patch_changed = patch_set(b, model, own > 0 ? own : 0);
+            if (patch_changed) diag::log("SKINS", "knives load as weapon %d, meta entry %d", model ? model : 70, own > 0 ? own : 0);
         }
 
-        // The knife's skin id in its registry entry while it is in hands.
-        if (chosen > 0 && knife(held)) {
+        // Without our own entry (no code patch, or the list is full): the knife's skin id in the blank entry
+        // while the knife is in hands. The killfeed then shows that skin for every knife kill.
+        if (own < 0 && chosen > 0 && knife(held)) {
             const uint64_t e = meta_entry(b, cached);
             if (!e) { set_status("knife: no registry entry for meta id " + std::to_string(cached)); return; }
             if (g_hold.at && g_hold.at != e) release_hold();
@@ -610,7 +706,10 @@ namespace skins {
             diag::log("SKINS", "weapon %d in hands: registry entry back, it loads clean", held);
             reload(b, cached);
         }
-        if (patch_changed && knife(held)) reload(b, cached);
+        // Our own entry: the loader picks it up by itself when the tuple changes; the same tuple with another
+        // skin id needs a nudge.
+        if (own > 0 && knife(held) && (rewritten || patch_changed || held_changed)) reload(b, cached);
+        else if (own < 0 && patch_changed && knife(held)) reload(b, cached);
     }
 
     // ---- game code for offline reading -----------------------------------------------------------
