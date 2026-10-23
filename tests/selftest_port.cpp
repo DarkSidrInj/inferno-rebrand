@@ -1094,7 +1094,7 @@ int main() {
                         uint8_t* butterfly_content = static_cast<uint8_t*>(calloc(1, 0x40));  // built for WeaponId 72 with the Butterfly template's params
                         *reinterpret_cast<uint64_t*>(butterfly_content + 0x10) = 0x7500u;
                         uint8_t* cache = make_dict({{70, reinterpret_cast<uint64_t>(knife_content)}, {44 | (uint64_t(99999) << 32), reinterpret_cast<uint64_t>(other_content)},
-                                                    {72, reinterpret_cast<uint64_t>(butterfly_content)}});
+                                                    {75, reinterpret_cast<uint64_t>(butterfly_content)}});
                         uint8_t* ybt = static_cast<uint8_t*>(calloc(1, 0x60));
                         *reinterpret_cast<uint64_t*>(ybt) = reinterpret_cast<uint64_t>(ybt_class);
                         *reinterpret_cast<uint64_t*>(ybt + 0x38) = reinterpret_cast<uint64_t>(iwfs[0]);
@@ -1198,26 +1198,26 @@ int main() {
                             skins::tick(local_s, {local_s});
                             CHECK(bl_target(site1) == cave && bl_target(site2) == cave + skins::kCaveEntryB, "both sites call the cave");
                             CHECK(std::memcmp(reinterpret_cast<void*>(cave), skins::kCave, sizeof(skins::kCave)) == 0, "cave written");
-                            CHECK(data().beh == reinterpret_cast<uint64_t>(beh) && data().weapon == 71 && data().skin == 47502 &&
-                                  count() == count_before, "knives load as 71 with skin 47502 (data %u/%u, count %d)",
+                            CHECK(data().beh == reinterpret_cast<uint64_t>(beh) && data().weapon == 75 && data().skin == 47502 &&
+                                  count() == count_before, "knives load as 75 with skin 47502 (data %u/%u, count %d)",
                                   data().weapon, data().skin, count());
                             CHECK(entry0() == 0 && beh_meta() == 0xFFFE, "the blank entry is left alone, the knife reloads (entry0 %d)", entry0());
                             game_loads();
-                            beh[0x40] = 71;   // the game now caches the knife as the Butterfly: still the knife for the choices
+                            beh[0x40] = 75;   // the game now caches the knife as the Butterfly: still the knife for the choices
                             skins::g_reload_at = 0;
                             skins::tick(local_s, {local_s});
-                            CHECK(skins::view().weapon == 70 && cfg::skins::chosen[71] == 0 && beh_meta() == 0, "loaded as 71: still the knife for the menu (weapon %d)", skins::view().weapon);
+                            CHECK(skins::view().weapon == 70 && cfg::skins::chosen[75] == 0 && beh_meta() == 0, "loaded as 75: still the knife for the menu (weapon %d)", skins::view().weapon);
                             cfg::skins::chosen[70] = 240007;   // another skin: new data, and the knife loads again
                             skins::tick(local_s, {local_s});
-                            CHECK(data().skin == 240007 && data().weapon == 71 && count() == count_before && beh_meta() == 0xFFFE, "another skin id in the cave");
+                            CHECK(data().skin == 240007 && data().weapon == 75 && count() == count_before && beh_meta() == 0xFFFE, "another skin id in the cave");
                             game_loads();
                             skins::probe_request();   // the probe hands out WeaponIds and names the one that builds the Butterfly's params
                             skins::tick(local_s, {local_s});
-                            CHECK(skins::g_probe.on && data().weapon == 72 && data().skin == 47502, "probe starts with id 72 (weapon %u)", data().weapon);
+                            CHECK(skins::g_probe.on && data().weapon == 75 && data().skin == 47502, "probe starts with id 75 (weapon %u)", data().weapon);
                             skins::tick(local_s, {local_s});
-                            CHECK(cfg::skins::model == 72 && skins::g_probe.id == 73 && data().weapon == 73, "probe found the Butterfly as 72, went on (model %d, id %d)", cfg::skins::model, skins::g_probe.id);
+                            CHECK(cfg::skins::model == 75 && !skins::g_probe.waiting && skins::g_probe.index == 1001, "probe found the Butterfly as 75 (model %d, index %d)", cfg::skins::model, skins::g_probe.index);
                             skins::g_probe.on = false;
-                            cfg::skins::model = 71;
+                            cfg::skins::model = 75;
                             cfg::skins::chosen[70] = 0;
                             skins::tick(local_s, {local_s});
                             CHECK(data().weapon == 0 && data().skin == 0 && data().beh == 0 && beh_meta() == 0xFFFE, "no skin: neutral cave data, knife reloads");

@@ -443,7 +443,7 @@ namespace skins {
     struct CodePatch { uint64_t site1{}, site2{}, cave{}; CaveData now{}; };
     inline CodePatch g_patch;
 
-    struct Probe { bool on = false, waiting = false; int id = 0; long long started = 0; int hits = 0; };
+    struct Probe { bool on = false, waiting = false; int index = 0; long long started = 0; int hits = 0; };
     inline Probe g_probe;
     inline std::atomic<bool> g_probe_request{false};
 
@@ -557,16 +557,24 @@ namespace skins {
     // by template name; the ids are not known offline. The probe hands the local knife one candidate id after
     // another, waits for the game to build content for it and names it by the mesh params it got.
 
-    inline uint64_t built_mesh(int weapon, int skin) {
-        uint64_t mesh = 0;
-        if (!plausible(g_resolver)) return 0;
+    struct Built { bool exists = false; uint64_t mesh = 0, anim = 0, sound = 0; int packs = -1; };
+    inline Built built(int weapon, int skin) {
+        Built out;
+        if (!plausible(g_resolver)) return out;
         each_entry(rpm<uint64_t>(g_resolver + kResolverCache), [&](uint64_t e) {
             if (rpm<uint8_t>(e + kEntryKey) != weapon || rpm<int>(e + kEntryKey + 4) != skin) return true;
             const uint64_t c = rpm<uint64_t>(e + kEntryValue);
-            mesh = plausible(c) ? rpm<uint64_t>(c + 0x10) : 0;
+            out.exists = true;
+            if (plausible(c)) {
+                out.mesh = rpm<uint64_t>(c + 0x10);
+                out.anim = rpm<uint64_t>(c + 0x18);
+                out.sound = rpm<uint64_t>(c + 0x20);
+                const uint64_t packs = rpm<uint64_t>(c + 0x28);
+                out.packs = plausible(packs) ? rpm<int>(packs + v100::list_count) : -1;
+            }
             return false;
         });
-        return mesh;
+        return out;
     }
 
     inline std::string template_of(uint64_t mesh) {
@@ -580,8 +588,11 @@ namespace skins {
         return name;
     }
 
-    inline bool has_weapon_entry(int weapon) {
-        return g_params[0].by_weapon && find_value(g_params[0].by_weapon, uint64_t(weapon), 4);
+    // Candidates: 75 first (the Butterfly's number in the old skin ids 475xx), then the knife range. Loading the
+    // content of a weapon can take seconds (its content packs), so each id gets time.
+    inline int probe_id(int index) {
+        static const int order[] = {75, 72, 73, 74, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89};
+        return index < int(sizeof(order) / sizeof(order[0])) ? order[index] : -1;
     }
 
     // One step per frame while the probe is on; true while it is.
@@ -590,28 +601,35 @@ namespace skins {
         if (!g_patch.site1) { diag::log("SKINS", "probe: needs \"Full model\" on"); g_probe.on = false; return false; }
         const long long now = diag::now_ms();
         if (g_probe.waiting) {
-            const uint64_t mesh = built_mesh(g_probe.id, 0);
-            if (!mesh && now - g_probe.started < 1100) return true;
-            if (mesh) {
-                const std::string name = template_of(mesh);
-                diag::log("SKINS", "probe: WeaponId %d builds content (mesh params 0x%llx) %s", g_probe.id, (unsigned long long)mesh, name.c_str());
+            const int id = probe_id(g_probe.index);
+            const Built c = built(id, 0);
+            const long long limit = id == 75 ? 12000 : 7000;
+            if (!c.exists && now - g_probe.started < limit) return true;
+            if (c.exists) {
+                const std::string name = template_of(c.mesh);
+                diag::log("SKINS", "probe: WeaponId %d builds content: mesh 0x%llx anim 0x%llx sound 0x%llx packs %d %s", id, (unsigned long long)c.mesh,
+                          (unsigned long long)c.anim, (unsigned long long)c.sound, c.packs, name.c_str());
                 ++g_probe.hits;
                 if (name == kButterflyModel) {
-                    cfg::skins::model = g_probe.id;
-                    diag::log("SKINS", "probe: the Butterfly is WeaponId %d, set as the knife model id", g_probe.id);
+                    cfg::skins::model = id;
+                    diag::log("SKINS", "probe: the Butterfly is WeaponId %d, set as the knife model id", id);
+                    g_probe.index = 1000;   // done
                 }
+            } else {
+                diag::log("SKINS", "probe: WeaponId %d: nothing built in %lld s", id, limit / 1000);
             }
             g_probe.waiting = false;
-            ++g_probe.id;
+            ++g_probe.index;
         }
-        while (g_probe.id < 256 && (g_probe.id < 72 || has_weapon_entry(g_probe.id))) ++g_probe.id;
-        if (g_probe.id > 255) {
+        const int id = probe_id(g_probe.index);
+        if (id < 0) {
             diag::log("SKINS", "probe done: %d WeaponIds build content", g_probe.hits);
             g_probe.on = false;
             patch_set(b, cfg::skins::chosen[70] > 0 ? cfg::skins::model : 0, std::max(cfg::skins::chosen[70], 0));
             return false;
         }
-        patch_set(b, g_probe.id, 47502);   // a changed tuple: the game loads it by itself
+        diag::log("SKINS", "probe: trying WeaponId %d", id);
+        patch_set(b, id, 47502);   // a changed tuple: the game loads it by itself
         g_probe.waiting = true;
         g_probe.started = now;
         return true;
@@ -712,17 +730,16 @@ namespace skins {
             set_status("code patch not possible, see the log");
         }
         if (!cfg::skins::code_patch && g_patch.site1) patch_remove();
-        if (g_probe_request.exchange(false)) {
+        if (g_probe_request.exchange(false) && !g_probe.on) {
             g_probe = {};
             g_probe.on = true;
-            g_probe.id = 72;
-            diag::log("SKINS", "probe: WeaponIds 72..255 one by one (about 3 minutes), keep the knife in hands");
+            diag::log("SKINS", "probe: WeaponIds 75, 72..89 one by one (up to 2 minutes), keep the knife in hands and do not press the button again");
             if (g_params[0].by_name)
                 each_entry(g_params[0].by_name, [&](uint64_t e) {
                     diag::log("SKINS", "probe: template %s = mesh params 0x%llx", managed_text(rpm<uint64_t>(e + kEntryKey)).c_str(), (unsigned long long)rpm<uint64_t>(e + kEntryValue));
                     return true;
                 });
-            for (int w : {70, 71}) diag::log("SKINS", "probe: WeaponId %d = mesh params 0x%llx", w, (unsigned long long)built_mesh(w, 0));
+            for (int w : {70, 71}) diag::log("SKINS", "probe: WeaponId %d = mesh params 0x%llx", w, (unsigned long long)built(w, 0).mesh);
         }
         if (probe_step(b)) return;
         bool patch_changed = false;

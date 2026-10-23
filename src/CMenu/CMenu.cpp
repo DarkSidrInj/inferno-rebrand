@@ -118,11 +118,11 @@ namespace ui::menu {
         checkbox("Full model (patches game code, risky)", &cfg::skins::code_patch, a);
         if (cfg::skins::code_patch) {
             static std::vector<std::string> ids;
-            if (ids.empty()) for (int i = 70; i <= 71; ++i) ids.push_back(std::to_string(i));
+            if (ids.empty()) for (int i = 70; i < 90; ++i) ids.push_back(std::to_string(i));
             int idx = cfg::skins::model - 70;
-            if (idx < 0 || idx >= int(ids.size())) idx = 1;
+            if (idx < 0 || idx >= int(ids.size())) idx = 5;
             if (stepper("Knife model id", &idx, ids, a)) cfg::skins::model = 70 + idx;
-            button("Find the Butterfly WeaponId (3 min, knife in hands)", a, [] { skins::probe_request(); });
+            button("Find the Butterfly WeaponId (2 min, knife in hands)", a, [] { skins::probe_request(); });
         }
         separator(a);
         static skins::View view;
