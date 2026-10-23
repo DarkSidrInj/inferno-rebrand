@@ -1123,11 +1123,9 @@ int main() {
                         auto field = [](uint8_t* c, int j) { return *reinterpret_cast<uint64_t*>(c + 0x10 + j * 8); };
                         auto beh_meta = [&] { return *reinterpret_cast<uint16_t*>(beh + 0x42); };
                         auto entry0 = [&] { return *reinterpret_cast<int32_t*>(items + 0x20 + 4); };
-                        auto game_loads = [&] {  // the game loads the weapon in hands, 0.4 s pass
+                        auto game_loads = [&] {  // the game loads the weapon in hands
                             *reinterpret_cast<uint16_t*>(beh + 0x42) = 0;
                             *reinterpret_cast<int32_t*>(beh + 0x48) += 1;
-                            skins::tick(local_s, {local_s});
-                            skins::g_tr.seen -= skins::kHoldMs + 100;
                             skins::g_reload_at = 0;
                             skins::tick(local_s, {local_s});
                         };
@@ -1139,31 +1137,27 @@ int main() {
                         skins::tick(local_s, {local_s});
                         CHECK(skins::g_params[0].by_weapon == reinterpret_cast<uint64_t>(by_weapon[0]) && skins::g_params[2].by_name, "tables found");
                         CHECK(*value_of(by_weapon[0], 0) == 0x7000 && field(knife_content, 0) == 0x7000 && entry0() == 47502 && beh_meta() == 0xFFFE,
-                              "skin id in the entry for the load, tables untouched (entry %d)", entry0());
+                              "knife's skin id in its entry, knife loads, tables untouched (entry %d)", entry0());
                         const skins::View v = skins::view();
                         CHECK(v.weapon == 70 && v.names.size() == 16 && v.current == 1, "menu: weapon %d current %d", v.weapon, v.current);
-                        *reinterpret_cast<uint16_t*>(beh + 0x42) = 0;
-                        *reinterpret_cast<int32_t*>(beh + 0x48) += 1;
+                        game_loads();
+                        CHECK(entry0() == 47502 && beh_meta() == 0, "the skin id stays while the knife is in hands");
+                        *reinterpret_cast<int32_t*>(beh + 0x48) += 1;  // the game loads the knife again itself
                         skins::tick(local_s, {local_s});
-                        skins::g_tr.seen -= 1000;
-                        skins::tick(local_s, {local_s});
-                        CHECK(entry0() == 47502, "the skin id is held while the skin loads");
-                        skins::g_tr.seen -= skins::kHoldMs;
-                        skins::g_reload_at = 0;
-                        skins::tick(local_s, {local_s});
-                        CHECK(entry0() == 0 && skins::g_loaded_skin == 47502 && beh_meta() == 0, "entry back after the load (%d)", entry0());
-                        skins::tick(local_s, {local_s});
-                        CHECK(beh_meta() == 0 && !skins::g_tr.at, "nothing more while it shows the skin");
+                        CHECK(entry0() == 47502 && beh_meta() == 0, "the game's own loads see it, nothing to do");
                         cfg::skins::chosen[70] = 240007;
                         skins::tick(local_s, {local_s});
-                        CHECK(entry0() == 240007 && beh_meta() == 0xFFFE, "another Butterfly skin");
+                        CHECK(entry0() == 240007 && beh_meta() == 0xFFFE, "another Butterfly skin loads");
                         game_loads();
-                        CHECK(entry0() == 0 && skins::g_loaded_skin == 240007, "loaded 240007");
-                        *reinterpret_cast<int32_t*>(beh + 0x48) += 1;  // the game loads it again itself (switch back)
+                        beh[0x40] = 33;  // a gun in hands
                         skins::tick(local_s, {local_s});
-                        CHECK(entry0() == 240007 && beh_meta() == 0xFFFE, "skin given again after the game's own load");
+                        CHECK(entry0() == 0 && beh_meta() == 0xFFFE, "gun in hands: entry back, the gun loads clean");
+                        *reinterpret_cast<uint16_t*>(beh + 0x42) = 0;
+                        beh[0x40] = 70;  // the knife again
                         game_loads();
-                        // The earlier way, on request: the knife's own entries get the template's mesh and sounds.
+                        CHECK(entry0() == 240007 && beh_meta() == 0xFFFE, "knife again: skin id back, knife loads");
+                        game_loads();
+                        // The earlier way (no menu entry): the knife's own entries get the template's mesh and sounds.
                         cfg::skins::force_model = true;
                         cfg::skins::chosen[70] = 47502;
                         skins::tick(local_s, {local_s});

@@ -14,12 +14,13 @@
 //   - iwf<T> also has a name table: knife models by template ("skinTemplate/KnifeButterfly", ...),
 //     seen on device; the int table was empty there.
 // A chosen skin: the loader reads the skin id from the registry entry of the weapon's meta id, which
-// for a weapon without a skin is entry 0, shared by everyone. It carries the chosen id while the
-// weapon in hands loads (beh's cached meta id spoiled) and gets its 0 back 3 s after the load
-// started (the skin's packs load asynchronously). The game then resolves (weapon, skin) itself:
+// for a weapon without a skin is entry 0, shared by everyone. While the knife is in hands that
+// entry carries the chosen id (the game reloads the knife on its own often, and every load must see
+// it); the knife is made to load once (beh's cached meta id spoiled). Another weapon in hands puts
+// the entry back and that weapon loads again, clean. The game then resolves (weapon, skin) itself:
 // on device a default knife with a Butterfly skin id was built from the Butterfly template with the
-// skin's packs. "Force model" (off by default) also writes the skin's model into the weapon's own
-// table entries and cached contents, the earlier way: it showed the model without its packs.
+// skin's packs. cfg::skins::force_model (no menu entry) also writes the skin's model into the
+// weapon's own table entries and cached contents, the earlier way: the model without its packs.
 // All put back on Original or disable.
 
 #include "CGameContext.hpp"
@@ -76,12 +77,9 @@ namespace skins {
     inline uint64_t g_reload_beh = 0;
     inline int g_reload_op = 0, g_reload_meta = 0;
     inline long long g_reload_at = 0, g_log = 0;
-    // The skin id written into the registry entry of the weapon in hands for one load.
-    struct Transient { uint64_t at{}; int original{}, written{}; int op{}; long long started{}, seen{}; };
-    inline Transient g_tr;
-    inline uint64_t g_loaded_beh = 0;                // what the weapon in hands was last loaded with by us
-    inline int g_loaded_op = -1, g_loaded_skin = 0, g_pending_skin = 0;
-    inline long long g_retry_at = 0;
+    // The registry entry that carries the knife's skin id while the knife is in hands.
+    struct Hold { uint64_t at{}; int original{}, written{}; uint64_t beh{}; int loaded_for{}; };
+    inline Hold g_hold;
     inline constexpr long long kHoldMs = 3000;
     // The skins in the menu are knife skins: knife WeaponIds (70 default knife on device, 75 Butterfly
     // by its skin ids; grenades start at 90).
@@ -382,34 +380,15 @@ namespace skins {
         });
     }
 
-    // The entry gets its skin back once the weapon has loaded (3 s after its op id moved: the skin's
-    // packs load asynchronously), or after 1.5 s without a load.
-    inline void transient_tick(uint64_t beh) {
-        if (!g_tr.at) return;
-        const long long now = diag::now_ms();
-        const int op = rpm<int>(beh + kBehOpId);
-        if (!g_tr.seen && op != g_tr.op) g_tr.seen = now;
-        if (g_tr.seen ? now - g_tr.seen < kHoldMs : now - g_tr.started < 1500) return;
-        if (rpm<int>(g_tr.at + kMetaSkin) == g_tr.written) wpm<int>(g_tr.at + kMetaSkin, g_tr.original);
-        if (g_tr.seen) {
-            g_loaded_beh = beh;
-            g_loaded_op = op;
-            g_loaded_skin = g_pending_skin;
-            diag::log("SKINS", "weapon in hands loaded with skin %d (op %d)", g_pending_skin, op);
-            dump_contents(rpm<uint8_t>(beh + kBehState));
-        } else {
-            g_retry_at = now + 2000;
-            diag::log("SKINS", "no load within 1.5 s; trying again in 2 s");
-        }
-        g_tr = {};
+    inline void release_hold() {
+        if (g_hold.at && rpm<int>(g_hold.at + kMetaSkin) == g_hold.written) wpm<int>(g_hold.at + kMetaSkin, g_hold.original);
+        g_hold = {};
     }
 
     inline void restore() {
-        if (g_tr.at && rpm<int>(g_tr.at + kMetaSkin) == g_tr.written) wpm<int>(g_tr.at + kMetaSkin, g_tr.original);
-        g_tr = {};
-        if (g_swaps.empty() && !g_loaded_skin) return;
-        g_loaded_skin = 0;
-        g_loaded_beh = 0;
+        const bool held = g_hold.at != 0;
+        release_hold();
+        if (g_swaps.empty() && !held) return;
         std::vector<int> weapons;
         for (const auto& e : g_swaps) weapons.push_back(e.first);
         for (int w : weapons) put_back(w);
@@ -431,11 +410,7 @@ namespace skins {
         g_values.clear();
         g_reload_beh = 0;
         g_reload_at = 0;
-        g_tr = {};
-        g_loaded_beh = 0;
-        g_loaded_op = -1;
-        g_loaded_skin = g_pending_skin = 0;
-        g_retry_at = 0;
+        g_hold = {};
     }
 
     // Once per frame.
@@ -448,7 +423,6 @@ namespace skins {
 
         const uint64_t b = find_beh(local);
         if (!b) { set_status("weapon view not found"); return; }
-        transient_tick(b);
         const int cached = rpm<uint16_t>(b + kBehMeta);
         if (cached == kSpoiled) return;  // our reload is pending
         const int held = rpm<uint8_t>(b + kBehState);
@@ -485,25 +459,24 @@ namespace skins {
         const int chosen = held < 256 && g_applied.count(held) ? cfg::skins::chosen[held] : 0;
         set_status("weapon " + std::to_string(held) + ": " + (chosen > 0 ? "skin " + std::to_string(chosen) : "original"));
 
-        // The weapon in hands loads again when it does not show the chosen skin: its registry entry
-        // carries the skin id for that one load.
-        const int op = rpm<int>(b + kBehOpId);
-        const int shown = g_loaded_beh == b && g_loaded_op == op ? g_loaded_skin : 0;
-        if (g_tr.at || (!held_changed && shown == chosen) || diag::now_ms() < g_retry_at) return;
-        if (chosen > 0) {
+        // The knife's skin id in its registry entry while it is in hands.
+        if (chosen > 0 && knife(held)) {
             const uint64_t e = meta_entry(b, cached);
-            if (!e) { set_status("weapon in hands: no registry entry for meta id " + std::to_string(cached)); return; }
-            g_tr = {e, rpm<int>(e + kMetaSkin), chosen, op, diag::now_ms(), 0};
-            wpm<int>(e + kMetaSkin, chosen);
-        } else {
-            g_tr = {0, 0, 0, op, diag::now_ms(), 0};
-        }
-        g_pending_skin = chosen;
-        reload(b, cached);
-        if (!g_tr.at) {  // nothing to put back: count the load when it comes
-            g_loaded_beh = b;
-            g_loaded_op = -1;
-            g_loaded_skin = 0;
+            if (!e) { set_status("knife: no registry entry for meta id " + std::to_string(cached)); return; }
+            if (g_hold.at && g_hold.at != e) release_hold();
+            if (!g_hold.at) g_hold = {e, rpm<int>(e + kMetaSkin), chosen, 0, 0};
+            if (rpm<int>(e + kMetaSkin) != chosen) wpm<int>(e + kMetaSkin, chosen);
+            g_hold.written = chosen;
+            if (held_changed || g_hold.beh != b || g_hold.loaded_for != chosen) {
+                g_hold.beh = b;
+                g_hold.loaded_for = chosen;
+                diag::log("SKINS", "knife %d: skin %d held in registry entry %d (was %d)", held, chosen, cached, g_hold.original);
+                reload(b, cached);
+            }
+        } else if (g_hold.at) {
+            release_hold();
+            diag::log("SKINS", "weapon %d in hands: registry entry back, it loads clean", held);
+            reload(b, cached);
         }
     }
 
