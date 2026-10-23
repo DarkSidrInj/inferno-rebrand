@@ -127,6 +127,7 @@ namespace ui::menu {
             view.current = pick;
         }
         separator(a);
+        button("Dump game code to /sdcard", a, [] { skins::dump_code(); });
         button("Reset all skins", a, [] { for (int& id : cfg::skins::chosen) id = 0; });
     }
 

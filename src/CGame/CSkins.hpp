@@ -29,6 +29,7 @@
 #include "CSkeleton.hpp"
 #include "../CConfigs/CConfig.hpp"
 #include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -557,6 +558,42 @@ namespace skins {
             diag::log("SKINS", "weapon %d in hands: registry entry back, it loads clean", held);
             reload(b, cached);
         }
+    }
+
+    // ---- game code for offline reading -----------------------------------------------------------
+    // The weapon view classes beh and gby of the dump (their methods, RVA 0x98A4874..0x98C3A6C, plus
+    // slack: the async MoveNext of SetWeaponContent, the mesh and material setters, LoadArms) as
+    // read from the running game: ~144 KB instead of the 50 MB library. File layout: "SKCD", u32
+    // version, u64 first RVA, u64 size, u64 library base, then the bytes (32-byte header). Disassemble offline with
+    // the RVAs of dump.cs.
+    inline constexpr uint64_t kCodeFirst = 0x98A0000, kCodeEnd = 0x98C4000;
+
+    inline bool dump_code() {
+        if (proc::pid <= 0 || !plausible(proc::lib)) { diag::log("SKINS", "code dump: game not found"); return false; }
+        std::vector<uint8_t> bytes(size_t(kCodeEnd - kCodeFirst), 0);
+        size_t bad = 0;
+        for (uint64_t at = 0; at < bytes.size(); at += 0x1000)
+            if (!mem_read(proc::lib + kCodeFirst + at, bytes.data() + at, 0x1000)) ++bad;
+        const char* paths[] = {"/sdcard/skin_code.bin", "/storage/emulated/0/skin_code.bin", "/data/local/tmp/skin_code.bin"};
+        for (const char* path : paths) {
+            FILE* f = std::fopen(path, "wb");
+            if (!f) continue;
+            const uint32_t version = 1;
+            const uint64_t first = kCodeFirst, size = bytes.size(), base = proc::lib;
+            std::fwrite("SKCD", 1, 4, f);
+            std::fwrite(&version, 4, 1, f);
+            std::fwrite(&first, 8, 1, f);
+            std::fwrite(&size, 8, 1, f);
+            std::fwrite(&base, 8, 1, f);
+            std::fwrite(bytes.data(), 1, bytes.size(), f);
+            std::fclose(f);
+            diag::log("SKINS", "code dump: %zu KB (%zu unreadable pages) written to %s", bytes.size() / 1024, bad, path);
+            set_status(std::string("code dump: ") + path);
+            return true;
+        }
+        diag::log("SKINS", "code dump: no writable path");
+        set_status("code dump: cannot write the file");
+        return false;
     }
 
     // ---- menu -------------------------------------------------------------------------------------
