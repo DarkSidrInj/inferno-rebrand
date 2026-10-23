@@ -67,6 +67,7 @@ namespace thirdperson {
 namespace skins {
     inline bool enabled = false;
     inline int chosen[256]{};       // WeaponId raw -> SkinDefinition id (0: the game's own)
+    inline bool code_patch = false;  // knives load as the skin's weapon (writes one instruction of the game's code, opt-in)
     inline bool force_model = false; // also write the skin's model into the weapon's own tables (the earlier way)
 }
 

@@ -1179,6 +1179,38 @@ int main() {
                         skins::tick(local_s, {local_s});
                         CHECK(*value_of(by_weapon[0], 0) == 0x7000 && field(knife_content, 2) == 0x7002, "force model off: tables back");
                         game_loads();
+                        // Code patch: the loader's WeaponId instruction becomes a call into a cave that answers 75 for knives.
+                        {
+                            const uint64_t site = proc::lib + skins::kPatchRva, cave = proc::lib + 0xC000000;
+                            *reinterpret_cast<uint32_t*>(site) = skins::kPatchOriginal;
+                            skins::g_cave_override = cave;
+                            cfg::skins::code_patch = true;
+                            cfg::skins::chosen[70] = 47502;
+                            skins::tick(local_s, {local_s});
+                            const uint32_t word = *reinterpret_cast<uint32_t*>(site);
+                            CHECK((word >> 26) == 0x25 && site + (int64_t(int32_t(word << 6) >> 6) * 4) == cave, "site is a bl to the cave (0x%08x)", word);
+                            CHECK(std::memcmp(reinterpret_cast<void*>(cave), skins::kCave, sizeof(skins::kCave)) == 0 &&
+                                  *reinterpret_cast<uint32_t*>(cave + skins::kCaveData) == 75 && beh_meta() == 0xFFFE, "cave written, knives load as 75");
+                            game_loads();
+                            cfg::skins::chosen[70] = 0;
+                            skins::tick(local_s, {local_s});
+                            CHECK(*reinterpret_cast<uint32_t*>(cave + skins::kCaveData) == 0 && beh_meta() == 0xFFFE, "no skin: knives load as themselves again");
+                            game_loads();
+                            cfg::skins::chosen[70] = 47502;
+                            skins::tick(local_s, {local_s});
+                            game_loads();
+                            cfg::skins::code_patch = false;   // switched off: code back
+                            skins::tick(local_s, {local_s});
+                            CHECK(*reinterpret_cast<uint32_t*>(site) == skins::kPatchOriginal && *reinterpret_cast<uint32_t*>(cave) == 0, "code patch switched off: instruction and cave back");
+                            game_loads();
+                            *reinterpret_cast<uint32_t*>(site) = 0x12345678;   // another build: refused, the choice stays harmless
+                            cfg::skins::code_patch = true;
+                            skins::tick(local_s, {local_s});
+                            CHECK(!cfg::skins::code_patch && *reinterpret_cast<uint32_t*>(site) == 0x12345678, "unknown instruction: not patched");
+                            *reinterpret_cast<uint32_t*>(site) = 0;
+                            skins::g_cave_override = 0;
+                        }
+                        game_loads();
                         cfg::skins::chosen[70] = 47502;
                         skins::tick(local_s, {local_s});
                         cfg::skins::enabled = false;
