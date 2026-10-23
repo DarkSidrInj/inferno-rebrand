@@ -784,14 +784,19 @@ namespace skins {
     // version, u64 first RVA, u64 size, u64 library base, then the bytes (32-byte header). Disassemble offline with
     // the RVAs of dump.cs.
     inline constexpr uint64_t kCodeFirst = 0x98A0000, kCodeEnd = 0x98C4000;
+    // The weapon content resolver ybt (fsne, lhox: which content packs a WeaponId and skin id get) and its neighbours.
+    inline constexpr uint64_t kResolverCodeFirst = 0xA020000, kResolverCodeEnd = 0xA03C000;
 
-    inline bool dump_code() {
+    inline bool dump_code(bool resolver = false) {
         if (proc::pid <= 0 || !plausible(proc::lib)) { diag::log("SKINS", "code dump: game not found"); return false; }
+        const uint64_t kCodeFirst = resolver ? kResolverCodeFirst : skins::kCodeFirst, kCodeEnd = resolver ? kResolverCodeEnd : skins::kCodeEnd;
         std::vector<uint8_t> bytes(size_t(kCodeEnd - kCodeFirst), 0);
         size_t bad = 0;
         for (uint64_t at = 0; at < bytes.size(); at += 0x1000)
             if (!mem_read(proc::lib + kCodeFirst + at, bytes.data() + at, 0x1000)) ++bad;
         const char* paths[] = {"/sdcard/skin_code.bin", "/storage/emulated/0/skin_code.bin", "/data/local/tmp/skin_code.bin"};
+        const char* paths2[] = {"/sdcard/skin_code2.bin", "/storage/emulated/0/skin_code2.bin", "/data/local/tmp/skin_code2.bin"};
+        if (resolver) for (int i = 0; i < 3; ++i) paths[i] = paths2[i];
         for (const char* path : paths) {
             FILE* f = std::fopen(path, "wb");
             if (!f) continue;
