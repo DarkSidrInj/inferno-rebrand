@@ -15,6 +15,7 @@
 #include "CIcalls.hpp"
 #include "CChams.hpp"
 #include "CAnimCull.hpp"
+#include "CPlayer.hpp"
 #include "../CUtils/CArm64.hpp"
 #include <atomic>
 #include <chrono>
@@ -44,6 +45,32 @@ namespace localview {
     inline std::vector<uint64_t> g_weapon_objects;
     inline uint64_t g_weapon_owner = 0;
     inline bool g_active = false;
+    inline uint64_t g_dumped_for = 0;
+
+    // Once per body: the hidden body renderer next to the visible arms renderer, and their
+    // GameObjects (native Component +0x20). The bytes that differ show how the game hides the body.
+    inline void dump_look(uint64_t bindings) {
+        if (g_dumped_for == bindings) return;
+        g_dumped_for = bindings;
+        const uint64_t body = chams::native_of(rpm<uint64_t>(bindings + v100::bindings_character_renderer));
+        const uint64_t arms = chams::native_of(rpm<uint64_t>(bindings + v100::bindings_arms_renderer));
+        diag::log("TPDIAG", "body renderer 0x%llx (vtable 0x%llx), arms renderer 0x%llx (vtable 0x%llx)",
+                  (unsigned long long)body, (unsigned long long)rpm<uint64_t>(body), (unsigned long long)arms,
+                  (unsigned long long)rpm<uint64_t>(arms));
+        if (!body || !arms) return;
+        uint8_t a[0x200]{}, b[0x200]{};
+        if (mem_read(body, b, sizeof(b)) && mem_read(arms, a, sizeof(a))) {
+            for (size_t off = 0; off < sizeof(a); off += 8) {
+                uint64_t x = 0, y = 0;
+                std::memcpy(&x, b + off, 8);
+                std::memcpy(&y, a + off, 8);
+                if (x == y || (plausible(x) && plausible(y))) continue;  // same, or two different pointers
+                diag::log("TPDIAG", "renderer+0x%03zx body=%016llx arms=%016llx", off, (unsigned long long)x, (unsigned long long)y);
+            }
+        }
+        player::dump_memory("body.gameobject", rpm<uint64_t>(body + 0x20), 0x80);
+        player::dump_memory("arms.gameobject", rpm<uint64_t>(arms + 0x20), 0x80);
+    }
 
     inline bool inside(uint64_t r, uint64_t a) { return a >= r && a < r + 0x400; }
 
@@ -151,6 +178,7 @@ namespace localview {
             const uint64_t body = chams::native_of(rpm<uint64_t>(bindings + v100::bindings_character_renderer));
             if (body) resolve(body);
         }
+        dump_look(bindings);
         if (!g_setter.load()) return;
         if (scan_weapons) {
             g_weapon_objects = chams::scan_weapons(bindings);
@@ -183,6 +211,7 @@ namespace localview {
             g_weapon_objects.clear();
             g_weapon_owner = 0;
             g_active = false;
+            g_dumped_for = 0;
         }
         if (g_busy.load()) return;
         if (!active || !local || !cfg::thirdperson::show_body) {
