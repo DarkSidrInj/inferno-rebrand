@@ -299,16 +299,34 @@ namespace localview {
         if (rpm<uint32_t>(main + uint64_t(off)) != want) wpm<uint32_t>(main + uint64_t(off), want);
     }
 
-    // Chams layer pass, once per frame. `enemy_layers` = bit per layer of the enemies' body renderers.
-    inline bool g_layer_started = false;
-    inline void layer_pass_tick(uint64_t main, uint32_t enemy_layers) {
-        const uint32_t protect = (1u << 0) | kFirstPersonLayer;  // the world and the arms never move
-        const bool want = cfg::chams::enabled && cfg::chams::layer_pass && main && enemy_layers && !(enemy_layers & protect);
-        static long long log_stamp = 0;
-        if (cfg::chams::enabled && cfg::chams::layer_pass && enemy_layers & protect && diag::every(log_stamp, 10000))
-            diag::log("CHAMS", "layer pass skipped: enemies share layer mask 0x%08x with the world / first-person layer", enemy_layers);
+    // Chams layer pass, once per frame with the enemies' body renderers. Their GameObjects are put on
+    // an unused layer (written straight into the native GameObject, +0x40) that the main camera
+    // leaves out and the first-person camera draws after clearing depth: drawn over the world, through
+    // walls, with the real mesh, animation and materials. Originals are put back when it is switched
+    // off. Whether Unity honors a plain layer write for already-registered renderers shows in the
+    // log: "layer pass: N renderers moved" and whether the enemies still show in the main view.
+    inline constexpr uint32_t kMoveLayer = 30;
+    struct Moved { uint64_t renderer{}, vtable{}; uint32_t original{}; };
+    inline std::unordered_map<uint64_t, Moved> g_moved;  // GameObject -> what it was
+
+    inline void release_layers() {
+        for (const auto& e : g_moved) {
+            const Moved& m = e.second;
+            if (rpm<uint64_t>(m.renderer) == m.vtable && rpm<uint32_t>(e.first + 0x40) == kMoveLayer)
+                wpm<uint32_t>(e.first + 0x40, m.original);
+        }
+        g_moved.clear();
+    }
+
+    inline void layer_pass_tick(uint64_t main, const std::vector<uint64_t>& enemy_renderers) {
+        const bool want = cfg::chams::enabled && cfg::chams::layer_pass && main && !enemy_renderers.empty();
         if (!want) {
-            if (g_layer_move) { g_layer_move = 0; apply_masks(main ? main : g_main_for); diag::log("CHAMS", "layer pass off"); }
+            if (g_layer_move || !g_moved.empty()) {
+                release_layers();
+                g_layer_move = 0;
+                apply_masks(main ? main : g_main_for);
+                diag::log("CHAMS", "layer pass off");
+            }
             return;
         }
         if (g_busy.load() || thirdperson::g_mask_resolving.load()) return;
@@ -323,9 +341,31 @@ namespace localview {
             return;
         }
         if (g_view_cameras.empty()) return;
-        if (g_layer_move != enemy_layers) {
-            g_layer_move = enemy_layers;
-            diag::log("CHAMS", "layer pass on: layers 0x%08x leave the main camera and go to the first-person camera", enemy_layers);
+
+        std::unordered_map<uint64_t, bool> current;
+        for (uint64_t r : enemy_renderers) {
+            const uint64_t go = rpm<uint64_t>(r + 0x20);
+            if (!plausible(go)) continue;
+            current[go] = true;
+            const uint32_t layer = rpm<uint32_t>(go + 0x40);
+            if (layer == kMoveLayer) continue;
+            if (layer >= 32) continue;  // not a GameObject
+            g_moved[go] = {r, rpm<uint64_t>(r), layer};
+            wpm<uint32_t>(go + 0x40, kMoveLayer);
+        }
+        for (auto it = g_moved.begin(); it != g_moved.end();) {  // players that are no longer enemies
+            if (current.count(it->first)) { ++it; continue; }
+            if (rpm<uint64_t>(it->second.renderer) == it->second.vtable && rpm<uint32_t>(it->first + 0x40) == kMoveLayer)
+                wpm<uint32_t>(it->first + 0x40, it->second.original);
+            it = g_moved.erase(it);
+        }
+        const uint32_t move = 1u << kMoveLayer;
+        static size_t logged = size_t(-1);
+        if (g_layer_move != move || logged != g_moved.size()) {
+            g_layer_move = move;
+            logged = g_moved.size();
+            diag::log("CHAMS", "layer pass: %zu enemy renderers moved to layer %u (main camera leaves it out, first-person camera draws it)",
+                      g_moved.size(), kMoveLayer);
         }
         apply_masks(main);
     }
@@ -400,10 +440,10 @@ namespace localview {
             const int on = is_enabled(body);
             if (on == 0) {
                 std::string why;
-                if (set_enabled(body, true, why)) { g_enabled_body = body; g_enabled_vtable = rpm<uint64_t>(body); }
-                diag::log("TP", "body renderer was disabled: %s (now enabled=%d)", g_enabled_body ? "switched on" : why.c_str(),
-                          is_enabled(body));
-                if (!g_enabled_body && g_enabled_getter) {
+                const bool replayed = set_enabled(body, true, why);
+                if (replayed) { g_enabled_body = body; g_enabled_vtable = rpm<uint64_t>(body); }
+                diag::log("TP", "body renderer was disabled: %s (now enabled=%d)", replayed ? "switched on" : why.c_str(), is_enabled(body));
+                if (!replayed && g_enabled_getter) {
                     uint64_t addr = 0;
                     int bit = -1;
                     if (find_flag(body, addr, bit)) {
@@ -448,6 +488,7 @@ namespace localview {
             g_enabled_body = g_checked_body = 0;
             g_hide_first_person = false;
             g_layer_move = 0;
+            g_moved.clear();
             g_main_for = 0;
             g_flag_addr = 0;
             g_flag_bit = -1;

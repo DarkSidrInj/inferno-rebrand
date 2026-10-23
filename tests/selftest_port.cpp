@@ -842,20 +842,27 @@ int main() {
                       "enabled flag found: +0x%llx bit %d", (unsigned long long)(addr - reinterpret_cast<uint64_t>(body)), bit);
             }
 
-            // Chams layer pass: enemies on layer 11 leave the main camera for the first-person camera.
+            // Chams layer pass: enemy bodies move to layer 30; the main camera leaves it out and the
+            // first-person camera draws it.
             {
+                uint8_t* go = static_cast<uint8_t*>(calloc(1, 0x100));
+                uint8_t* enemy_r = static_cast<uint8_t*>(calloc(1, 0x200));
+                *reinterpret_cast<uint64_t*>(enemy_r) = reinterpret_cast<uint64_t>(enemy_r) + 0x1F0;
+                *reinterpret_cast<uint64_t*>(enemy_r + 0x20) = reinterpret_cast<uint64_t>(go);
+                *reinterpret_cast<uint32_t*>(go + 0x40) = 0;
+                auto layer_of_go = [&] { return *reinterpret_cast<uint32_t*>(go + 0x40); };
+                const std::vector<uint64_t> enemies_r{reinterpret_cast<uint64_t>(enemy_r)};
                 cfg::chams::enabled = true; cfg::chams::layer_pass = true;
-                localview::layer_pass_tick(reinterpret_cast<uint64_t>(main_cam), 1u << 11);
-                CHECK(mask_of(main_cam) == (0xFFFFFEFFu & ~(1u << 11)) && mask_of(view_cam) == (0x100u | (1u << 11)),
-                      "layer pass applied (0x%08x 0x%08x)", mask_of(main_cam), mask_of(view_cam));
-                localview::layer_pass_tick(reinterpret_cast<uint64_t>(main_cam), 1u << 0);   // the world's layer: never moved
-                CHECK(mask_of(main_cam) == 0xFFFFFEFFu && mask_of(view_cam) == 0x100u, "layer pass refuses the world layer (0x%08x 0x%08x)",
-                      mask_of(main_cam), mask_of(view_cam));
-                localview::layer_pass_tick(reinterpret_cast<uint64_t>(main_cam), 1u << 11);
+                localview::layer_pass_tick(reinterpret_cast<uint64_t>(main_cam), enemies_r);
+                CHECK(layer_of_go() == 30 && mask_of(main_cam) == (0xFFFFFEFFu & ~(1u << 30)) && mask_of(view_cam) == (0x100u | (1u << 30)),
+                      "layer pass applied: layer %u, masks 0x%08x 0x%08x", layer_of_go(), mask_of(main_cam), mask_of(view_cam));
+                localview::layer_pass_tick(reinterpret_cast<uint64_t>(main_cam), {});  // no enemies left in the list: put back
+                CHECK(layer_of_go() == 0 && mask_of(main_cam) == 0xFFFFFEFFu, "layer pass releases a player that left (layer %u)", layer_of_go());
+                localview::layer_pass_tick(reinterpret_cast<uint64_t>(main_cam), enemies_r);
                 cfg::chams::layer_pass = false;
-                localview::layer_pass_tick(reinterpret_cast<uint64_t>(main_cam), 1u << 11);
-                CHECK(mask_of(main_cam) == 0xFFFFFEFFu && mask_of(view_cam) == 0x100u, "layer pass off restores both (0x%08x 0x%08x)",
-                      mask_of(main_cam), mask_of(view_cam));
+                localview::layer_pass_tick(reinterpret_cast<uint64_t>(main_cam), enemies_r);
+                CHECK(layer_of_go() == 0 && mask_of(main_cam) == 0xFFFFFEFFu && mask_of(view_cam) == 0x100u,
+                      "layer pass off restores all (layer %u, 0x%08x 0x%08x)", layer_of_go(), mask_of(main_cam), mask_of(view_cam));
                 cfg::chams::enabled = false;
             }
 

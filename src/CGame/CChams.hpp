@@ -594,6 +594,7 @@ namespace chams {
         const uint32_t layer = rpm<uint32_t>(go + 0x40);
         return layer < 32 ? int(layer) : -1;
     }
+    inline std::vector<uint64_t> g_enemy_renderers;  // enemy body renderers of the last apply pass (frame thread only)
     inline std::atomic<uint32_t> g_layers[kTargets];  // layers seen on each target's renderers (bit per layer)
     inline uint32_t g_logged_layers[kTargets] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
 
@@ -666,8 +667,10 @@ namespace chams {
         std::unordered_map<uint64_t, bool> seen;
         int patched[kTargets]{};
         uint32_t layers[kTargets]{};
+        g_enemy_renderers.clear();
         auto apply = [&](Target t, uint64_t renderer, uint64_t bindings) {
             if (!renderer) return;
+            if (t == Enemy) g_enemy_renderers.push_back(renderer);
             if (const int layer = layer_of(renderer); layer >= 0) layers[t] |= 1u << layer;
             if (!target_on(t)) return;
             const bool through_walls = t == Enemy || t == Teammate;

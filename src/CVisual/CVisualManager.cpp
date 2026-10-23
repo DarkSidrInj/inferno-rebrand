@@ -30,7 +30,7 @@ void visuals::draw() {
     if (!any) {
         chams::tick({}, 0, 0);
         chams::occlusion_tick(0);
-        localview::layer_pass_tick(0, 0);
+        localview::layer_pass_tick(0, {});
         matrix unused{};
         thirdperson::tick(nullptr, unused);
         localview::tick(0, false);
@@ -49,7 +49,7 @@ void visuals::draw() {
             thirdperson::tick(nullptr, unused);
             localview::tick(0, false);
             chams::occlusion_tick(0);
-            localview::layer_pass_tick(0, 0);
+            localview::layer_pass_tick(0, {});
         }
     } tp_guard;
     std::vector<uint64_t> Players = players();
@@ -135,7 +135,7 @@ void visuals::draw() {
         tp_guard.active = thirdperson::tick(&GameCamera, ViewMatrix);
         tp_guard.ticked = true;
         chams::occlusion_tick(GameCamera.native);
-        localview::layer_pass_tick(GameCamera.native, chams::g_layers[chams::Enemy].load());
+        localview::layer_pass_tick(GameCamera.native, chams::g_enemy_renderers);
         localview::tick(LocalPlayer, tp_guard.active, GameCamera.native);
         if (g_camera != GameCamera.native)
             diag::log("CAMERA", "selected game camera native=0x%llx holder=0x%llx", (unsigned long long)GameCamera.native,
