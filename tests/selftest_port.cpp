@@ -410,6 +410,7 @@ int main() {
         }
         const bool exec_ok = mprotect(unity + 0x1000, 0x1000, PROT_READ | PROT_EXEC) == 0;
 
+        cfg::fog::engine = true;   // the engine path (field writes, setter replays); the safe path is tested below
         cfg::fog::enabled = true; cfg::fog::auto_color = true; cfg::fog::min_distance = 25.f; cfg::fog::max_distance = 90.f;
         worldfog::g_pid = -1;
         // The renderer still holds the map's fog params (start 0, end 300, density 0.01). The
@@ -501,6 +502,24 @@ int main() {
             worldfog::wait();
             CHECK(rs2[0x40] == 0 && std::fabs(rd(0x80) - .3f) < 1e-5f && std::fabs(rd(0x70) - .1f) < 1e-5f && rd(0x5C) == 300.f,
                   "night off: the map's fog and ambient light are back (fog %d end %.1f equator %.2f)", rs2[0x40], rd(0x5C), rd(0x80));
+
+            // Safe mode: only the renderer's fog constants change; RenderSettings is never written.
+            cfg::fog::engine = false;
+            cfg::night::enabled = true;
+            worldfog::g_last_write = 0;
+            worldfog::tick();
+            worldfog::wait();
+            worldfog::g_last_write = 0;
+            worldfog::tick();
+            worldfog::wait();
+            CHECK(rs2[0x40] == 0 && rd(0x5C) == 300.f && std::fabs(rd(0x80) - .3f) < 1e-5f && std::fabs(rd(0x48) - .5f) < 1e-5f,
+                  "safe mode: RenderSettings untouched (fog %d end %.1f equator %.2f)", rs2[0x40], rd(0x5C), rd(0x80));
+            const float* safe_params = reinterpret_cast<const float*>(base + fx::g_fog_params);
+            CHECK(std::fabs(safe_params[2] - (-1.f / 70.f)) < 1e-6f, "safe mode: the renderer's fog constants carry the night fog (%f)", safe_params[2]);
+            cfg::night::enabled = false;
+            worldfog::tick();
+            worldfog::wait();
+            CHECK(std::fabs(safe_params[2] - (-1.f / 300.f)) < 1e-6f, "safe mode off: the constants are back (%f)", safe_params[2]);
         }
 
         // Occlusion bypass: the culling offset comes from tracing Animator.get_cullingMode_Injected

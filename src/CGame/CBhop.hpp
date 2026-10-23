@@ -79,8 +79,12 @@ namespace bhop {
 
     inline void press_jump(long long now) {
         g_last_jump = now;
-        if (strafe::kick(g_peak_vy)) ++g_jumps;
-        else ++g_missed;
+        if (strafe::kick(g_peak_vy)) {
+            ++g_jumps;
+            if (cfg::bhop::log) diag::log("BHOP", "jump %d: vertical speed %.1f written", g_jumps, g_peak_vy);
+        } else {
+            ++g_missed;
+        }
     }
 
     // One call per frame with the local player and its position.

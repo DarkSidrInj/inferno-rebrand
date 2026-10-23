@@ -382,6 +382,7 @@ namespace {
             slider_row("Max Distance", &cfg::fog::max_distance, 10.f, 400.f, "%.0f m"),
             color_row("Color", &cfg::fog::color),
             button_row("Rescan World", [] { worldfog::rescan(); }),
+            toggle_row("Engine Writes (risky)", &cfg::fog::engine),
         });
         card(1, "WORLD ESP", {
             toggle_color("Grenades", &cfg::esp::grenade, &cfg::esp::grenade_col),
