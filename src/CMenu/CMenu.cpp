@@ -128,7 +128,6 @@ namespace ui::menu {
         }
         separator(a);
         button("Reset all skins", a, [] { for (int& id : cfg::skins::chosen) id = 0; });
-        button("Reload skin list", a, [] { skins::rescan(); });
     }
 
     static void misc_tab(float a) {
