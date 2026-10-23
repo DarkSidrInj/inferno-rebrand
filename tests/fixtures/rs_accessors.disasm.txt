@@ -1,486 +1,632 @@
 
-/tmp/tmp.RVgLlP3W9l/rs.so:	file format elf64-littleaarch64
+/tmp/tmp.iBehLKzrWf/rs.so:	file format elf64-littleaarch64
 
 Disassembly of section .text:
 
-0000000000002514 <CurrentThreadIsMainThread>:
-    2514:      	paciasp
-    2518:      	stp	x29, x30, [sp, #-0x10]!
-    251c:      	mov	x29, sp
-    2520:      	adrp	x0, 0x3000 <t_is_main+0x3000>
-    2524:      	ldr	x1, [x0, #0xcc0]
-    2528:      	add	x0, x0, #0xcc0
-    252c:      	blr	x1
-    2530:      	mrs	x8, TPIDR_EL0
-    2534:      	ldr	w8, [x8, x0]
-    2538:      	cmp	w8, #0x0
-    253c:      	cset	w0, ne
-    2540:      	ldp	x29, x30, [sp], #0x10
-    2544:      	autiasp
-    2548:      	ret
+00000000000029d4 <ApplyFog>:
+    29d4:      	bti	c
+    29d8:      	ldp	s1, s0, [x0, #0x58]
+    29dc:      	fmov	s2, #-1.00000000
+    29e0:      	movi	d3, #0000000000000000
+    29e4:      	adrp	x8, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    29e8:      	ldr	s4, [x0, #0x60]
+    29ec:      	fsub	s1, s0, s1
+    29f0:      	fdiv	s2, s2, s1
+    29f4:      	fcmp	s1, #0.0
+    29f8:      	fdiv	s0, s0, s1
+    29fc:      	ldr	d1, [x8, #0x180]
+    2a00:      	adrp	x8, 0x4000 <t_is_main+0x4000>
+    2a04:      	ldr	x8, [x8, #0x398]
+    2a08:      	fmul	v1.2s, v1.2s, v4.s[0]
+    2a0c:      	fcsel	s2, s2, s3, ne
+    2a10:      	str	d1, [x8]
+    2a14:      	fcsel	s0, s0, s3, ne
+    2a18:      	stp	s2, s0, [x8, #0x8]
+    2a1c:      	ret
 
-000000000000254c <ThreadAndSerializationSafeCheckReportError>:
-    254c:      	paciasp
-    2550:      	sub	sp, sp, #0x120
-    2554:      	stp	x29, x30, [sp, #0x100]
-    2558:      	str	x28, [sp, #0x110]
-    255c:      	add	x29, sp, #0x100
-    2560:      	adrp	x8, 0x0 <il2cpp_codegen_resolve_icall>
-    2564:      	ldr	q0, [x8, #0xe90]
-    2568:      	ldrb	w8, [x0]
-    256c:      	str	q0, [sp]
-    2570:      	cbz	w8, 0x25ac <ThreadAndSerializationSafeCheckReportError+0x60>
-    2574:      	mov	x9, sp
-    2578:      	mov	x10, xzr
-    257c:      	add	x11, x0, #0x1
-    2580:      	add	x9, x9, #0x10
-    2584:      	strb	w8, [x9, x10]
-    2588:      	ldrb	w8, [x11, x10]
-    258c:      	add	x12, x10, #0x1
-    2590:      	cbz	w8, 0x25a4 <ThreadAndSerializationSafeCheckReportError+0x58>
-    2594:      	add	x10, x10, #0x10
-    2598:      	cmp	x10, #0xfe
-    259c:      	mov	x10, x12
-    25a0:      	b.lo	0x2584 <ThreadAndSerializationSafeCheckReportError+0x38>
-    25a4:      	add	w10, w12, #0x10
-    25a8:      	b	0x25b0 <ThreadAndSerializationSafeCheckReportError+0x64>
-    25ac:      	mov	w10, #0x10              // =16
-    25b0:      	adrp	x9, 0x3000 <t_is_main+0x3000>
-    25b4:      	mov	x8, xzr
-    25b8:      	mov	w1, w10
-    25bc:      	ldr	x9, [x9, #0xcd0]
-    25c0:      	mov	x10, sp
-    25c4:      	strb	wzr, [x10, x1]
-    25c8:      	ldr	w11, [x9]
-    25cc:      	b	0x25dc <ThreadAndSerializationSafeCheckReportError+0x90>
-    25d0:      	add	x8, x8, #0x1
-    25d4:      	cmp	x1, x8
-    25d8:      	b.eq	0x25f8 <ThreadAndSerializationSafeCheckReportError+0xac>
-    25dc:      	ldrb	w12, [x10, x8]
-    25e0:      	cmp	w12, #0x5f
-    25e4:      	b.ne	0x25d0 <ThreadAndSerializationSafeCheckReportError+0x84>
-    25e8:      	add	x11, x8, x11
-    25ec:      	str	w11, [x9]
-    25f0:      	and	x11, x11, #0xffffffff
-    25f4:      	b	0x25d0 <ThreadAndSerializationSafeCheckReportError+0x84>
-    25f8:      	mov	x0, sp
-    25fc:      	bl	0x2b50 <DebugStringToFile@plt>
-    2600:      	ldp	x29, x30, [sp, #0x100]
-    2604:      	ldr	x28, [sp, #0x110]
-    2608:      	add	sp, sp, #0x120
-    260c:      	autiasp
-    2610:      	ret
+0000000000002a20 <CurrentThreadIsMainThread>:
+    2a20:      	paciasp
+    2a24:      	stp	x29, x30, [sp, #-0x10]!
+    2a28:      	mov	x29, sp
+    2a2c:      	adrp	x0, 0x4000 <t_is_main+0x4000>
+    2a30:      	ldr	x1, [x0, #0x3a0]
+    2a34:      	add	x0, x0, #0x3a0
+    2a38:      	blr	x1
+    2a3c:      	mrs	x8, TPIDR_EL0
+    2a40:      	ldr	w8, [x8, x0]
+    2a44:      	cmp	w8, #0x0
+    2a48:      	cset	w0, ne
+    2a4c:      	ldp	x29, x30, [sp], #0x10
+    2a50:      	autiasp
+    2a54:      	ret
 
-0000000000002614 <GetRenderSettings>:
-    2614:      	bti	c
-    2618:      	adrp	x8, 0x3000 <t_is_main+0x3000>
-    261c:      	ldr	x8, [x8, #0xcd8]
-    2620:      	ldr	x0, [x8, #0x38]
-    2624:      	ret
+0000000000002a58 <ThreadAndSerializationSafeCheckReportError>:
+    2a58:      	paciasp
+    2a5c:      	sub	sp, sp, #0x120
+    2a60:      	stp	x29, x30, [sp, #0x100]
+    2a64:      	str	x28, [sp, #0x110]
+    2a68:      	add	x29, sp, #0x100
+    2a6c:      	adrp	x8, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    2a70:      	ldr	q0, [x8, #0x190]
+    2a74:      	ldrb	w8, [x0]
+    2a78:      	str	q0, [sp]
+    2a7c:      	cbz	w8, 0x2ab8 <ThreadAndSerializationSafeCheckReportError+0x60>
+    2a80:      	mov	x9, sp
+    2a84:      	mov	x10, xzr
+    2a88:      	add	x11, x0, #0x1
+    2a8c:      	add	x9, x9, #0x10
+    2a90:      	strb	w8, [x9, x10]
+    2a94:      	ldrb	w8, [x11, x10]
+    2a98:      	add	x12, x10, #0x1
+    2a9c:      	cbz	w8, 0x2ab0 <ThreadAndSerializationSafeCheckReportError+0x58>
+    2aa0:      	add	x10, x10, #0x10
+    2aa4:      	cmp	x10, #0xfe
+    2aa8:      	mov	x10, x12
+    2aac:      	b.lo	0x2a90 <ThreadAndSerializationSafeCheckReportError+0x38>
+    2ab0:      	add	w10, w12, #0x10
+    2ab4:      	b	0x2abc <ThreadAndSerializationSafeCheckReportError+0x64>
+    2ab8:      	mov	w10, #0x10              // =16
+    2abc:      	adrp	x9, 0x4000 <t_is_main+0x4000>
+    2ac0:      	mov	x8, xzr
+    2ac4:      	mov	w1, w10
+    2ac8:      	ldr	x9, [x9, #0x3b0]
+    2acc:      	mov	x10, sp
+    2ad0:      	strb	wzr, [x10, x1]
+    2ad4:      	ldr	w11, [x9]
+    2ad8:      	b	0x2ae8 <ThreadAndSerializationSafeCheckReportError+0x90>
+    2adc:      	add	x8, x8, #0x1
+    2ae0:      	cmp	x1, x8
+    2ae4:      	b.eq	0x2b04 <ThreadAndSerializationSafeCheckReportError+0xac>
+    2ae8:      	ldrb	w12, [x10, x8]
+    2aec:      	cmp	w12, #0x5f
+    2af0:      	b.ne	0x2adc <ThreadAndSerializationSafeCheckReportError+0x84>
+    2af4:      	add	x11, x8, x11
+    2af8:      	str	w11, [x9]
+    2afc:      	and	x11, x11, #0xffffffff
+    2b00:      	b	0x2adc <ThreadAndSerializationSafeCheckReportError+0x84>
+    2b04:      	mov	x0, sp
+    2b08:      	bl	0x3228 <DebugStringToFile@plt>
+    2b0c:      	ldp	x29, x30, [sp, #0x100]
+    2b10:      	ldr	x28, [sp, #0x110]
+    2b14:      	add	sp, sp, #0x120
+    2b18:      	autiasp
+    2b1c:      	ret
 
-0000000000002628 <RenderSettings_get_fogStartDistance>:
-    2628:      	paciasp
-    262c:      	stp	x29, x30, [sp, #-0x10]!
-    2630:      	mov	x29, sp
-    2634:      	bl	0x2b20 <CurrentThreadIsMainThread@plt>
-    2638:      	cbnz	w0, 0x2648 <RenderSettings_get_fogStartDistance+0x20>
-    263c:      	nop
-    2640:      	adr	x0, 0x10b3 <il2cpp_codegen_resolve_icall+0x10b3>
-    2644:      	bl	0x2b38 <ThreadAndSerializationSafeCheckReportError@plt>
-    2648:      	bl	0x2b68 <GetRenderSettings@plt>
-    264c:      	ldr	s0, [x0, #0x5c]
-    2650:      	ldp	x29, x30, [sp], #0x10
-    2654:      	autiasp
-    2658:      	ret
+0000000000002b20 <GetRenderSettings>:
+    2b20:      	bti	c
+    2b24:      	adrp	x8, 0x4000 <t_is_main+0x4000>
+    2b28:      	ldr	x8, [x8, #0x3b8]
+    2b2c:      	ldr	x0, [x8, #0x38]
+    2b30:      	ret
 
-000000000000265c <RenderSettings_get_fogEndDistance>:
-    265c:      	paciasp
-    2660:      	stp	x29, x30, [sp, #-0x10]!
-    2664:      	mov	x29, sp
-    2668:      	bl	0x2b20 <CurrentThreadIsMainThread@plt>
-    266c:      	cbnz	w0, 0x267c <RenderSettings_get_fogEndDistance+0x20>
-    2670:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
-    2674:      	add	x0, x0, #0xd5
-    2678:      	bl	0x2b38 <ThreadAndSerializationSafeCheckReportError@plt>
-    267c:      	bl	0x2b68 <GetRenderSettings@plt>
-    2680:      	ldr	s0, [x0, #0x60]
-    2684:      	ldp	x29, x30, [sp], #0x10
-    2688:      	autiasp
-    268c:      	ret
+0000000000002b34 <RenderSettings_get_fogStartDistance>:
+    2b34:      	paciasp
+    2b38:      	stp	x29, x30, [sp, #-0x10]!
+    2b3c:      	mov	x29, sp
+    2b40:      	bl	0x31f8 <CurrentThreadIsMainThread@plt>
+    2b44:      	cbnz	w0, 0x2b54 <RenderSettings_get_fogStartDistance+0x20>
+    2b48:      	nop
+    2b4c:      	adr	x0, 0x1436 <il2cpp_codegen_resolve_icall+0x1436>
+    2b50:      	bl	0x3210 <ThreadAndSerializationSafeCheckReportError@plt>
+    2b54:      	bl	0x3240 <GetRenderSettings@plt>
+    2b58:      	ldr	s0, [x0, #0x58]
+    2b5c:      	ldp	x29, x30, [sp], #0x10
+    2b60:      	autiasp
+    2b64:      	ret
 
-0000000000002690 <RenderSettings_set_fogEndDistance>:
-    2690:      	paciasp
-    2694:      	str	d8, [sp, #-0x20]!
-    2698:      	stp	x29, x30, [sp, #0x10]
-    269c:      	add	x29, sp, #0x10
-    26a0:      	fmov	s8, s0
-    26a4:      	bl	0x2b20 <CurrentThreadIsMainThread@plt>
-    26a8:      	cbnz	w0, 0x26b8 <RenderSettings_set_fogEndDistance+0x28>
-    26ac:      	adrp	x0, 0x0 <il2cpp_codegen_resolve_icall>
-    26b0:      	add	x0, x0, #0xea0
-    26b4:      	bl	0x2b38 <ThreadAndSerializationSafeCheckReportError@plt>
-    26b8:      	bl	0x2b68 <GetRenderSettings@plt>
-    26bc:      	ldr	s0, [x0, #0x60]
-    26c0:      	fcmp	s0, s8
-    26c4:      	b.eq	0x26dc <RenderSettings_set_fogEndDistance+0x4c>
-    26c8:      	str	s8, [x0, #0x60]
-    26cc:      	ldp	x29, x30, [sp, #0x10]
-    26d0:      	ldr	d8, [sp], #0x20
-    26d4:      	autiasp
-    26d8:      	b	0x2b80 <SetDirty@plt>
-    26dc:      	ldp	x29, x30, [sp, #0x10]
-    26e0:      	ldr	d8, [sp], #0x20
-    26e4:      	autiasp
-    26e8:      	ret
+0000000000002b68 <RenderSettings_get_fogEndDistance>:
+    2b68:      	paciasp
+    2b6c:      	stp	x29, x30, [sp, #-0x10]!
+    2b70:      	mov	x29, sp
+    2b74:      	bl	0x31f8 <CurrentThreadIsMainThread@plt>
+    2b78:      	cbnz	w0, 0x2b88 <RenderSettings_get_fogEndDistance+0x20>
+    2b7c:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    2b80:      	add	x0, x0, #0x458
+    2b84:      	bl	0x3210 <ThreadAndSerializationSafeCheckReportError@plt>
+    2b88:      	bl	0x3240 <GetRenderSettings@plt>
+    2b8c:      	ldr	s0, [x0, #0x5c]
+    2b90:      	ldp	x29, x30, [sp], #0x10
+    2b94:      	autiasp
+    2b98:      	ret
 
-00000000000026ec <RenderSettings_get_fog>:
-    26ec:      	paciasp
-    26f0:      	stp	x29, x30, [sp, #-0x10]!
-    26f4:      	mov	x29, sp
-    26f8:      	bl	0x2b20 <CurrentThreadIsMainThread@plt>
-    26fc:      	cbnz	w0, 0x270c <RenderSettings_get_fog+0x20>
-    2700:      	adrp	x0, 0x0 <il2cpp_codegen_resolve_icall>
-    2704:      	add	x0, x0, #0xf3e
-    2708:      	bl	0x2b38 <ThreadAndSerializationSafeCheckReportError@plt>
-    270c:      	bl	0x2b68 <GetRenderSettings@plt>
-    2710:      	ldrb	w0, [x0, #0x40]
-    2714:      	ldp	x29, x30, [sp], #0x10
-    2718:      	autiasp
-    271c:      	ret
+0000000000002b9c <RenderSettings_set_fogEndDistance>:
+    2b9c:      	paciasp
+    2ba0:      	str	d8, [sp, #-0x20]!
+    2ba4:      	stp	x29, x30, [sp, #0x8]
+    2ba8:      	str	x19, [sp, #0x18]
+    2bac:      	add	x29, sp, #0x8
+    2bb0:      	fmov	s8, s0
+    2bb4:      	bl	0x31f8 <CurrentThreadIsMainThread@plt>
+    2bb8:      	cbnz	w0, 0x2bc8 <RenderSettings_set_fogEndDistance+0x2c>
+    2bbc:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    2bc0:      	add	x0, x0, #0x1a0
+    2bc4:      	bl	0x3210 <ThreadAndSerializationSafeCheckReportError@plt>
+    2bc8:      	bl	0x3240 <GetRenderSettings@plt>
+    2bcc:      	ldr	s0, [x0, #0x5c]
+    2bd0:      	fcmp	s0, s8
+    2bd4:      	b.eq	0x2bfc <RenderSettings_set_fogEndDistance+0x60>
+    2bd8:      	str	s8, [x0, #0x5c]
+    2bdc:      	mov	x19, x0
+    2be0:      	bl	0x31e0 <ApplyFog@plt>
+    2be4:      	mov	x0, x19
+    2be8:      	ldp	x29, x30, [sp, #0x8]
+    2bec:      	ldr	x19, [sp, #0x18]
+    2bf0:      	ldr	d8, [sp], #0x20
+    2bf4:      	autiasp
+    2bf8:      	b	0x3258 <SetDirty@plt>
+    2bfc:      	ldp	x29, x30, [sp, #0x8]
+    2c00:      	ldr	x19, [sp, #0x18]
+    2c04:      	ldr	d8, [sp], #0x20
+    2c08:      	autiasp
+    2c0c:      	ret
 
-0000000000002720 <RenderSettings_get_fogMode>:
-    2720:      	paciasp
-    2724:      	stp	x29, x30, [sp, #-0x10]!
-    2728:      	mov	x29, sp
-    272c:      	bl	0x2b20 <CurrentThreadIsMainThread@plt>
-    2730:      	cbnz	w0, 0x2740 <RenderSettings_get_fogMode+0x20>
-    2734:      	adrp	x0, 0x0 <il2cpp_codegen_resolve_icall>
-    2738:      	add	x0, x0, #0xf46
-    273c:      	bl	0x2b38 <ThreadAndSerializationSafeCheckReportError@plt>
-    2740:      	bl	0x2b68 <GetRenderSettings@plt>
-    2744:      	ldr	w0, [x0, #0x54]
-    2748:      	ldp	x29, x30, [sp], #0x10
-    274c:      	autiasp
-    2750:      	ret
+0000000000002c10 <RenderSettings_set_fogStartDistance>:
+    2c10:      	paciasp
+    2c14:      	str	d8, [sp, #-0x20]!
+    2c18:      	stp	x29, x30, [sp, #0x8]
+    2c1c:      	str	x19, [sp, #0x18]
+    2c20:      	add	x29, sp, #0x8
+    2c24:      	fmov	s8, s0
+    2c28:      	bl	0x31f8 <CurrentThreadIsMainThread@plt>
+    2c2c:      	cbnz	w0, 0x2c3c <RenderSettings_set_fogStartDistance+0x2c>
+    2c30:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    2c34:      	add	x0, x0, #0x23e
+    2c38:      	bl	0x3210 <ThreadAndSerializationSafeCheckReportError@plt>
+    2c3c:      	bl	0x3240 <GetRenderSettings@plt>
+    2c40:      	ldr	s0, [x0, #0x58]
+    2c44:      	fcmp	s0, s8
+    2c48:      	b.eq	0x2c70 <RenderSettings_set_fogStartDistance+0x60>
+    2c4c:      	str	s8, [x0, #0x58]
+    2c50:      	mov	x19, x0
+    2c54:      	bl	0x31e0 <ApplyFog@plt>
+    2c58:      	mov	x0, x19
+    2c5c:      	ldp	x29, x30, [sp, #0x8]
+    2c60:      	ldr	x19, [sp, #0x18]
+    2c64:      	ldr	d8, [sp], #0x20
+    2c68:      	autiasp
+    2c6c:      	b	0x3258 <SetDirty@plt>
+    2c70:      	ldp	x29, x30, [sp, #0x8]
+    2c74:      	ldr	x19, [sp, #0x18]
+    2c78:      	ldr	d8, [sp], #0x20
+    2c7c:      	autiasp
+    2c80:      	ret
 
-0000000000002754 <RenderSettings_get_fogColor_Injected>:
-    2754:      	paciasp
-    2758:      	stp	x29, x30, [sp, #-0x20]!
-    275c:      	str	x19, [sp, #0x10]
-    2760:      	mov	x29, sp
-    2764:      	mov	x19, x0
-    2768:      	bl	0x2b20 <CurrentThreadIsMainThread@plt>
-    276c:      	cbnz	w0, 0x277c <RenderSettings_get_fogColor_Injected+0x28>
-    2770:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
-    2774:      	add	x0, x0, #0xc8
-    2778:      	bl	0x2b38 <ThreadAndSerializationSafeCheckReportError@plt>
-    277c:      	bl	0x2b68 <GetRenderSettings@plt>
-    2780:      	ldur	q0, [x0, #0x44]
-    2784:      	str	q0, [x19]
-    2788:      	ldr	x19, [sp, #0x10]
-    278c:      	ldp	x29, x30, [sp], #0x20
-    2790:      	autiasp
-    2794:      	ret
+0000000000002c84 <RenderSettings_get_fog>:
+    2c84:      	paciasp
+    2c88:      	stp	x29, x30, [sp, #-0x10]!
+    2c8c:      	mov	x29, sp
+    2c90:      	bl	0x31f8 <CurrentThreadIsMainThread@plt>
+    2c94:      	cbnz	w0, 0x2ca4 <RenderSettings_get_fog+0x20>
+    2c98:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    2c9c:      	add	x0, x0, #0x263
+    2ca0:      	bl	0x3210 <ThreadAndSerializationSafeCheckReportError@plt>
+    2ca4:      	bl	0x3240 <GetRenderSettings@plt>
+    2ca8:      	ldrb	w0, [x0, #0x40]
+    2cac:      	ldp	x29, x30, [sp], #0x10
+    2cb0:      	autiasp
+    2cb4:      	ret
 
-0000000000002798 <RenderSettings_get_ambientEquatorColor_Injected>:
-    2798:      	paciasp
-    279c:      	stp	x29, x30, [sp, #-0x20]!
-    27a0:      	str	x19, [sp, #0x10]
-    27a4:      	mov	x29, sp
-    27a8:      	mov	x19, x0
-    27ac:      	bl	0x2b20 <CurrentThreadIsMainThread@plt>
-    27b0:      	cbnz	w0, 0x27c0 <RenderSettings_get_ambientEquatorColor_Injected+0x28>
-    27b4:      	adrp	x0, 0x0 <il2cpp_codegen_resolve_icall>
-    27b8:      	add	x0, x0, #0xfc9
-    27bc:      	bl	0x2b38 <ThreadAndSerializationSafeCheckReportError@plt>
-    27c0:      	bl	0x2b68 <GetRenderSettings@plt>
-    27c4:      	ldr	q0, [x0, #0x80]
-    27c8:      	str	q0, [x19]
-    27cc:      	ldr	x19, [sp, #0x10]
-    27d0:      	ldp	x29, x30, [sp], #0x20
-    27d4:      	autiasp
-    27d8:      	ret
+0000000000002cb8 <RenderSettings_get_fogMode>:
+    2cb8:      	paciasp
+    2cbc:      	stp	x29, x30, [sp, #-0x10]!
+    2cc0:      	mov	x29, sp
+    2cc4:      	bl	0x31f8 <CurrentThreadIsMainThread@plt>
+    2cc8:      	cbnz	w0, 0x2cd8 <RenderSettings_get_fogMode+0x20>
+    2ccc:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    2cd0:      	add	x0, x0, #0x26b
+    2cd4:      	bl	0x3210 <ThreadAndSerializationSafeCheckReportError@plt>
+    2cd8:      	bl	0x3240 <GetRenderSettings@plt>
+    2cdc:      	ldr	w0, [x0, #0x44]
+    2ce0:      	ldp	x29, x30, [sp], #0x10
+    2ce4:      	autiasp
+    2ce8:      	ret
 
-00000000000027dc <RenderSettings_get_ambientSkyColor_Injected>:
-    27dc:      	paciasp
-    27e0:      	stp	x29, x30, [sp, #-0x20]!
-    27e4:      	str	x19, [sp, #0x10]
-    27e8:      	mov	x29, sp
-    27ec:      	mov	x19, x0
-    27f0:      	bl	0x2b20 <CurrentThreadIsMainThread@plt>
-    27f4:      	cbnz	w0, 0x2804 <RenderSettings_get_ambientSkyColor_Injected+0x28>
-    27f8:      	adrp	x0, 0x0 <il2cpp_codegen_resolve_icall>
-    27fc:      	add	x0, x0, #0xef1
-    2800:      	bl	0x2b38 <ThreadAndSerializationSafeCheckReportError@plt>
-    2804:      	bl	0x2b68 <GetRenderSettings@plt>
-    2808:      	ldr	q0, [x0, #0x70]
-    280c:      	str	q0, [x19]
-    2810:      	ldr	x19, [sp, #0x10]
-    2814:      	ldp	x29, x30, [sp], #0x20
-    2818:      	autiasp
-    281c:      	ret
+0000000000002cec <RenderSettings_get_fogColor_Injected>:
+    2cec:      	paciasp
+    2cf0:      	stp	x29, x30, [sp, #-0x20]!
+    2cf4:      	str	x19, [sp, #0x10]
+    2cf8:      	mov	x29, sp
+    2cfc:      	mov	x19, x0
+    2d00:      	bl	0x31f8 <CurrentThreadIsMainThread@plt>
+    2d04:      	cbnz	w0, 0x2d14 <RenderSettings_get_fogColor_Injected+0x28>
+    2d08:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    2d0c:      	add	x0, x0, #0x44b
+    2d10:      	bl	0x3210 <ThreadAndSerializationSafeCheckReportError@plt>
+    2d14:      	bl	0x3240 <GetRenderSettings@plt>
+    2d18:      	ldur	q0, [x0, #0x48]
+    2d1c:      	str	q0, [x19]
+    2d20:      	ldr	x19, [sp, #0x10]
+    2d24:      	ldp	x29, x30, [sp], #0x20
+    2d28:      	autiasp
+    2d2c:      	ret
 
-0000000000002820 <RenderSettings_GetRenderSettings_Injected>:
-    2820:      	bti	c
-    2824:      	b	0x2b68 <GetRenderSettings@plt>
+0000000000002d30 <RenderSettings_get_ambientEquatorColor_Injected>:
+    2d30:      	paciasp
+    2d34:      	stp	x29, x30, [sp, #-0x20]!
+    2d38:      	str	x19, [sp, #0x10]
+    2d3c:      	mov	x29, sp
+    2d40:      	mov	x19, x0
+    2d44:      	bl	0x31f8 <CurrentThreadIsMainThread@plt>
+    2d48:      	cbnz	w0, 0x2d58 <RenderSettings_get_ambientEquatorColor_Injected+0x28>
+    2d4c:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    2d50:      	add	x0, x0, #0x34c
+    2d54:      	bl	0x3210 <ThreadAndSerializationSafeCheckReportError@plt>
+    2d58:      	bl	0x3240 <GetRenderSettings@plt>
+    2d5c:      	ldr	q0, [x0, #0x80]
+    2d60:      	str	q0, [x19]
+    2d64:      	ldr	x19, [sp, #0x10]
+    2d68:      	ldp	x29, x30, [sp], #0x20
+    2d6c:      	autiasp
+    2d70:      	ret
 
-0000000000002828 <Animator_get_cullingMode_Injected>:
-    2828:      	paciasp
-    282c:      	stp	x29, x30, [sp, #-0x20]!
-    2830:      	str	x19, [sp, #0x10]
-    2834:      	mov	x29, sp
-    2838:      	mov	x19, x0
-    283c:      	bl	0x2b20 <CurrentThreadIsMainThread@plt>
-    2840:      	cbnz	w0, 0x2850 <Animator_get_cullingMode_Injected+0x28>
-    2844:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
-    2848:      	add	x0, x0, #0xa3
-    284c:      	bl	0x2b38 <ThreadAndSerializationSafeCheckReportError@plt>
-    2850:      	ldr	w0, [x19, #0x58]
-    2854:      	ldr	x19, [sp, #0x10]
-    2858:      	ldp	x29, x30, [sp], #0x20
-    285c:      	autiasp
-    2860:      	ret
+0000000000002d74 <RenderSettings_get_ambientSkyColor_Injected>:
+    2d74:      	paciasp
+    2d78:      	stp	x29, x30, [sp, #-0x20]!
+    2d7c:      	str	x19, [sp, #0x10]
+    2d80:      	mov	x29, sp
+    2d84:      	mov	x19, x0
+    2d88:      	bl	0x31f8 <CurrentThreadIsMainThread@plt>
+    2d8c:      	cbnz	w0, 0x2d9c <RenderSettings_get_ambientSkyColor_Injected+0x28>
+    2d90:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    2d94:      	add	x0, x0, #0x1f1
+    2d98:      	bl	0x3210 <ThreadAndSerializationSafeCheckReportError@plt>
+    2d9c:      	bl	0x3240 <GetRenderSettings@plt>
+    2da0:      	ldr	q0, [x0, #0x70]
+    2da4:      	str	q0, [x19]
+    2da8:      	ldr	x19, [sp, #0x10]
+    2dac:      	ldp	x29, x30, [sp], #0x20
+    2db0:      	autiasp
+    2db4:      	ret
 
-0000000000002864 <UnityEngine_RenderSettings__get_fogStartDistance>:
-    2864:      	paciasp
-    2868:      	stp	x29, x30, [sp, #-0x20]!
-    286c:      	str	x19, [sp, #0x10]
-    2870:      	mov	x29, sp
-    2874:      	adrp	x19, 0x3000 <t_is_main+0x3000>
-    2878:      	ldr	x19, [x19, #0xce0]
-    287c:      	ldr	x16, [x19]
-    2880:      	cbnz	x16, 0x2898 <UnityEngine_RenderSettings__get_fogStartDistance+0x34>
-    2884:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
-    2888:      	add	x0, x0, #0x32
-    288c:      	bl	0x2b98 <il2cpp_codegen_resolve_icall@plt>
-    2890:      	mov	x16, x0
-    2894:      	str	x0, [x19]
-    2898:      	ldr	x19, [sp, #0x10]
-    289c:      	ldp	x29, x30, [sp], #0x20
-    28a0:      	autiasp
-    28a4:      	br	x16
+0000000000002db8 <RenderSettings_GetRenderSettings_Injected>:
+    2db8:      	bti	c
+    2dbc:      	b	0x3240 <GetRenderSettings@plt>
 
-00000000000028a8 <UnityEngine_RenderSettings__get_fogEndDistance>:
-    28a8:      	paciasp
-    28ac:      	stp	x29, x30, [sp, #-0x20]!
-    28b0:      	str	x19, [sp, #0x10]
-    28b4:      	mov	x29, sp
-    28b8:      	adrp	x19, 0x3000 <t_is_main+0x3000>
-    28bc:      	ldr	x19, [x19, #0xce8]
-    28c0:      	ldr	x16, [x19]
-    28c4:      	cbnz	x16, 0x28dc <UnityEngine_RenderSettings__get_fogEndDistance+0x34>
-    28c8:      	adrp	x0, 0x0 <il2cpp_codegen_resolve_icall>
-    28cc:      	add	x0, x0, #0xf52
-    28d0:      	bl	0x2b98 <il2cpp_codegen_resolve_icall@plt>
-    28d4:      	mov	x16, x0
-    28d8:      	str	x0, [x19]
-    28dc:      	ldr	x19, [sp, #0x10]
-    28e0:      	ldp	x29, x30, [sp], #0x20
-    28e4:      	autiasp
-    28e8:      	br	x16
+0000000000002dc0 <Animator_get_cullingMode_Injected>:
+    2dc0:      	paciasp
+    2dc4:      	stp	x29, x30, [sp, #-0x20]!
+    2dc8:      	str	x19, [sp, #0x10]
+    2dcc:      	mov	x29, sp
+    2dd0:      	mov	x19, x0
+    2dd4:      	bl	0x31f8 <CurrentThreadIsMainThread@plt>
+    2dd8:      	cbnz	w0, 0x2de8 <Animator_get_cullingMode_Injected+0x28>
+    2ddc:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    2de0:      	add	x0, x0, #0x426
+    2de4:      	bl	0x3210 <ThreadAndSerializationSafeCheckReportError@plt>
+    2de8:      	ldr	w0, [x19, #0x58]
+    2dec:      	ldr	x19, [sp, #0x10]
+    2df0:      	ldp	x29, x30, [sp], #0x20
+    2df4:      	autiasp
+    2df8:      	ret
 
-00000000000028ec <UnityEngine_RenderSettings__set_fogEndDistance>:
-    28ec:      	paciasp
-    28f0:      	str	d8, [sp, #-0x20]!
-    28f4:      	stp	x29, x30, [sp, #0x8]
-    28f8:      	str	x19, [sp, #0x18]
-    28fc:      	add	x29, sp, #0x8
-    2900:      	adrp	x19, 0x3000 <t_is_main+0x3000>
-    2904:      	ldr	x19, [x19, #0xcf0]
-    2908:      	ldr	x16, [x19]
-    290c:      	cbnz	x16, 0x292c <UnityEngine_RenderSettings__set_fogEndDistance+0x40>
-    2910:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
-    2914:      	add	x0, x0, #0x65
-    2918:      	fmov	s8, s0
-    291c:      	bl	0x2b98 <il2cpp_codegen_resolve_icall@plt>
-    2920:      	fmov	s0, s8
-    2924:      	mov	x16, x0
-    2928:      	str	x0, [x19]
-    292c:      	ldp	x29, x30, [sp, #0x8]
-    2930:      	ldr	x19, [sp, #0x18]
-    2934:      	ldr	d8, [sp], #0x20
-    2938:      	autiasp
-    293c:      	br	x16
+0000000000002dfc <Animator_set_cullingMode_Injected>:
+    2dfc:      	paciasp
+    2e00:      	stp	x29, x30, [sp, #-0x20]!
+    2e04:      	stp	x20, x19, [sp, #0x10]
+    2e08:      	mov	x29, sp
+    2e0c:      	mov	w19, w1
+    2e10:      	mov	x20, x0
+    2e14:      	bl	0x31f8 <CurrentThreadIsMainThread@plt>
+    2e18:      	cbnz	w0, 0x2e28 <Animator_set_cullingMode_Injected+0x2c>
+    2e1c:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    2e20:      	add	x0, x0, #0x253
+    2e24:      	bl	0x3210 <ThreadAndSerializationSafeCheckReportError@plt>
+    2e28:      	ldr	w8, [x20, #0x58]
+    2e2c:      	cmp	w8, w19
+    2e30:      	b.eq	0x2e60 <Animator_set_cullingMode_Injected+0x64>
+    2e34:      	cbz	w19, 0x2e44 <Animator_set_cullingMode_Injected+0x48>
+    2e38:      	cbnz	w8, 0x2e5c <Animator_set_cullingMode_Injected+0x60>
+    2e3c:      	mov	w8, #-0x1               // =-1
+    2e40:      	b	0x2e48 <Animator_set_cullingMode_Injected+0x4c>
+    2e44:      	mov	w8, #0x1                // =1
+    2e48:      	adrp	x9, 0x4000 <t_is_main+0x4000>
+    2e4c:      	ldr	x9, [x9, #0x3c0]
+    2e50:      	ldr	w10, [x9]
+    2e54:      	add	w8, w10, w8
+    2e58:      	str	w8, [x9]
+    2e5c:      	str	w19, [x20, #0x58]
+    2e60:      	ldp	x20, x19, [sp, #0x10]
+    2e64:      	ldp	x29, x30, [sp], #0x20
+    2e68:      	autiasp
+    2e6c:      	ret
 
-0000000000002940 <UnityEngine_RenderSettings__get_fog>:
-    2940:      	paciasp
-    2944:      	stp	x29, x30, [sp, #-0x20]!
-    2948:      	str	x19, [sp, #0x10]
-    294c:      	mov	x29, sp
-    2950:      	adrp	x19, 0x3000 <t_is_main+0x3000>
-    2954:      	ldr	x19, [x19, #0xcf8]
-    2958:      	ldr	x16, [x19]
-    295c:      	cbnz	x16, 0x2974 <UnityEngine_RenderSettings__get_fog+0x34>
-    2960:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
-    2964:      	add	x0, x0, #0xe8
-    2968:      	bl	0x2b98 <il2cpp_codegen_resolve_icall@plt>
-    296c:      	mov	x16, x0
-    2970:      	str	x0, [x19]
-    2974:      	ldr	x19, [sp, #0x10]
-    2978:      	ldp	x29, x30, [sp], #0x20
-    297c:      	autiasp
-    2980:      	br	x16
+0000000000002e70 <UnityEngine_RenderSettings__get_fogStartDistance>:
+    2e70:      	paciasp
+    2e74:      	stp	x29, x30, [sp, #-0x20]!
+    2e78:      	str	x19, [sp, #0x10]
+    2e7c:      	mov	x29, sp
+    2e80:      	adrp	x19, 0x4000 <t_is_main+0x4000>
+    2e84:      	ldr	x19, [x19, #0x3c8]
+    2e88:      	ldr	x16, [x19]
+    2e8c:      	cbnz	x16, 0x2ea4 <UnityEngine_RenderSettings__get_fogStartDistance+0x34>
+    2e90:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    2e94:      	add	x0, x0, #0x3b5
+    2e98:      	bl	0x3270 <il2cpp_codegen_resolve_icall@plt>
+    2e9c:      	mov	x16, x0
+    2ea0:      	str	x0, [x19]
+    2ea4:      	ldr	x19, [sp, #0x10]
+    2ea8:      	ldp	x29, x30, [sp], #0x20
+    2eac:      	autiasp
+    2eb0:      	br	x16
 
-0000000000002984 <UnityEngine_RenderSettings__get_fogMode>:
-    2984:      	paciasp
-    2988:      	stp	x29, x30, [sp, #-0x20]!
-    298c:      	str	x19, [sp, #0x10]
-    2990:      	mov	x29, sp
-    2994:      	adrp	x19, 0x3000 <t_is_main+0x3000>
-    2998:      	ldr	x19, [x19, #0xd00]
-    299c:      	ldr	x16, [x19]
-    29a0:      	cbnz	x16, 0x29b8 <UnityEngine_RenderSettings__get_fogMode+0x34>
-    29a4:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
-    29a8:      	add	x0, x0, #0x10e
-    29ac:      	bl	0x2b98 <il2cpp_codegen_resolve_icall@plt>
-    29b0:      	mov	x16, x0
-    29b4:      	str	x0, [x19]
-    29b8:      	ldr	x19, [sp, #0x10]
-    29bc:      	ldp	x29, x30, [sp], #0x20
-    29c0:      	autiasp
-    29c4:      	br	x16
+0000000000002eb4 <UnityEngine_RenderSettings__get_fogEndDistance>:
+    2eb4:      	paciasp
+    2eb8:      	stp	x29, x30, [sp, #-0x20]!
+    2ebc:      	str	x19, [sp, #0x10]
+    2ec0:      	mov	x29, sp
+    2ec4:      	adrp	x19, 0x4000 <t_is_main+0x4000>
+    2ec8:      	ldr	x19, [x19, #0x3d0]
+    2ecc:      	ldr	x16, [x19]
+    2ed0:      	cbnz	x16, 0x2ee8 <UnityEngine_RenderSettings__get_fogEndDistance+0x34>
+    2ed4:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    2ed8:      	add	x0, x0, #0x277
+    2edc:      	bl	0x3270 <il2cpp_codegen_resolve_icall@plt>
+    2ee0:      	mov	x16, x0
+    2ee4:      	str	x0, [x19]
+    2ee8:      	ldr	x19, [sp, #0x10]
+    2eec:      	ldp	x29, x30, [sp], #0x20
+    2ef0:      	autiasp
+    2ef4:      	br	x16
 
-00000000000029c8 <UnityEngine_RenderSettings__get_fogColor_Injected>:
-    29c8:      	paciasp
-    29cc:      	stp	x29, x30, [sp, #-0x20]!
-    29d0:      	stp	x20, x19, [sp, #0x10]
-    29d4:      	mov	x29, sp
-    29d8:      	adrp	x19, 0x3000 <t_is_main+0x3000>
-    29dc:      	ldr	x19, [x19, #0xd08]
-    29e0:      	ldr	x16, [x19]
-    29e4:      	cbnz	x16, 0x2a08 <UnityEngine_RenderSettings__get_fogColor_Injected+0x40>
-    29e8:      	adrp	x8, 0x0 <il2cpp_codegen_resolve_icall>
-    29ec:      	add	x8, x8, #0xf83
-    29f0:      	mov	x20, x0
-    29f4:      	mov	x0, x8
-    29f8:      	bl	0x2b98 <il2cpp_codegen_resolve_icall@plt>
-    29fc:      	mov	x16, x0
-    2a00:      	mov	x0, x20
-    2a04:      	str	x16, [x19]
-    2a08:      	ldp	x20, x19, [sp, #0x10]
-    2a0c:      	ldp	x29, x30, [sp], #0x20
-    2a10:      	autiasp
-    2a14:      	br	x16
+0000000000002ef8 <UnityEngine_RenderSettings__set_fogEndDistance>:
+    2ef8:      	paciasp
+    2efc:      	str	d8, [sp, #-0x20]!
+    2f00:      	stp	x29, x30, [sp, #0x8]
+    2f04:      	str	x19, [sp, #0x18]
+    2f08:      	add	x29, sp, #0x8
+    2f0c:      	adrp	x19, 0x4000 <t_is_main+0x4000>
+    2f10:      	ldr	x19, [x19, #0x3d8]
+    2f14:      	ldr	x16, [x19]
+    2f18:      	cbnz	x16, 0x2f38 <UnityEngine_RenderSettings__set_fogEndDistance+0x40>
+    2f1c:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    2f20:      	add	x0, x0, #0x3e8
+    2f24:      	fmov	s8, s0
+    2f28:      	bl	0x3270 <il2cpp_codegen_resolve_icall@plt>
+    2f2c:      	fmov	s0, s8
+    2f30:      	mov	x16, x0
+    2f34:      	str	x0, [x19]
+    2f38:      	ldp	x29, x30, [sp, #0x8]
+    2f3c:      	ldr	x19, [sp, #0x18]
+    2f40:      	ldr	d8, [sp], #0x20
+    2f44:      	autiasp
+    2f48:      	br	x16
 
-0000000000002a18 <UnityEngine_RenderSettings__get_ambientEquatorColor_Injected>:
-    2a18:      	paciasp
-    2a1c:      	stp	x29, x30, [sp, #-0x20]!
-    2a20:      	stp	x20, x19, [sp, #0x10]
-    2a24:      	mov	x29, sp
-    2a28:      	adrp	x19, 0x3000 <t_is_main+0x3000>
-    2a2c:      	ldr	x19, [x19, #0xd10]
-    2a30:      	ldr	x16, [x19]
-    2a34:      	cbnz	x16, 0x2a58 <UnityEngine_RenderSettings__get_ambientEquatorColor_Injected+0x40>
-    2a38:      	adrp	x8, 0x0 <il2cpp_codegen_resolve_icall>
-    2a3c:      	add	x8, x8, #0xfe1
-    2a40:      	mov	x20, x0
-    2a44:      	mov	x0, x8
-    2a48:      	bl	0x2b98 <il2cpp_codegen_resolve_icall@plt>
-    2a4c:      	mov	x16, x0
-    2a50:      	mov	x0, x20
-    2a54:      	str	x16, [x19]
-    2a58:      	ldp	x20, x19, [sp, #0x10]
-    2a5c:      	ldp	x29, x30, [sp], #0x20
-    2a60:      	autiasp
-    2a64:      	br	x16
+0000000000002f4c <UnityEngine_RenderSettings__set_fogStartDistance>:
+    2f4c:      	paciasp
+    2f50:      	str	d8, [sp, #-0x20]!
+    2f54:      	stp	x29, x30, [sp, #0x8]
+    2f58:      	str	x19, [sp, #0x18]
+    2f5c:      	add	x29, sp, #0x8
+    2f60:      	adrp	x19, 0x4000 <t_is_main+0x4000>
+    2f64:      	ldr	x19, [x19, #0x3e0]
+    2f68:      	ldr	x16, [x19]
+    2f6c:      	cbnz	x16, 0x2f8c <UnityEngine_RenderSettings__set_fogStartDistance+0x40>
+    2f70:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    2f74:      	add	x0, x0, #0x46b
+    2f78:      	fmov	s8, s0
+    2f7c:      	bl	0x3270 <il2cpp_codegen_resolve_icall@plt>
+    2f80:      	fmov	s0, s8
+    2f84:      	mov	x16, x0
+    2f88:      	str	x0, [x19]
+    2f8c:      	ldp	x29, x30, [sp, #0x8]
+    2f90:      	ldr	x19, [sp, #0x18]
+    2f94:      	ldr	d8, [sp], #0x20
+    2f98:      	autiasp
+    2f9c:      	br	x16
 
-0000000000002a68 <UnityEngine_RenderSettings__GetRenderSettings_Injected>:
-    2a68:      	paciasp
-    2a6c:      	stp	x29, x30, [sp, #-0x20]!
-    2a70:      	str	x19, [sp, #0x10]
-    2a74:      	mov	x29, sp
-    2a78:      	adrp	x19, 0x3000 <t_is_main+0x3000>
-    2a7c:      	ldr	x19, [x19, #0xd18]
-    2a80:      	ldr	x16, [x19]
-    2a84:      	cbnz	x16, 0x2a9c <UnityEngine_RenderSettings__GetRenderSettings_Injected+0x34>
-    2a88:      	adrp	x0, 0x0 <il2cpp_codegen_resolve_icall>
-    2a8c:      	add	x0, x0, #0xf05
-    2a90:      	bl	0x2b98 <il2cpp_codegen_resolve_icall@plt>
-    2a94:      	mov	x16, x0
-    2a98:      	str	x0, [x19]
-    2a9c:      	ldr	x19, [sp, #0x10]
-    2aa0:      	ldp	x29, x30, [sp], #0x20
-    2aa4:      	autiasp
-    2aa8:      	br	x16
+0000000000002fa0 <UnityEngine_RenderSettings__get_fog>:
+    2fa0:      	paciasp
+    2fa4:      	stp	x29, x30, [sp, #-0x20]!
+    2fa8:      	str	x19, [sp, #0x10]
+    2fac:      	mov	x29, sp
+    2fb0:      	adrp	x19, 0x4000 <t_is_main+0x4000>
+    2fb4:      	ldr	x19, [x19, #0x3e8]
+    2fb8:      	ldr	x16, [x19]
+    2fbc:      	cbnz	x16, 0x2fd4 <UnityEngine_RenderSettings__get_fog+0x34>
+    2fc0:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    2fc4:      	add	x0, x0, #0x4ab
+    2fc8:      	bl	0x3270 <il2cpp_codegen_resolve_icall@plt>
+    2fcc:      	mov	x16, x0
+    2fd0:      	str	x0, [x19]
+    2fd4:      	ldr	x19, [sp, #0x10]
+    2fd8:      	ldp	x29, x30, [sp], #0x20
+    2fdc:      	autiasp
+    2fe0:      	br	x16
 
-0000000000002aac <UnityEngine_Animator__get_cullingMode_Injected>:
-    2aac:      	paciasp
-    2ab0:      	stp	x29, x30, [sp, #-0x20]!
-    2ab4:      	stp	x20, x19, [sp, #0x10]
-    2ab8:      	mov	x29, sp
-    2abc:      	adrp	x19, 0x3000 <t_is_main+0x3000>
-    2ac0:      	ldr	x19, [x19, #0xd20]
-    2ac4:      	ldr	x16, [x19]
-    2ac8:      	cbnz	x16, 0x2aec <UnityEngine_Animator__get_cullingMode_Injected+0x40>
-    2acc:      	adrp	x8, 0x0 <il2cpp_codegen_resolve_icall>
-    2ad0:      	add	x8, x8, #0xeb3
-    2ad4:      	mov	x20, x0
-    2ad8:      	mov	x0, x8
-    2adc:      	bl	0x2b98 <il2cpp_codegen_resolve_icall@plt>
-    2ae0:      	mov	x16, x0
-    2ae4:      	mov	x0, x20
-    2ae8:      	str	x16, [x19]
-    2aec:      	ldp	x20, x19, [sp, #0x10]
-    2af0:      	ldp	x29, x30, [sp], #0x20
-    2af4:      	autiasp
-    2af8:      	br	x16
+0000000000002fe4 <UnityEngine_RenderSettings__get_fogMode>:
+    2fe4:      	paciasp
+    2fe8:      	stp	x29, x30, [sp, #-0x20]!
+    2fec:      	str	x19, [sp, #0x10]
+    2ff0:      	mov	x29, sp
+    2ff4:      	adrp	x19, 0x4000 <t_is_main+0x4000>
+    2ff8:      	ldr	x19, [x19, #0x3f0]
+    2ffc:      	ldr	x16, [x19]
+    3000:      	cbnz	x16, 0x3018 <UnityEngine_RenderSettings__get_fogMode+0x34>
+    3004:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    3008:      	add	x0, x0, #0x4d1
+    300c:      	bl	0x3270 <il2cpp_codegen_resolve_icall@plt>
+    3010:      	mov	x16, x0
+    3014:      	str	x0, [x19]
+    3018:      	ldr	x19, [sp, #0x10]
+    301c:      	ldp	x29, x30, [sp], #0x20
+    3020:      	autiasp
+    3024:      	br	x16
+
+0000000000003028 <UnityEngine_RenderSettings__get_fogColor_Injected>:
+    3028:      	paciasp
+    302c:      	stp	x29, x30, [sp, #-0x20]!
+    3030:      	stp	x20, x19, [sp, #0x10]
+    3034:      	mov	x29, sp
+    3038:      	adrp	x19, 0x4000 <t_is_main+0x4000>
+    303c:      	ldr	x19, [x19, #0x3f8]
+    3040:      	ldr	x16, [x19]
+    3044:      	cbnz	x16, 0x3068 <UnityEngine_RenderSettings__get_fogColor_Injected+0x40>
+    3048:      	adrp	x8, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    304c:      	add	x8, x8, #0x306
+    3050:      	mov	x20, x0
+    3054:      	mov	x0, x8
+    3058:      	bl	0x3270 <il2cpp_codegen_resolve_icall@plt>
+    305c:      	mov	x16, x0
+    3060:      	mov	x0, x20
+    3064:      	str	x16, [x19]
+    3068:      	ldp	x20, x19, [sp, #0x10]
+    306c:      	ldp	x29, x30, [sp], #0x20
+    3070:      	autiasp
+    3074:      	br	x16
+
+0000000000003078 <UnityEngine_RenderSettings__get_ambientEquatorColor_Injected>:
+    3078:      	paciasp
+    307c:      	stp	x29, x30, [sp, #-0x20]!
+    3080:      	stp	x20, x19, [sp, #0x10]
+    3084:      	mov	x29, sp
+    3088:      	adrp	x19, 0x4000 <t_is_main+0x4000>
+    308c:      	ldr	x19, [x19, #0x400]
+    3090:      	ldr	x16, [x19]
+    3094:      	cbnz	x16, 0x30b8 <UnityEngine_RenderSettings__get_ambientEquatorColor_Injected+0x40>
+    3098:      	adrp	x8, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    309c:      	add	x8, x8, #0x364
+    30a0:      	mov	x20, x0
+    30a4:      	mov	x0, x8
+    30a8:      	bl	0x3270 <il2cpp_codegen_resolve_icall@plt>
+    30ac:      	mov	x16, x0
+    30b0:      	mov	x0, x20
+    30b4:      	str	x16, [x19]
+    30b8:      	ldp	x20, x19, [sp, #0x10]
+    30bc:      	ldp	x29, x30, [sp], #0x20
+    30c0:      	autiasp
+    30c4:      	br	x16
+
+00000000000030c8 <UnityEngine_RenderSettings__GetRenderSettings_Injected>:
+    30c8:      	paciasp
+    30cc:      	stp	x29, x30, [sp, #-0x20]!
+    30d0:      	str	x19, [sp, #0x10]
+    30d4:      	mov	x29, sp
+    30d8:      	adrp	x19, 0x4000 <t_is_main+0x4000>
+    30dc:      	ldr	x19, [x19, #0x408]
+    30e0:      	ldr	x16, [x19]
+    30e4:      	cbnz	x16, 0x30fc <UnityEngine_RenderSettings__GetRenderSettings_Injected+0x34>
+    30e8:      	adrp	x0, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    30ec:      	add	x0, x0, #0x205
+    30f0:      	bl	0x3270 <il2cpp_codegen_resolve_icall@plt>
+    30f4:      	mov	x16, x0
+    30f8:      	str	x0, [x19]
+    30fc:      	ldr	x19, [sp, #0x10]
+    3100:      	ldp	x29, x30, [sp], #0x20
+    3104:      	autiasp
+    3108:      	br	x16
+
+000000000000310c <UnityEngine_Animator__get_cullingMode_Injected>:
+    310c:      	paciasp
+    3110:      	stp	x29, x30, [sp, #-0x20]!
+    3114:      	stp	x20, x19, [sp, #0x10]
+    3118:      	mov	x29, sp
+    311c:      	adrp	x19, 0x4000 <t_is_main+0x4000>
+    3120:      	ldr	x19, [x19, #0x410]
+    3124:      	ldr	x16, [x19]
+    3128:      	cbnz	x16, 0x314c <UnityEngine_Animator__get_cullingMode_Injected+0x40>
+    312c:      	adrp	x8, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    3130:      	add	x8, x8, #0x1b3
+    3134:      	mov	x20, x0
+    3138:      	mov	x0, x8
+    313c:      	bl	0x3270 <il2cpp_codegen_resolve_icall@plt>
+    3140:      	mov	x16, x0
+    3144:      	mov	x0, x20
+    3148:      	str	x16, [x19]
+    314c:      	ldp	x20, x19, [sp, #0x10]
+    3150:      	ldp	x29, x30, [sp], #0x20
+    3154:      	autiasp
+    3158:      	br	x16
+
+000000000000315c <UnityEngine_Animator__set_cullingMode_Injected>:
+    315c:      	paciasp
+    3160:      	stp	x29, x30, [sp, #-0x30]!
+    3164:      	str	x21, [sp, #0x10]
+    3168:      	stp	x20, x19, [sp, #0x20]
+    316c:      	mov	x29, sp
+    3170:      	adrp	x19, 0x4000 <t_is_main+0x4000>
+    3174:      	ldr	x19, [x19, #0x418]
+    3178:      	ldr	x16, [x19]
+    317c:      	cbnz	x16, 0x31a8 <UnityEngine_Animator__set_cullingMode_Injected+0x4c>
+    3180:      	adrp	x8, 0x1000 <il2cpp_codegen_resolve_icall+0x1000>
+    3184:      	add	x8, x8, #0x2a8
+    3188:      	mov	x20, x0
+    318c:      	mov	x0, x8
+    3190:      	mov	w21, w1
+    3194:      	bl	0x3270 <il2cpp_codegen_resolve_icall@plt>
+    3198:      	mov	w1, w21
+    319c:      	mov	x16, x0
+    31a0:      	mov	x0, x20
+    31a4:      	str	x16, [x19]
+    31a8:      	ldp	x20, x19, [sp, #0x20]
+    31ac:      	ldr	x21, [sp, #0x10]
+    31b0:      	ldp	x29, x30, [sp], #0x30
+    31b4:      	autiasp
+    31b8:      	br	x16
 
 Disassembly of section .plt:
 
-0000000000002b00 <.plt>:
-    2b00:      	bti	c
-    2b04:      	stp	x16, x30, [sp, #-0x10]!
-    2b08:      	adrp	x16, 0x4000 <il2cpp_codegen_resolve_icall+0x4000>
-    2b0c:      	ldr	x17, [x16, #0xd38]
-    2b10:      	add	x16, x16, #0xd38
-    2b14:      	br	x17
-    2b18:      	nop
-    2b1c:      	nop
+00000000000031c0 <.plt>:
+    31c0:      	bti	c
+    31c4:      	stp	x16, x30, [sp, #-0x10]!
+    31c8:      	adrp	x16, 0x5000 <il2cpp_codegen_resolve_icall+0x5000>
+    31cc:      	ldr	x17, [x16, #0x430]
+    31d0:      	add	x16, x16, #0x430
+    31d4:      	br	x17
+    31d8:      	nop
+    31dc:      	nop
 
-0000000000002b20 <CurrentThreadIsMainThread@plt>:
-    2b20:      	adrp	x16, 0x4000 <il2cpp_codegen_resolve_icall+0x4000>
-    2b24:      	ldr	x17, [x16, #0xd40]
-    2b28:      	add	x16, x16, #0xd40
-    2b2c:      	br	x17
-    2b30:      	nop
-    2b34:      	nop
+00000000000031e0 <ApplyFog@plt>:
+    31e0:      	adrp	x16, 0x5000 <il2cpp_codegen_resolve_icall+0x5000>
+    31e4:      	ldr	x17, [x16, #0x438]
+    31e8:      	add	x16, x16, #0x438
+    31ec:      	br	x17
+    31f0:      	nop
+    31f4:      	nop
 
-0000000000002b38 <ThreadAndSerializationSafeCheckReportError@plt>:
-    2b38:      	adrp	x16, 0x4000 <il2cpp_codegen_resolve_icall+0x4000>
-    2b3c:      	ldr	x17, [x16, #0xd48]
-    2b40:      	add	x16, x16, #0xd48
-    2b44:      	br	x17
-    2b48:      	nop
-    2b4c:      	nop
+00000000000031f8 <CurrentThreadIsMainThread@plt>:
+    31f8:      	adrp	x16, 0x5000 <il2cpp_codegen_resolve_icall+0x5000>
+    31fc:      	ldr	x17, [x16, #0x440]
+    3200:      	add	x16, x16, #0x440
+    3204:      	br	x17
+    3208:      	nop
+    320c:      	nop
 
-0000000000002b50 <DebugStringToFile@plt>:
-    2b50:      	adrp	x16, 0x4000 <il2cpp_codegen_resolve_icall+0x4000>
-    2b54:      	ldr	x17, [x16, #0xd50]
-    2b58:      	add	x16, x16, #0xd50
-    2b5c:      	br	x17
-    2b60:      	nop
-    2b64:      	nop
+0000000000003210 <ThreadAndSerializationSafeCheckReportError@plt>:
+    3210:      	adrp	x16, 0x5000 <il2cpp_codegen_resolve_icall+0x5000>
+    3214:      	ldr	x17, [x16, #0x448]
+    3218:      	add	x16, x16, #0x448
+    321c:      	br	x17
+    3220:      	nop
+    3224:      	nop
 
-0000000000002b68 <GetRenderSettings@plt>:
-    2b68:      	adrp	x16, 0x4000 <il2cpp_codegen_resolve_icall+0x4000>
-    2b6c:      	ldr	x17, [x16, #0xd58]
-    2b70:      	add	x16, x16, #0xd58
-    2b74:      	br	x17
-    2b78:      	nop
-    2b7c:      	nop
+0000000000003228 <DebugStringToFile@plt>:
+    3228:      	adrp	x16, 0x5000 <il2cpp_codegen_resolve_icall+0x5000>
+    322c:      	ldr	x17, [x16, #0x450]
+    3230:      	add	x16, x16, #0x450
+    3234:      	br	x17
+    3238:      	nop
+    323c:      	nop
 
-0000000000002b80 <SetDirty@plt>:
-    2b80:      	adrp	x16, 0x4000 <il2cpp_codegen_resolve_icall+0x4000>
-    2b84:      	ldr	x17, [x16, #0xd60]
-    2b88:      	add	x16, x16, #0xd60
-    2b8c:      	br	x17
-    2b90:      	nop
-    2b94:      	nop
+0000000000003240 <GetRenderSettings@plt>:
+    3240:      	adrp	x16, 0x5000 <il2cpp_codegen_resolve_icall+0x5000>
+    3244:      	ldr	x17, [x16, #0x458]
+    3248:      	add	x16, x16, #0x458
+    324c:      	br	x17
+    3250:      	nop
+    3254:      	nop
 
-0000000000002b98 <il2cpp_codegen_resolve_icall@plt>:
-    2b98:      	adrp	x16, 0x4000 <il2cpp_codegen_resolve_icall+0x4000>
-    2b9c:      	ldr	x17, [x16, #0xd68]
-    2ba0:      	add	x16, x16, #0xd68
-    2ba4:      	br	x17
-    2ba8:      	nop
-    2bac:      	nop
+0000000000003258 <SetDirty@plt>:
+    3258:      	adrp	x16, 0x5000 <il2cpp_codegen_resolve_icall+0x5000>
+    325c:      	ldr	x17, [x16, #0x460]
+    3260:      	add	x16, x16, #0x460
+    3264:      	br	x17
+    3268:      	nop
+    326c:      	nop
+
+0000000000003270 <il2cpp_codegen_resolve_icall@plt>:
+    3270:      	adrp	x16, 0x5000 <il2cpp_codegen_resolve_icall+0x5000>
+    3274:      	ldr	x17, [x16, #0x468]
+    3278:      	add	x16, x16, #0x468
+    327c:      	br	x17
+    3280:      	nop
+    3284:      	nop

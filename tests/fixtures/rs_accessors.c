@@ -7,16 +7,27 @@
 // Regenerate with tests/fixtures/build_rs_accessors.sh.
 
 typedef struct { float r, g, b, a; } Color;
+// Field order as traced on device (Standoff 2, Unity 6): fog, mode, color, start, end, density.
 typedef struct RenderSettings {
     void* vtable;
     char pad[0x38];
     unsigned char fog;          // 0x40
-    Color fog_color;            // 0x44
-    int mode;                   // 0x54
-    float density, start, end;  // 0x58 0x5C 0x60
+    int mode;                   // 0x44
+    Color fog_color;            // 0x48
+    float start, end, density;  // 0x58 0x5C 0x60
     char pad2[0xC];
     Color sky, equator, ground; // 0x70 0x80 0x90
 } RenderSettings;
+
+// What the renderer reads: derived from the fields only inside the setters (ApplyFog).
+float g_fog_params[4];
+__attribute__((noinline)) void ApplyFog(RenderSettings* rs) {
+    const float range = rs->end - rs->start;
+    g_fog_params[0] = rs->density * 1.2011224f;
+    g_fog_params[1] = rs->density * 1.4426950f;
+    g_fog_params[2] = range != 0.0f ? -1.0f / range : 0.0f;
+    g_fog_params[3] = range != 0.0f ? rs->end / range : 0.0f;
+}
 
 void* g_managers[64];
 __thread int t_is_main;
@@ -47,7 +58,12 @@ float RenderSettings_get_fogEndDistance(void) { CHECK_THREAD("get_fogEndDistance
 void RenderSettings_set_fogEndDistance(float v) {
     CHECK_THREAD("set_fogEndDistance");
     RenderSettings* rs = GetRenderSettings();
-    if (rs->end != v) { rs->end = v; SetDirty(rs); }
+    if (rs->end != v) { rs->end = v; ApplyFog(rs); SetDirty(rs); }
+}
+void RenderSettings_set_fogStartDistance(float v) {
+    CHECK_THREAD("set_fogStartDistance");
+    RenderSettings* rs = GetRenderSettings();
+    if (rs->start != v) { rs->start = v; ApplyFog(rs); SetDirty(rs); }
 }
 unsigned char RenderSettings_get_fog(void) { CHECK_THREAD("get_fog"); return GetRenderSettings()->fog; }
 int RenderSettings_get_fogMode(void) { CHECK_THREAD("get_fogMode"); return GetRenderSettings()->mode; }
@@ -59,6 +75,14 @@ void* RenderSettings_GetRenderSettings_Injected(void) { return GetRenderSettings
 // Animator (Unity 6 binding style: the icall gets the native object).
 typedef struct Animator { void* vtable; char pad[0x50]; int culling_mode; /* 0x58 */ } Animator;
 int Animator_get_cullingMode_Injected(void* self) { CHECK_THREAD("get_cullingMode"); return ((Animator*)self)->culling_mode; }
+int g_always_animate_count;  // stands for the animator manager's bookkeeping
+void Animator_set_cullingMode_Injected(void* self, int mode) {
+    CHECK_THREAD("set_cullingMode");
+    Animator* a = (Animator*)self;
+    if (a->culling_mode == mode) return;
+    if (mode == 0) g_always_animate_count++; else if (a->culling_mode == 0) g_always_animate_count--;
+    a->culling_mode = mode;
+}
 
 // il2cpp wrappers: one lazily resolved function pointer per icall.
 typedef float (*f_float)(void);
@@ -69,13 +93,15 @@ typedef void (*f_color)(Color*);
 typedef void* (*f_ptr)(void);
 
 f_float slot_get_start, slot_get_end;
-f_set_float slot_set_end;
+f_set_float slot_set_end, slot_set_start;
 f_bool slot_get_fog;
 f_int slot_get_mode;
 f_color slot_get_color, slot_get_equator;
 f_ptr slot_get_object;
 typedef int (*f_cull)(void*);
+typedef void (*f_set_cull)(void*, int);
 f_cull slot_get_culling;
+f_set_cull slot_set_culling;
 
 #define RESOLVE(slot, type, name) type f = slot; if (!f) { f = (type)il2cpp_codegen_resolve_icall(name); slot = f; }
 
@@ -87,6 +113,9 @@ float UnityEngine_RenderSettings__get_fogEndDistance(const void* method) {
 }
 void UnityEngine_RenderSettings__set_fogEndDistance(float value, const void* method) {
     RESOLVE(slot_set_end, f_set_float, "UnityEngine.RenderSettings::set_fogEndDistance(System.Single)"); f(value);
+}
+void UnityEngine_RenderSettings__set_fogStartDistance(float value, const void* method) {
+    RESOLVE(slot_set_start, f_set_float, "UnityEngine.RenderSettings::set_fogStartDistance(System.Single)"); f(value);
 }
 unsigned char UnityEngine_RenderSettings__get_fog(const void* method) {
     RESOLVE(slot_get_fog, f_bool, "UnityEngine.RenderSettings::get_fog()"); return f();
@@ -105,4 +134,7 @@ void* UnityEngine_RenderSettings__GetRenderSettings_Injected(const void* method)
 }
 int UnityEngine_Animator__get_cullingMode_Injected(void* self, const void* method) {
     RESOLVE(slot_get_culling, f_cull, "UnityEngine.Animator::get_cullingMode_Injected(System.IntPtr)"); return f(self);
+}
+void UnityEngine_Animator__set_cullingMode_Injected(void* self, int mode, const void* method) {
+    RESOLVE(slot_set_culling, f_set_cull, "UnityEngine.Animator::set_cullingMode_Injected(System.IntPtr,UnityEngine.AnimatorCullingMode)"); f(self, mode);
 }

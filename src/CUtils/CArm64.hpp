@@ -17,9 +17,11 @@
 // the caller-saved registers become unknown, as after any call.
 
 #include "CMemory.hpp"
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -31,9 +33,16 @@ namespace a64 {
         bool known{};
         uint64_t src{};  // game address the value was loaded from, 0 = not a load
         int tag{};
+        uint64_t hi{};   // upper half of a 128-bit vector register
     };
 
-    struct Store { uint64_t address{}; int size{}; uint64_t src{}; int tag{}; };
+    // A store the code made: where, how wide, and what (value is valid only when known).
+    struct Store { uint64_t address{}; int size{}; uint64_t src{}; int tag{}; uint64_t value{}; uint64_t hi{}; bool known{}; };
+
+    inline float as_f(uint64_t v) { float f; const uint32_t u = uint32_t(v); std::memcpy(&f, &u, 4); return f; }
+    inline double as_d(uint64_t v) { double d; std::memcpy(&d, &v, 8); return d; }
+    inline uint64_t from_f(float f) { uint32_t u; std::memcpy(&u, &f, 4); return u; }
+    inline uint64_t from_d(double d) { uint64_t u; std::memcpy(&u, &d, 8); return u; }
 
     // Stack and caller buffers live here, never in the game.
     inline constexpr uint64_t kLocalBase = 0x7ff000000000ULL;
@@ -49,6 +58,7 @@ namespace a64 {
         std::vector<uint64_t> calls;
         std::unordered_map<uint64_t, Reg> mem;  // local memory, keyed by exact address
         std::vector<Store> stores;
+        int blind_stores{};    // stores through an address that was not known (cannot be replayed)
         uint64_t last_load{};  // last game address loaded from, and its size
         int last_load_size{};
         uint64_t pc{};
@@ -129,8 +139,21 @@ namespace a64 {
         m.last_load_size = size;
         uint8_t raw[16]{};
         if (!plausible(addr) || !mem_read(addr, raw, size_t(size))) return r;
+        // Earlier stores on this path are visible to later loads, byte for byte, as in the game.
+        for (const Store& st : m.stores) {
+            if (local(st.address) || st.address >= addr + uint64_t(size) || st.address + uint64_t(st.size) <= addr) continue;
+            if (!st.known) return r;
+            uint8_t bytes[16];
+            std::memcpy(bytes, &st.value, 8);
+            std::memcpy(bytes + 8, &st.hi, 8);
+            for (int b = 0; b < st.size; ++b) {
+                const uint64_t at = st.address + uint64_t(b);
+                if (at >= addr && at < addr + uint64_t(size)) raw[at - addr] = bytes[b];
+            }
+        }
         uint64_t value = 0;
         std::memcpy(&value, raw, size_t(std::min(size, 8)));
+        if (size > 8) std::memcpy(&r.hi, raw + 8, size_t(size - 8));
         if (size < 8 && sign) value = sext(value, size * 8);
         if (!to64) value &= 0xFFFFFFFFULL;
         r.value = value;
@@ -139,7 +162,7 @@ namespace a64 {
     }
 
     inline void store(Machine& m, uint64_t addr, int size, const Reg& value) {
-        m.stores.push_back({addr, size, value.src, value.tag});
+        m.stores.push_back({addr, size, value.src, value.tag, value.value, value.hi, value.known});
         if (local(addr)) m.mem[addr] = value;
     }
 
@@ -445,12 +468,13 @@ namespace a64 {
                 const Reg base = m.x[rn];
                 if (!base.known) {
                     if (L) { put(rt, Reg{}, size == 8); put(rt2, Reg{}, size == 8); }
+                    else ++m.blind_stores;
                     return Step::Next;
                 }
                 const uint64_t addr = mode == 1 ? base.value : base.value + uint64_t(offset);
                 if (L) {
-                    put(rt, load(m, addr, std::min(size, 8), opc == 1 && !V, size == 8 || V), size == 8 || V);
-                    put(rt2, load(m, addr + size, std::min(size, 8), opc == 1 && !V, size == 8 || V), size == 8 || V);
+                    put(rt, load(m, addr, V ? size : std::min(size, 8), opc == 1 && !V, size == 8 || V), size == 8 || V);
+                    put(rt2, load(m, addr + size, V ? size : std::min(size, 8), opc == 1 && !V, size == 8 || V), size == 8 || V);
                 } else {
                     store(m, addr, size, value_of(rt));
                     store(m, addr + size, size, value_of(rt2));
@@ -493,7 +517,7 @@ namespace a64 {
                 } else if ((ins & 0x3B200C00) == 0x38200800) {
                     const int rm = (ins >> 16) & 31, option = (ins >> 13) & 7;
                     const Reg idx = xr(rm);
-                    if (!idx.known) { if (is_load) put(rt, Reg{}, to64); return Step::Next; }
+                    if (!idx.known) { if (is_load) put(rt, Reg{}, to64); else ++m.blind_stores; return Step::Next; }
                     uint64_t off = idx.value;
                     if (option == 2) off &= 0xFFFFFFFFULL;
                     else if (option == 6) off = sext(off, 32);
@@ -505,35 +529,293 @@ namespace a64 {
                     addr = kind == 1 ? base.value : base.value + imm;
                     if (kind == 1 || kind == 3) { writeback = true; new_base = base.value + imm; }
                 }
-                if (!base.known) { if (is_load) put(rt, Reg{}, to64); return Step::Next; }
-                if (is_load) put(rt, load(m, addr, std::min(size, 8), sign, to64 || V), to64);
+                if (!base.known) { if (is_load) put(rt, Reg{}, to64); else ++m.blind_stores; return Step::Next; }
+                if (is_load) put(rt, load(m, addr, V ? size : std::min(size, 8), sign, to64 || V), to64);
                 else store(m, addr, size, value_of(rt));
                 if (writeback) { Reg nb = base; nb.value = new_base; m.x[rn] = nb; }
                 (void)reg_for;
                 return Step::Next;
             }
-            // Exclusive / atomic / other: loads become unknown, stores are ignored.
+            // Exclusive / atomic / other: loads become unknown; a store we cannot model makes the
+            // path unreplayable.
             if ((ins >> 22) & 1) put(rt, Reg{}, true);
+            else ++m.blind_stores;
             return Step::Next;
         }
 
-        // ---- floating point moves and data processing -------------------------------------
-        if ((ins & 0x5F000000) == 0x1E000000) {
-            if ((ins & 0x7F20FC00) == 0x1E200000) {  // FP <-> integer conversions, FMOV general
-                const int opcode = (ins >> 16) & 7, rmode = (ins >> 19) & 3;
-                if (rmode == 0 && opcode == 6) { Reg r = m.v[rn]; if (r.known) r.value &= mask; setx(rd, r); return Step::Next; }  // FMOV Xd/Wd, Vn
-                if (rmode == 0 && opcode == 7) { Reg r = xr(rn); if (r.known) r.value &= mask; m.v[rd] = r; return Step::Next; } // FMOV Vd, Xn/Wn
-                if (opcode <= 1 || opcode == 4 || opcode == 5) { Reg r{}; r.tag = m.v[rn].tag; setx(rd, r); return Step::Next; }  // to int
-                Reg r{}; r.tag = xr(rn).tag; m.v[rd] = r;  // SCVTF/UCVTF
+        // ---- floating point: concrete arithmetic on known values ----------------------------
+        if ((ins & 0x5F000000) == 0x1E000000 || (ins & 0xFF000000) == 0x1F000000) {
+            const bool dbl = ((ins >> 22) & 3) == 1;
+            const int rm = (ins >> 16) & 31;
+            auto get = [&](int r, double& out) {
+                const Reg& v = m.v[r];
+                if (!v.known) return false;
+                out = dbl ? as_d(v.value) : double(as_f(v.value));
+                return true;
+            };
+            auto put_fp = [&](int r, double value, int tag) {
+                Reg o{};
+                o.known = true;
+                o.value = dbl ? from_d(value) : from_f(float(value));
+                o.tag = tag;
+                m.v[r] = o;
+            };
+            auto put_unknown = [&](int r, int tag) { Reg o{}; o.tag = tag; m.v[r] = o; };
+
+            if ((ins & 0xFF000000) == 0x1F000000) {  // FMADD / FMSUB / FNMADD / FNMSUB
+                const int ra = (ins >> 10) & 31;
+                const bool o1 = (ins >> 21) & 1, o0 = (ins >> 15) & 1;
+                const int tag = m.v[rn].tag | m.v[rm].tag | m.v[ra].tag;
+                double x, y, z;
+                if (!get(rn, x) || !get(rm, y) || !get(ra, z)) { put_unknown(rd, tag); return Step::Next; }
+                if (o0) x = -x;
+                if (o1) z = -z;
+                put_fp(rd, dbl ? std::fma(x, y, z) : double(std::fma(float(x), float(y), float(z))), tag);
                 return Step::Next;
             }
-            if ((ins & 0xFF3FFC00) == 0x1E204000) { m.v[rd] = m.v[rn]; return Step::Next; }  // FMOV Vd, Vn
-            if ((ins & 0xFF201FE0) == 0x1E201000) { m.v[rd] = Reg{}; return Step::Next; }    // FMOV Vd, #imm
-            if ((ins & 0xFF20FC07) == 0x1E202000) { m.flags_known = false; return Step::Next; }  // FCMP/FCMPE, register or #0
-            Reg r{}; r.tag = m.v[rn].tag; m.v[rd] = r;  // other FP data processing keeps the argument tag
+            if ((ins & 0x7F20FC00) == 0x1E200000) {  // FP <-> integer conversions, FMOV general
+                const int opcode = (ins >> 16) & 7, rmode = (ins >> 19) & 3;
+                if (rmode == 0 && opcode == 6) { Reg r = m.v[rn]; if (r.known) r.value &= mask; r.hi = 0; setx(rd, r); return Step::Next; }  // FMOV Xd/Wd, Vn
+                if (rmode == 0 && opcode == 7) { Reg r = xr(rn); if (r.known) r.value &= mask; r.hi = 0; m.v[rd] = r; return Step::Next; } // FMOV Vd, Xn/Wn
+                if (rmode == 0 && (opcode == 2 || opcode == 3)) {  // SCVTF / UCVTF
+                    const Reg a = xr(rn);
+                    if (!a.known) { put_unknown(rd, a.tag); return Step::Next; }
+                    const uint64_t raw = a.value & mask;
+                    const double value = opcode == 2 ? (sf ? double(int64_t(raw)) : double(int32_t(uint32_t(raw)))) : double(raw);
+                    put_fp(rd, value, a.tag);
+                    return Step::Next;
+                }
+                if (rmode == 3 && (opcode == 0 || opcode == 1)) {  // FCVTZS / FCVTZU
+                    double value;
+                    Reg r{};
+                    r.tag = m.v[rn].tag;
+                    if (get(rn, value)) {
+                        const double lo = opcode == 0 ? (sf ? -9.2233720368547758e18 : -2147483648.0) : 0.0;
+                        const double hi = opcode == 0 ? (sf ? 9.2233720368547748e18 : 2147483647.0) : (sf ? 1.8446744073709550e19 : 4294967295.0);
+                        value = std::isnan(value) ? 0.0 : std::trunc(std::min(std::max(value, lo), hi));
+                        r.known = true;
+                        r.value = (opcode == 0 ? uint64_t(int64_t(value)) : uint64_t(value)) & mask;
+                    }
+                    setx(rd, r);
+                    return Step::Next;
+                }
+                Reg r{}; r.tag = m.v[rn].tag; setx(rd, r);
+                return Step::Next;
+            }
+            if ((ins & 0xFF207C00) == 0x1E204000) {  // one source: FMOV, FABS, FNEG, FSQRT, FCVT
+                const int opc = (ins >> 15) & 0x3F;
+                const Reg src = m.v[rn];
+                if (opc == 0) { Reg o = src; if (!dbl && o.known) o.value &= 0xFFFFFFFFULL; o.hi = 0; m.v[rd] = o; return Step::Next; }
+                double a;
+                if (!get(rn, a)) { put_unknown(rd, src.tag); return Step::Next; }
+                if (opc == 1) { put_fp(rd, std::fabs(a), src.tag); return Step::Next; }
+                if (opc == 2) { put_fp(rd, -a, src.tag); return Step::Next; }
+                if (opc == 3) { put_fp(rd, dbl ? std::sqrt(a) : double(std::sqrt(float(a))), src.tag); return Step::Next; }
+                if (opc == 4 || opc == 5) {  // FCVT to single / to double
+                    Reg o{};
+                    o.known = true;
+                    o.tag = src.tag;
+                    o.value = opc == 4 ? from_f(float(a)) : from_d(a);
+                    m.v[rd] = o;
+                    return Step::Next;
+                }
+                put_unknown(rd, src.tag);
+                return Step::Next;
+            }
+            if ((ins & 0xFF200C00) == 0x1E200800) {  // two sources: FMUL FDIV FADD FSUB FMAX FMIN FMAXNM FMINNM FNMUL
+                const int opc = (ins >> 12) & 0xF;
+                const int tag = m.v[rn].tag | m.v[rm].tag;
+                double a, b;
+                if (!get(rn, a) || !get(rm, b)) { put_unknown(rd, tag); return Step::Next; }
+                double r;
+                if (!dbl) {
+                    const float fa = float(a), fb = float(b);
+                    float fr;
+                    switch (opc) {
+                        case 0: fr = fa * fb; break;
+                        case 1: fr = fa / fb; break;
+                        case 2: fr = fa + fb; break;
+                        case 3: fr = fa - fb; break;
+                        case 4: case 6: fr = std::fmax(fa, fb); break;
+                        case 5: case 7: fr = std::fmin(fa, fb); break;
+                        case 8: fr = -(fa * fb); break;
+                        default: put_unknown(rd, tag); return Step::Next;
+                    }
+                    r = fr;
+                } else {
+                    switch (opc) {
+                        case 0: r = a * b; break;
+                        case 1: r = a / b; break;
+                        case 2: r = a + b; break;
+                        case 3: r = a - b; break;
+                        case 4: case 6: r = std::fmax(a, b); break;
+                        case 5: case 7: r = std::fmin(a, b); break;
+                        case 8: r = -(a * b); break;
+                        default: put_unknown(rd, tag); return Step::Next;
+                    }
+                }
+                put_fp(rd, r, tag);
+                return Step::Next;
+            }
+            if ((ins & 0xFF201FE0) == 0x1E201000) {  // FMOV Vd, #imm
+                const int imm8 = (ins >> 13) & 0xFF;
+                const double value = ((imm8 & 0x80) ? -1.0 : 1.0) * (1.0 + (imm8 & 0xF) / 16.0) *
+                                     std::ldexp(1.0, (((imm8 >> 4) & 7) ^ 4) - 3);
+                put_fp(rd, value, 0);
+                return Step::Next;
+            }
+            if ((ins & 0xFF20FC07) == 0x1E202000) {  // FCMP / FCMPE, register or #0.0
+                double a, b = 0.0;
+                if (!get(rn, a) || (!((ins >> 3) & 1) && !get(rm, b))) { m.flags_known = false; return Step::Next; }
+                if (std::isnan(a) || std::isnan(b)) { m.n = false; m.z = false; m.c = true; m.vf = true; }
+                else if (a == b) { m.n = false; m.z = true; m.c = true; m.vf = false; }
+                else if (a < b) { m.n = true; m.z = false; m.c = false; m.vf = false; }
+                else { m.n = false; m.z = false; m.c = true; m.vf = false; }
+                m.flags_known = true;
+                return Step::Next;
+            }
+            if ((ins & 0xFF200C00) == 0x1E200C00) {  // FCSEL
+                bool pass = false;
+                if (cond(m, int((ins >> 12) & 0xF), pass)) { m.v[rd] = pass ? m.v[rn] : m.v[rm]; return Step::Next; }
+                put_unknown(rd, m.v[rn].tag | m.v[rm].tag);
+                return Step::Next;
+            }
+            put_unknown(rd, m.v[rn].tag);  // rounding and the rest
             return Step::Next;
         }
-        if ((ins & 0x0E000000) == 0x0E000000) {  // remaining SIMD/FP: MOV/DUP/MOVI and friends
+        if ((ins & 0xBFE0FC00) == 0x0EA01C00 && ((ins >> 16) & 31) == uint32_t(rn)) {  // MOV Vd.T, Vn.T
+            Reg o = m.v[rn];
+            if (!((ins >> 30) & 1)) o.hi = 0;
+            m.v[rd] = o;
+            return Step::Next;
+        }
+        if ((ins & 0xBFFFFFE0) == 0x2F00E400) {  // MOVI Dd/Vd.2D, #0
+            Reg o{};
+            o.known = true;
+            m.v[rd] = o;
+            return Step::Next;
+        }
+        // ---- NEON: float lanes (.2S/.4S/.2D), element moves --------------------------------
+        {
+            auto lane = [](const Reg& r, int esize, int i) -> uint64_t {
+                if (esize == 64) return i == 0 ? r.value : r.hi;
+                const uint64_t word = i < 2 ? r.value : r.hi;
+                return (word >> (32 * (i & 1))) & 0xFFFFFFFFULL;
+            };
+            auto set_lane = [](Reg& r, int esize, int i, uint64_t v) {
+                if (esize == 64) { (i == 0 ? r.value : r.hi) = v; return; }
+                uint64_t& word = i < 2 ? r.value : r.hi;
+                const int sh = 32 * (i & 1);
+                word = (word & ~(0xFFFFFFFFULL << sh)) | ((v & 0xFFFFFFFFULL) << sh);
+            };
+            auto arith = [](int op, uint64_t a, uint64_t b, bool dbl) -> uint64_t {
+                if (dbl) {
+                    const double x = as_d(a), y = as_d(b);
+                    double r = 0;
+                    switch (op) { case 0: r = x * y; break; case 1: r = x / y; break; case 2: r = x + y; break;
+                                  case 3: r = x - y; break; case 4: r = std::fmax(x, y); break; default: r = std::fmin(x, y); }
+                    return from_d(r);
+                }
+                const float x = as_f(a), y = as_f(b);
+                float r = 0;
+                switch (op) { case 0: r = x * y; break; case 1: r = x / y; break; case 2: r = x + y; break;
+                              case 3: r = x - y; break; case 4: r = std::fmax(x, y); break; default: r = std::fmin(x, y); }
+                return from_f(r);
+            };
+            const int rm = (ins >> 16) & 31;
+            const bool Q = (ins >> 30) & 1;
+
+            // three-same, floating point: FADD FSUB FMUL FDIV FMAX FMIN
+            if ((ins & 0x9F200400) == 0x0E200400 && (ins & 0xC000) == 0xC000) {
+                const bool U = (ins >> 29) & 1, o2 = (ins >> 23) & 1, dbl = (ins >> 22) & 1;
+                const int opcode = (ins >> 11) & 0x1F;
+                int op = -1;
+                if (!U && opcode == 0x1A) op = o2 ? 3 : 2;
+                else if (U && !o2 && opcode == 0x1B) op = 0;
+                else if (U && !o2 && opcode == 0x1F) op = 1;
+                else if (!U && opcode == 0x1E) op = o2 ? 5 : 4;
+                if (op >= 0 && !(dbl && !Q)) {
+                    const Reg a = m.v[rn], b = m.v[rm];
+                    Reg r{};
+                    r.tag = a.tag | b.tag;
+                    if (a.known && b.known) {
+                        r.known = true;
+                        const int esize = dbl ? 64 : 32, lanes = (Q ? 128 : 64) / esize;
+                        for (int i = 0; i < lanes; ++i) set_lane(r, esize, i, arith(op, lane(a, esize, i), lane(b, esize, i), dbl));
+                    }
+                    m.v[rd] = r;
+                    return Step::Next;
+                }
+            }
+            // FMUL by element, vector (0x0F809000) and scalar (0x5F809000)
+            const bool by_vector = (ins & 0xBF80F400) == 0x0F809000, by_scalar = (ins & 0xFF80F400) == 0x5F809000;
+            if (by_vector || by_scalar) {
+                const bool dbl = (ins >> 22) & 1;
+                const int index = dbl ? int((ins >> 11) & 1) : int((((ins >> 11) & 1) << 1) | ((ins >> 21) & 1));
+                const int erm = dbl ? rm : int((ins >> 16) & 0x1F);
+                const Reg a = m.v[rn], b = m.v[erm];
+                Reg r{};
+                r.tag = a.tag | b.tag;
+                if (a.known && b.known) {
+                    r.known = true;
+                    const int esize = dbl ? 64 : 32;
+                    const int lanes = by_scalar ? 1 : (Q ? 128 : 64) / esize;
+                    const uint64_t scalar = lane(b, esize, index);
+                    for (int i = 0; i < lanes; ++i) set_lane(r, esize, i, arith(0, lane(a, esize, i), scalar, dbl));
+                }
+                m.v[rd] = r;
+                return Step::Next;
+            }
+            // DUP (element), vector and scalar; INS (element); INS (general); UMOV
+            const bool dup_v = (ins & 0xBFE0FC00) == 0x0E000400, dup_s = (ins & 0xFFE0FC00) == 0x5E000400;
+            const bool ins_e = (ins & 0xFFE08400) == 0x6E000400, ins_g = (ins & 0xFFE0FC00) == 0x4E001C00;
+            const bool umov = (ins & 0xBFE0FC00) == 0x0E003C00;
+            if (dup_v || dup_s || ins_e || ins_g || umov) {
+                const int imm5 = (ins >> 16) & 0x1F;
+                int k = 0;
+                while (k < 4 && !((imm5 >> k) & 1)) ++k;
+                const int esize = 8 << k;
+                if (esize < 32) { if (umov) setx(rd, Reg{}); else m.v[rd] = Reg{}; return Step::Next; }  // byte/half lanes: not modelled
+                const int index = imm5 >> (k + 1);
+                if (umov) {
+                    const Reg a = m.v[rn];
+                    Reg r{};
+                    r.tag = a.tag;
+                    if (a.known) { r.known = true; r.value = lane(a, esize, index); }
+                    setx(rd, r);
+                    return Step::Next;
+                }
+                if (ins_g) {
+                    Reg r = m.v[rd];
+                    const Reg src = xr(rn);
+                    if (r.known && src.known) set_lane(r, esize, index, src.value);
+                    else r.known = false;
+                    r.tag |= src.tag;
+                    m.v[rd] = r;
+                    return Step::Next;
+                }
+                const Reg a = m.v[rn];
+                if (ins_e) {
+                    Reg r = m.v[rd];
+                    const int from = int(((ins >> 11) & 0xF) >> k);
+                    if (r.known && a.known) set_lane(r, esize, index, lane(a, esize, from));
+                    else r.known = false;
+                    r.tag |= a.tag;
+                    m.v[rd] = r;
+                    return Step::Next;
+                }
+                Reg r{};
+                r.tag = a.tag;
+                if (a.known) {
+                    r.known = true;
+                    const int lanes = dup_s ? 1 : (Q ? 128 : 64) / esize;
+                    for (int i = 0; i < lanes; ++i) set_lane(r, esize, i, lane(a, esize, index));
+                }
+                m.v[rd] = r;
+                return Step::Next;
+            }
+        }
+        if ((ins & 0x0E000000) == 0x0E000000) {  // remaining SIMD: not modelled
             Reg r{}; r.tag = m.v[rn].tag; m.v[rd] = r;
             return Step::Next;
         }
@@ -580,5 +862,40 @@ namespace a64 {
         }
         s.why = *last_failure ? last_failure : "no path reached the goal";
         return false;
+    }
+
+    // Runs code from `start` the way the game would and hands back the stores it makes to game
+    // memory, in order. Only a path that returns normally, writes `must_write`, and whose every
+    // store has a known address and value is accepted, so what gets replayed is exactly what the
+    // game's own code would have written (a setter plus whatever it updates behind it).
+    inline bool replay(const Machine& start, uint64_t must_write, std::vector<Store>& out, std::string& why) {
+        Session session;
+        auto goal = [&](const Machine& m) {
+            if (!m.returned || m.blind_stores) return false;
+            bool hit = false;
+            for (const Store& st : m.stores) {
+                if (local(st.address)) continue;
+                if (!st.known) return false;
+                if (must_write >= st.address && must_write < st.address + uint64_t(st.size)) hit = true;
+            }
+            return hit;
+        };
+        Machine found;
+        if (!explore(session, start, goal, found)) { why = session.why; return false; }
+        out.clear();
+        for (const Store& st : found.stores) if (!local(st.address)) out.push_back(st);
+        return true;
+    }
+
+    // Writes replayed stores to the game.
+    inline bool commit(const std::vector<Store>& stores) {
+        bool ok = true;
+        for (const Store& st : stores) {
+            uint8_t bytes[16];
+            std::memcpy(bytes, &st.value, 8);
+            std::memcpy(bytes + 8, &st.hi, 8);
+            ok &= mem_write(st.address, bytes, size_t(st.size));
+        }
+        return ok;
     }
 }

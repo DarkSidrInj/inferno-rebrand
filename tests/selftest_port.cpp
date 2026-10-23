@@ -213,29 +213,44 @@ int main() {
         CHECK(std::fabs(far_pose.position[skeleton::Hips].x - 5.f) < 1e-3f, "far hips x=%.3f", far_pose.position[skeleton::Hips].x);
     }
 
-    // ---- 10. bone index offset is measured on the hips, not taken from the root probe -----------------
+    // ---- 10. bone index offset is measured on hips + head + foot, not taken from the root probe -----
     {
-        // Root at (10, 0, 10); hips (index 1) 1 m above it. The native transform keeps a 0 at the
-        // probed index offset (+0x40, as on a player root) and the real index at +0x48.
+        // Root at (10, 0, 10) with hips 1.0, head 1.7 and a foot 0.1 above it. Each bone keeps a
+        // decoy index at +0x40 (as on a player root) and the real one at +0x48. Decoy +0x44 holds
+        // an index that puts every bone on the hips (the device's +0x14 trap).
         auto* e = static_cast<player::TransformEntry*>(calloc(8, sizeof(player::TransformEntry)));
         auto* par = static_cast<int*>(calloc(8, sizeof(int)));
         for (int i = 0; i < 8; ++i) { e[i].rotation = Vector4(0, 0, 0, 1); e[i].scale = Vector4(1, 1, 1, 0); par[i] = i == 0 ? -1 : 0; }
         e[0].position = Vector4(10.f, 0.f, 10.f, 0.f);
-        e[1].position = Vector4(0.f, 1.f, 0.f, 0.f);
+        e[1].position = Vector4(0.f, 1.0f, 0.f, 0.f);   // hips
+        e[2].position = Vector4(0.f, 1.7f, 0.f, 0.f);   // head
+        e[3].position = Vector4(0.1f, 0.1f, 0.f, 0.f);  // left foot
         uint8_t* h = static_cast<uint8_t*>(calloc(1, 0x100));
         *reinterpret_cast<uint64_t*>(h + 0x18) = reinterpret_cast<uint64_t>(e);
         *reinterpret_cast<uint64_t*>(h + 0x20) = reinterpret_cast<uint64_t>(par);
-        uint8_t* hips = static_cast<uint8_t*>(calloc(1, 0x100));
-        *reinterpret_cast<uint64_t*>(hips + 0x38) = reinterpret_cast<uint64_t>(h);
-        *reinterpret_cast<int*>(hips + 0x40) = 0;
-        *reinterpret_cast<int*>(hips + 0x48) = 1;
+        auto bone = [&](int real) {
+            uint8_t* n = static_cast<uint8_t*>(calloc(1, 0x100));
+            *reinterpret_cast<uint64_t*>(n + 0x38) = reinterpret_cast<uint64_t>(h);
+            *reinterpret_cast<int*>(n + 0x40) = 0;
+            *reinterpret_cast<int*>(n + 0x44) = 1;          // decoy: always the hips
+            *reinterpret_cast<int*>(n + 0x48) = real;
+            return reinterpret_cast<uint64_t>(n);
+        };
+        skeleton::BoneNatives natives{};
+        natives[skeleton::Hips] = bone(1);
+        natives[skeleton::Head] = bone(2);
+        natives[skeleton::LFoot] = bone(3);
         const player::TransformLayout probed{0x38, 0x40, 0x18, 0x20, proc::pid};
         skeleton::g_index_offset = -1; skeleton::g_index_pid = -1;
-        CHECK(skeleton::bone_index_offset(reinterpret_cast<uint64_t>(hips), Vector3(10.f, 0.f, 10.f), probed) == 0x48,
+        CHECK(skeleton::bone_index_offset(natives, Vector3(10.f, 0.f, 10.f), probed) == 0x48,
               "measured index offset +0x%x", skeleton::g_index_offset);
+        // A locked offset that stops fitting is measured again after three misses.
+        skeleton::g_index_offset = 0x44;
+        for (int i = 0; i < 3; ++i) skeleton::bone_index_offset(natives, Vector3(10.f, 0.f, 10.f), probed);
+        CHECK(skeleton::g_index_offset == 0x48, "re-measured after misses: +0x%x", skeleton::g_index_offset);
         skeleton::g_index_offset = -1; skeleton::g_index_pid = -1;
-        CHECK(skeleton::bone_index_offset(reinterpret_cast<uint64_t>(hips), Vector3(50.f, 0.f, 50.f), probed) == -1,
-              "no offset when the hips are nowhere near the feet");
+        CHECK(skeleton::bone_index_offset(natives, Vector3(50.f, 0.f, 50.f), probed) == -1,
+              "no offset when the rig is nowhere near the feet");
     }
 
     // ---- 7. find_model: jgi directly in the parts, and jgi behind a vds part at +0x58 ------------
@@ -270,22 +285,26 @@ int main() {
         const uint64_t lib = proc::lib;
         const uint64_t base = lib + 0x7800000;                      // fixture "libunity" inside the fake lib
         std::memcpy(reinterpret_cast<void*>(base), fx::image, fx::image_size);
+        const uint64_t external = base - 0x1000;                    // what the loader binds missing symbols to
+        const uint32_t ret_insn = 0xD65F03C0;
+        std::memcpy(reinterpret_cast<void*>(external), &ret_insn, 4);
         for (const auto& r : fx::relocs) {
             uint64_t value = 0;
             if (r.kind == fx::Relative) value = base + r.addend;
             else if (r.kind == fx::Symbol && r.defined) value = base + r.value + r.addend;
-            else continue;                                          // unresolved symbol / TLS descriptor: left 0
+            else if (r.kind == fx::Symbol) value = external;        // SetDirty, il2cpp_codegen_resolve_icall, ...
+            else continue;                                          // TLS descriptor: left 0
             *reinterpret_cast<uint64_t*>(base + r.offset) = value;
         }
         auto at = [&](uint64_t off) { return reinterpret_cast<uint64_t*>(base + off); };
 
         uint8_t* rs = static_cast<uint8_t*>(calloc(1, 0x200));
         auto put_f = [](uint8_t* o, int off, float v) { std::memcpy(o + off, &v, 4); };
-        auto init_rs = [&](uint8_t* o) {
+        auto init_rs = [&](uint8_t* o) {  // device layout: fog 0x40, mode 0x44, color 0x48, start 0x58, end 0x5C, density 0x60
             o[0x40] = 0;
-            put_f(o, 0x44, .5f); put_f(o, 0x48, .5f); put_f(o, 0x4C, .5f); put_f(o, 0x50, 1.f);
-            const int32_t mode = 3; std::memcpy(o + 0x54, &mode, 4);
-            put_f(o, 0x58, .01f); put_f(o, 0x5C, 0.f); put_f(o, 0x60, 300.f);
+            const int32_t mode = 3; std::memcpy(o + 0x44, &mode, 4);
+            put_f(o, 0x48, .5f); put_f(o, 0x4C, .5f); put_f(o, 0x50, .5f); put_f(o, 0x54, 1.f);
+            put_f(o, 0x58, 0.f); put_f(o, 0x5C, 300.f); put_f(o, 0x60, .01f);
             put_f(o, 0x70, .1f); put_f(o, 0x74, .2f); put_f(o, 0x78, .3f); put_f(o, 0x7C, 1.f);   // ambient sky
             put_f(o, 0x80, .3f); put_f(o, 0x84, .35f); put_f(o, 0x88, .4f); put_f(o, 0x8C, 1.f);  // ambient equator
         };
@@ -295,6 +314,7 @@ int main() {
         // Slots the game has used are filled; the rest stay empty, as in a real process.
         *at(fx::slot_get_start) = base + fx::RenderSettings_get_fogStartDistance;
         *at(fx::slot_set_end) = base + fx::RenderSettings_set_fogEndDistance;       // end getter slot left empty
+        *at(fx::slot_set_start) = base + fx::RenderSettings_set_fogStartDistance;
         *at(fx::slot_get_fog) = base + fx::RenderSettings_get_fog;
         *at(fx::slot_get_mode) = base + fx::RenderSettings_get_fogMode;
         *at(fx::slot_get_color) = base + fx::RenderSettings_get_fogColor_Injected;
@@ -307,7 +327,7 @@ int main() {
             const uint32_t w = target ? branch(lib + rva, target) : 0xD4200000u;
             std::memcpy(reinterpret_cast<void*>(lib + rva), &w, 4);
         };
-        const uint64_t traps[] = {v100::rs_set_fog, v100::rs_set_fog_start, v100::rs_set_fog_mode, v100::rs_get_fog_density,
+        const uint64_t traps[] = {v100::rs_set_fog, v100::rs_set_fog_mode, v100::rs_get_fog_density,
                                   v100::rs_set_fog_density, v100::rs_set_fog_color_injected, v100::rs_set_ambient_equator_injected,
                                   v100::rs_get_ambient_sky_injected, v100::rs_set_ambient_sky_injected};
         for (uint64_t rva : traps) route(rva, 0);
@@ -315,6 +335,7 @@ int main() {
         route(v100::rs_get_fog_start, base + fx::UnityEngine_RenderSettings__get_fogStartDistance);
         route(v100::rs_get_fog_end, base + fx::UnityEngine_RenderSettings__get_fogEndDistance);
         route(v100::rs_set_fog_end, base + fx::UnityEngine_RenderSettings__set_fogEndDistance);
+        route(v100::rs_set_fog_start, base + fx::UnityEngine_RenderSettings__set_fogStartDistance);
         route(v100::rs_get_fog_mode, base + fx::UnityEngine_RenderSettings__get_fogMode);
         route(v100::rs_get_fog_color_injected, base + fx::UnityEngine_RenderSettings__get_fogColor_Injected);
         route(v100::rs_get_ambient_equator_injected, base + fx::UnityEngine_RenderSettings__get_ambientEquatorColor_Injected);
@@ -366,13 +387,14 @@ int main() {
         const uint64_t obj = reinterpret_cast<uint64_t>(rs);
         auto how = [](worldfog::Field f) { return worldfog::g_fields[f].how.c_str(); };
         CHECK(worldfog::g_object == obj, "GetRenderSettings traced");
-        CHECK(worldfog::g_fields[worldfog::Start].address == obj + 0x5C, "start: %s", how(worldfog::Start));
-        CHECK(worldfog::g_fields[worldfog::End].address == obj + 0x60 && worldfog::g_fields[worldfog::End].setter, "end via setter: %s", how(worldfog::End));
+        CHECK(worldfog::g_fields[worldfog::Start].address == obj + 0x58, "start: %s", how(worldfog::Start));
+        CHECK(worldfog::g_fields[worldfog::End].address == obj + 0x5C && worldfog::g_fields[worldfog::End].setter, "end via setter: %s", how(worldfog::End));
         CHECK(worldfog::g_fields[worldfog::Fog].address == obj + 0x40, "fog: %s", how(worldfog::Fog));
-        CHECK(worldfog::g_fields[worldfog::Mode].address == obj + 0x54, "mode: %s", how(worldfog::Mode));
-        CHECK(worldfog::g_fields[worldfog::FogColor].address == obj + 0x44, "color: %s", how(worldfog::FogColor));
-        CHECK(worldfog::g_fields[worldfog::Density].address == obj + 0x58 && worldfog::g_fields[worldfog::Density].how == "inferred from fog start",
+        CHECK(worldfog::g_fields[worldfog::Mode].address == obj + 0x44, "mode: %s", how(worldfog::Mode));
+        CHECK(worldfog::g_fields[worldfog::FogColor].address == obj + 0x48, "color: %s", how(worldfog::FogColor));
+        CHECK(worldfog::g_fields[worldfog::Density].address == obj + 0x60 && worldfog::g_fields[worldfog::Density].how == "inferred from fog start",
               "density inferred: %s", how(worldfog::Density));
+        CHECK(worldfog::g_setter[worldfog::Start] && worldfog::g_setter[worldfog::End], "start/end setters found");
         CHECK(worldfog::g_fields[worldfog::Equator].address == obj + 0x80, "equator via icall table: %s", how(worldfog::Equator));
         if (sky_reachable && exec_ok)
             CHECK(worldfog::g_fields[worldfog::Sky].address == obj + 0x70, "sky via registration site: %s", how(worldfog::Sky));
@@ -381,16 +403,21 @@ int main() {
         float f = 0.f;
         int32_t mode = 0;
         CHECK(rs[0x40] == 1, "fog on");
-        std::memcpy(&mode, rs + 0x54, 4); CHECK(mode == 1, "linear");
-        std::memcpy(&f, rs + 0x5C, 4); CHECK(f == 25.f, "start %.1f", f);
-        std::memcpy(&f, rs + 0x60, 4); CHECK(f == 90.f, "end %.1f", f);
-        std::memcpy(&f, rs + 0x44, 4); CHECK(std::fabs(f - .3f) < 1e-5f, "estimated color r=%.2f", f);
-        std::memcpy(&f, rs + 0x58, 4); CHECK(std::fabs(f - .01f) < 1e-6f, "density untouched");
+        std::memcpy(&mode, rs + 0x44, 4); CHECK(mode == 1, "linear");
+        std::memcpy(&f, rs + 0x58, 4); CHECK(f == 25.f, "start %.1f", f);
+        std::memcpy(&f, rs + 0x5C, 4); CHECK(f == 90.f, "end %.1f", f);
+        std::memcpy(&f, rs + 0x48, 4); CHECK(std::fabs(f - .3f) < 1e-5f, "estimated color r=%.2f", f);
+        std::memcpy(&f, rs + 0x60, 4); CHECK(std::fabs(f - .01f) < 1e-6f, "density untouched");
+        // The replayed setters ran ApplyFog: the renderer's parameters follow the new range.
+        const float* params = reinterpret_cast<const float*>(base + fx::g_fog_params);
+        CHECK(std::fabs(params[2] - (-1.f / 65.f)) < 1e-6f && std::fabs(params[3] - (90.f / 65.f)) < 1e-5f,
+              "fog params from replayed setters: %f %f", params[2], params[3]);
+        CHECK(std::fabs(params[1] - .01f * 1.4426950f) < 1e-7f, "density term %f", params[1]);
 
         cfg::fog::auto_color = false; cfg::fog::color = ImVec4(.9f, .1f, .2f, 1.f);
         worldfog::g_last_write = 0;
         worldfog::tick();
-        std::memcpy(&f, rs + 0x44, 4); CHECK(std::fabs(f - .9f) < 1e-5f, "manual color r=%.2f", f);
+        std::memcpy(&f, rs + 0x48, 4); CHECK(std::fabs(f - .9f) < 1e-5f, "manual color r=%.2f", f);
 
         // Scene load: RenderSettings moves; the start trace notices and everything follows.
         uint8_t* rs2 = static_cast<uint8_t*>(calloc(1, 0x200));
@@ -402,21 +429,23 @@ int main() {
         worldfog::wait();
         worldfog::g_last_write = 0;
         worldfog::tick();                       // applies
-        CHECK(worldfog::g_fields[worldfog::Start].address == reinterpret_cast<uint64_t>(rs2) + 0x5C, "followed the move");
+        CHECK(worldfog::g_fields[worldfog::Start].address == reinterpret_cast<uint64_t>(rs2) + 0x58, "followed the move");
         CHECK(rs2[0x40] == 1, "fog on after the move");
 
         cfg::fog::enabled = false;
         worldfog::tick();
-        std::memcpy(&f, rs2 + 0x60, 4);
-        std::memcpy(&mode, rs2 + 0x54, 4);
+        std::memcpy(&f, rs2 + 0x5C, 4);
+        std::memcpy(&mode, rs2 + 0x44, 4);
         CHECK(rs2[0x40] == 0 && mode == 3 && f == 300.f, "restored fog=%d mode=%d end=%.1f", rs2[0x40], mode, f);
+        CHECK(std::fabs(params[3] - 1.f) < 1e-5f, "renderer params restored with the range: %f", params[3]);
 
         // Occlusion bypass: the culling offset comes from tracing Animator.get_cullingMode_Injected
         // on a real enemy animator; enemies go to AlwaysAnimate and come back when switched off.
         {
             route(v100::animator_get_culling_injected, base + fx::UnityEngine_Animator__get_cullingMode_Injected);
-            route(v100::animator_set_culling_injected, 0);
+            route(v100::animator_set_culling_injected, base + fx::UnityEngine_Animator__set_cullingMode_Injected);
             *at(fx::slot_get_culling) = base + fx::Animator_get_cullingMode_Injected;
+            *at(fx::slot_set_culling) = base + fx::Animator_set_cullingMode_Injected;
             const uint64_t jgi_class = rpm<uint64_t>(proc::lib + v100::model_typeinfo);
             auto make_enemy = [&](int32_t mode, uint8_t*& native_out) {
                 uint8_t* native = static_cast<uint8_t*>(calloc(1, 0x100));
@@ -446,13 +475,17 @@ int main() {
             std::memcpy(&m1, a1 + 0x58, 4); std::memcpy(&m2, a2 + 0x58, 4);
             CHECK(animcull::g_offset.load() == 0x58, "culling offset +0x%x", animcull::g_offset.load());
             CHECK(m1 == 0 && m2 == 0, "AlwaysAnimate applied (%d %d)", m1, m2);
+            CHECK(animcull::g_setter.load() != 0, "culling setter found");
+            const int* bookkeeping = reinterpret_cast<const int*>(base + fx::g_always_animate_count);
+            CHECK(*bookkeeping == 2, "setter side effects replayed: %d", *bookkeeping);
             animcull::tick(enemies, false);
             std::memcpy(&m1, a1 + 0x58, 4); std::memcpy(&m2, a2 + 0x58, 4);
             CHECK(m1 == 1 && m2 == 2, "culling restored (%d %d)", m1, m2);
+            CHECK(*bookkeeping == 0, "restore replayed through the setter: %d", *bookkeeping);
         }
 
         // Every slot empty: no trace may invent an address, and the code dump must run.
-        for (uint64_t slot : {fx::slot_get_start, fx::slot_set_end, fx::slot_get_fog, fx::slot_get_mode, fx::slot_get_color,
+        for (uint64_t slot : {fx::slot_get_start, fx::slot_set_end, fx::slot_set_start, fx::slot_get_fog, fx::slot_get_mode, fx::slot_get_color,
                               fx::slot_get_object, fx::slot_get_end, fx::slot_get_equator})
             *at(slot) = 0;
         munmap(unity, 0x2000);

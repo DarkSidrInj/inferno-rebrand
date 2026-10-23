@@ -8,7 +8,9 @@
 // traced (CUtils/CArm64.hpp) on a real enemy animator: the il2cpp wrapper from dump.cs when its
 // icall slot is filled, otherwise the native icall found by name (CIcalls.hpp). The getter's
 // load, or the setter's store of its argument, lands on the field. Runs on its own thread once
-// per process; the frame only writes.
+// per process; the frame only writes. A change is made by replaying the game's own setter
+// (CUtils/CArm64.hpp), so whatever Unity does when the mode changes happens too; a plain
+// write is the fallback.
 
 #include "CGameContext.hpp"
 #include "COffsets.hpp"
@@ -26,6 +28,8 @@ namespace animcull {
     inline int g_pid = -1;
     inline std::atomic<bool> g_resolving{false};
     inline std::atomic<int> g_offset{-1};      // m_CullingMode inside the native Animator, -1 = unknown
+    inline std::atomic<uint64_t> g_setter{0};  // set_cullingMode(native, mode) code, for replays
+    inline bool g_replay_logged = false;
     inline long long g_last_resolve = 0, g_last_apply = 0;
     inline std::unordered_map<uint64_t, int32_t> g_original;  // native animator -> mode it had
     inline std::unordered_map<uint64_t, std::pair<uint64_t, long long>> g_animator_of;  // player -> (native, when)
@@ -101,17 +105,51 @@ namespace animcull {
             g_offset = offset;
             diag::log("CULL", "Animator m_CullingMode at +0x%x (%s, mode now %d)", offset,
                       t.how, rpm<int32_t>(native + uint64_t(offset)));
+            // The setter, replayed instead of a plain write, also runs what Unity does when the
+            // mode changes (re-registering the animator for updates).
+            for (const Try& s2 : tries) {
+                if (!s2.setter || s2.self != native) continue;
+                std::string w;
+                if (trace(s2.entry, native, true, w) == offset) { g_setter = s2.entry; break; }
+            }
+            diag::log("CULL", "setter %s", g_setter.load() ? "found, changes are replayed" : "not found, changes are written directly");
             return;
         }
         diag::log("WARN", "CULL Animator culling offset not found (%zu accessors tried%s%s)", tries.size(),
                   why.empty() ? "" : ", last: ", why.c_str());
     }
 
+    // Sets one animator's culling mode the way the game would: replays set_cullingMode, or
+    // writes the field when that cannot be done.
+    inline void set_mode(uint64_t animator, int32_t mode) {
+        const int offset = g_offset.load();
+        const uint64_t field = animator + uint64_t(offset);
+        if (const uint64_t fn = g_setter.load()) {
+            a64::Machine m;
+            m.pc = fn;
+            m.x[0] = {animator, true, 0, 0};
+            m.x[1] = {uint64_t(uint32_t(mode)), true, 0, a64::kArg};
+            m.x[2] = {0, true, 0, 0};
+            std::vector<a64::Store> stores;
+            std::string why;
+            bool ok = a64::replay(m, field, stores, why);
+            for (const auto& st : stores)
+                if (st.address == field && st.size == 4 && int32_t(uint32_t(st.value)) != mode) ok = false;
+            if (!g_replay_logged) {
+                g_replay_logged = true;
+                diag::log("CULL", "set_cullingMode replay: %s (%zu stores%s%s)", ok ? "ok" : "failed", stores.size(),
+                          why.empty() ? "" : ", ", why.c_str());
+            }
+            if (ok && a64::commit(stores)) return;
+        }
+        wpm<int32_t>(field, mode);
+    }
+
     inline void restore() {
         const int offset = g_offset.load();
         if (offset >= 0)
             for (const auto& entry : g_original)
-                if (plausible(entry.first)) wpm<int32_t>(entry.first + uint64_t(offset), entry.second);
+                if (plausible(entry.first)) set_mode(entry.first, entry.second);
         if (!g_original.empty()) diag::log("CULL", "restored culling mode on %zu animators", g_original.size());
         g_original.clear();
     }
@@ -122,6 +160,8 @@ namespace animcull {
             if (g_resolving.load()) return;
             g_pid = proc::pid;
             g_offset = -1;
+            g_setter = 0;
+            g_replay_logged = false;
             g_original.clear();
             g_animator_of.clear();
             g_last_resolve = 0;
@@ -158,7 +198,7 @@ namespace animcull {
             const int32_t mode = rpm<int32_t>(animator + uint64_t(offset));
             if (mode == 0 || mode < 0 || mode > 2) continue;  // already AlwaysAnimate, or not an animator
             g_original.emplace(animator, mode);
-            wpm<int32_t>(animator + uint64_t(offset), 0);
+            set_mode(animator, 0);
         }
         if (g_animator_of.size() > 256) g_animator_of.clear();
     }

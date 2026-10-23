@@ -13,9 +13,14 @@
 //   3. icall by name    (CIcalls.hpp: libunity registers "UnityEngine.RenderSettings::get_fog..."
 //                        with its function; every candidate is traced and must behave)
 // A wrapper whose icall slot is still empty (the game never called it) is skipped outright.
-// A field still missing after that is placed from fog start with Unity's member order
-// (m_Fog, m_FogColor, m_FogMode, m_FogDensity, m_LinearFogStart, m_LinearFogEnd) and kept
-// only if its value is sane. The object moves on scene loads, so fog start is re-read every
+// A field still missing after that is placed from fog start with the layout traced on device
+// and kept only if its value is sane.
+//
+// Writing a field alone does nothing visible: Unity hands fog to the renderer inside its own
+// setters. So a change is made by *replaying* the game's setter (CUtils/CArm64.hpp): the
+// setter runs in the interpreter with the new value, against live memory, and the stores it
+// would make (the field plus what it updates behind it) are written to the game. A replay is
+// used only when every store is fully known; otherwise the field is written directly. The object moves on scene loads, so fog start is re-read every
 // two seconds and everything is resolved again when it moved. Turning the fog off writes the
 // game's values back.
 
@@ -48,13 +53,15 @@ namespace worldfog {
     };
 
     inline const Spec kSpecs[kFields] = {
-        {"fog", Bool, v100::rs_get_fog, v100::rs_set_fog, "get_fog", "set_fog", -0x1C, true},
-        {"mode", Int, v100::rs_get_fog_mode, v100::rs_set_fog_mode, "get_fogMode", "set_fogMode", -0x08, true},
-        {"density", Float, v100::rs_get_fog_density, v100::rs_set_fog_density, "get_fogDensity", "set_fogDensity", -0x04, true},
+        // Offsets from fog start: the Standoff 2 (Unity 6) layout traced on device,
+        // m_Fog +0, m_FogMode +4, m_FogColor +8, m_LinearFogStart +0x18, End +0x1C, Density +0x20.
+        {"fog", Bool, v100::rs_get_fog, v100::rs_set_fog, "get_fog", "set_fog", -0x18, true},
+        {"mode", Int, v100::rs_get_fog_mode, v100::rs_set_fog_mode, "get_fogMode", "set_fogMode", -0x14, true},
+        {"density", Float, v100::rs_get_fog_density, v100::rs_set_fog_density, "get_fogDensity", "set_fogDensity", 0x08, true},
         {"start", Float, v100::rs_get_fog_start, v100::rs_set_fog_start, "get_fogStartDistance", "set_fogStartDistance", 0, true},
         {"end", Float, v100::rs_get_fog_end, v100::rs_set_fog_end, "get_fogEndDistance", "set_fogEndDistance", 0x04, true},
         {"color", Color, v100::rs_get_fog_color_injected, v100::rs_set_fog_color_injected,
-         "get_fogColor_Injected", "set_fogColor_Injected", -0x18, true},
+         "get_fogColor_Injected", "set_fogColor_Injected", -0x10, true},
         {"ambientEquator", Color, v100::rs_get_ambient_equator_injected, v100::rs_set_ambient_equator_injected,
          "get_ambientEquatorColor_Injected", "set_ambientEquatorColor_Injected", 0, false},
         {"ambientSky", Color, v100::rs_get_ambient_sky_injected, v100::rs_set_ambient_sky_injected,
@@ -74,6 +81,8 @@ namespace worldfog {
 
     inline int g_pid = -1;
     inline Resolved g_fields[kFields];
+    inline uint64_t g_setter[kFields]{};      // code that sets the field, for replays
+    inline bool g_setter_logged[kFields]{};
     inline uint64_t g_object = 0;            // from GetRenderSettings_Injected, when readable
     inline bool g_ready = false;             // fog, start and end are known
     inline long long g_last_resolve = 0, g_last_check = 0, g_last_write = 0;
@@ -236,6 +245,23 @@ namespace worldfog {
         return false;
     }
 
+    // The code that writes this field: a filled setter wrapper or the setter icall, accepted
+    // only when tracing it stores to the address the getter reads.
+    inline void find_setter(Field f) {
+        const Spec& spec = kSpecs[f];
+        g_setter[f] = 0;
+        g_setter_logged[f] = false;
+        const uint64_t want = g_fields[f].address;
+        if (!want) return;
+        std::string why;
+        if (!icalls::slot_empty(proc::lib + spec.setter) && trace_setter(proc::lib + spec.setter, spec.kind, why) == want) {
+            g_setter[f] = proc::lib + spec.setter;
+            return;
+        }
+        for (const auto& c : icalls::candidates(full_name(spec.icall_set)))
+            if (trace_setter(c.fn, spec.kind, why) == want) { g_setter[f] = c.fn; return; }
+    }
+
     inline void resolve_all() {
         g_ready = false;
         g_applied = false;
@@ -269,6 +295,11 @@ namespace worldfog {
         for (int f = 0; f < kFields; ++f)
             diag::log("FOG", "  %-15s 0x%llx  %s", kSpecs[f].name, (unsigned long long)g_fields[f].address, g_fields[f].how.c_str());
 
+        for (Field f : {Fog, Mode, Start, End, FogColor}) find_setter(f);
+        diag::log("FOG", "setters: fog=%s mode=%s start=%s end=%s color=%s", g_setter[Fog] ? "yes" : "no",
+                  g_setter[Mode] ? "yes" : "no", g_setter[Start] ? "yes" : "no", g_setter[End] ? "yes" : "no",
+                  g_setter[FogColor] ? "yes" : "no");
+
         g_ready = g_fields[Fog].address && g_fields[Start].address && g_fields[End].address;
         if (!g_ready) {
             diag::log("WARN", "FOG not usable: fog, start and end are all needed");
@@ -292,12 +323,86 @@ namespace worldfog {
         if (g_fields[FogColor].address) mem_read(g_fields[FogColor].address, g_original.color, sizeof(g_original.color));
     }
 
+    // Runs the field's setter with `value` and writes what it stores. False when there is no
+    // setter or the replay cannot be fully known.
+    inline bool replay_setter(Field f, const uint8_t* value, size_t size) {
+        const uint64_t fn = g_setter[f];
+        if (!fn) return false;
+        const Spec& spec = kSpecs[f];
+        a64::Machine m;
+        m.pc = fn;
+        m.x[0] = {0, true, 0, 0};
+        m.x[1] = {0, true, 0, 0};
+        if (spec.kind == Float) {
+            uint32_t bits = 0;
+            std::memcpy(&bits, value, 4);
+            m.v[0] = {bits, true, 0, a64::kArg};
+        } else if (spec.kind == Bool || spec.kind == Int) {
+            uint64_t v = 0;
+            std::memcpy(&v, value, size);
+            m.x[0] = {v, true, 0, a64::kArg};
+        } else {  // Color by reference
+            m.x[0] = {a64::kOutBuffer, true, 0, 0};
+            uint8_t padded[32]{};
+            std::memcpy(padded, value, size);
+            for (int o = 0; o < 16; o += 4) {
+                a64::Reg r{};
+                std::memcpy(&r.value, padded + o, 8);
+                std::memcpy(&r.hi, padded + o + 8, 8);
+                r.known = true;
+                r.tag = a64::kArg;
+                m.mem[a64::kOutBuffer + uint64_t(o)] = r;
+            }
+        }
+        std::vector<a64::Store> stores;
+        std::string why;
+        const uint64_t field = g_fields[f].address;
+        if (!a64::replay(m, field, stores, why)) {
+            if (!g_setter_logged[f]) { g_setter_logged[f] = true; diag::log("FOG", "%s setter not replayable (%s), writing the field", spec.name, why.c_str()); }
+            return false;
+        }
+        // The setter must store exactly the requested value into the field.
+        for (const auto& st : stores) {
+            if (field < st.address || field + size > st.address + uint64_t(st.size)) continue;
+            uint8_t bytes[16];
+            std::memcpy(bytes, &st.value, 8);
+            std::memcpy(bytes + 8, &st.hi, 8);
+            if (std::memcmp(bytes + (field - st.address), value, size) != 0) {
+                if (!g_setter_logged[f]) { g_setter_logged[f] = true; diag::log("FOG", "%s setter stored another value, writing the field", spec.name); }
+                return false;
+            }
+        }
+        if (!g_setter_logged[f]) {
+            g_setter_logged[f] = true;
+            std::string list;
+            char item[48];
+            for (size_t i = 0; i < stores.size() && i < 6; ++i) {
+                std::snprintf(item, sizeof(item), " 0x%llx/%d", (unsigned long long)stores[i].address, stores[i].size);
+                list += item;
+            }
+            diag::log("FOG", "%s setter replayed: %zu stores%s", spec.name, stores.size(), list.c_str());
+        }
+        return a64::commit(stores);
+    }
+
+    // Sets one field the way the game would (setter replay), or directly when that cannot be done.
+    inline void set_field(Field f, const void* value, size_t size) {
+        const uint64_t a = g_fields[f].address;
+        uint8_t now[16]{};
+        if (!a || (mem_read(a, now, size) && std::memcmp(now, value, size) == 0)) return;
+        if (replay_setter(f, static_cast<const uint8_t*>(value), size)) return;
+        if (!mem_write(a, value, size)) {
+            static long long fail_log = 0;
+            if (diag::every(fail_log, 5000)) diag::log("ERROR", "FOG write to 0x%llx failed", (unsigned long long)a);
+        }
+    }
+
     inline void restore() {
-        wpm<uint8_t>(g_fields[Fog].address, g_original.fog);
-        if (g_fields[Mode].address) wpm<int32_t>(g_fields[Mode].address, g_original.mode);
-        wpm<float>(g_fields[Start].address, g_original.start);
-        wpm<float>(g_fields[End].address, g_original.end);
-        if (g_fields[FogColor].address) mem_write(g_fields[FogColor].address, g_original.color, sizeof(g_original.color));
+        set_field(Fog, &g_original.fog, 1);
+        if (g_fields[Mode].address) set_field(Mode, &g_original.mode, 4);
+        set_field(Start, &g_original.start, 4);
+        set_field(End, &g_original.end, 4);
+        if (g_fields[FogColor].address) set_field(FogColor, g_original.color, sizeof(g_original.color));
         diag::log("FOG", "restored game fog fog=%d start=%.1f end=%.1f", g_original.fog, g_original.start, g_original.end);
     }
 
@@ -315,15 +420,6 @@ namespace worldfog {
         for (int i = 0; i < 3; ++i) out[i] = std::clamp(g_original.color[i], 0.f, 1.f);
     }
 
-    inline void write_if_different(uint64_t a, const void* value, size_t size) {
-        uint8_t now[16]{};
-        if (!a || (mem_read(a, now, size) && std::memcmp(now, value, size) == 0)) return;
-        if (!mem_write(a, value, size)) {
-            static long long fail_log = 0;
-            if (diag::every(fail_log, 5000)) diag::log("ERROR", "FOG write to 0x%llx failed", (unsigned long long)a);
-        }
-    }
-
     inline void apply() {
         const uint8_t fog = 1;
         const int32_t linear = 1;  // FogMode.Linear: start and end only apply in this mode
@@ -332,11 +428,11 @@ namespace worldfog {
         float color[4] = {0, 0, 0, 1.f};
         if (cfg::fog::auto_color) estimate_color(color);
         else { color[0] = cfg::fog::color.x; color[1] = cfg::fog::color.y; color[2] = cfg::fog::color.z; }
-        write_if_different(g_fields[Fog].address, &fog, 1);
-        write_if_different(g_fields[Mode].address, &linear, 4);
-        write_if_different(g_fields[Start].address, &start, 4);
-        write_if_different(g_fields[End].address, &end, 4);
-        write_if_different(g_fields[FogColor].address, color, 16);
+        set_field(Fog, &fog, 1);
+        set_field(Mode, &linear, 4);
+        set_field(Start, &start, 4);
+        set_field(End, &end, 4);
+        set_field(FogColor, color, 16);
         if (!g_applied) {
             g_applied = true;
             diag::log("FOG", "applied start=%.1f end=%.1f color=(%.2f %.2f %.2f) %s", start, end, color[0], color[1],

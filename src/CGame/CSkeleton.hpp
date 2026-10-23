@@ -137,30 +137,60 @@ namespace skeleton {
     }
 
     // Unity 6 transform index. The layout probe runs on a player root, whose index is 0, so a
-    // field that merely happens to be 0 there passes it; on bones that field is garbage (the
-    // device log showed index=631199440 and heads composed exactly at the feet). Measure the
-    // index offset on the hips instead: the right one puts the hips about a meter above the
-    // player's feet.
+    // field that merely happens to be 0 there passes it; on bones that field is garbage. The
+    // offset is measured on the rig itself: hips, head and a foot must all land where a body
+    // stands (crouching included) above the player's feet. One bone alone is not enough: the
+    // device once took +0x14 with the hips 0.61 m up, which drew crooked or empty skeletons.
+    // The locked offset is checked on every rebuild and measured again after repeated misses.
     inline int g_index_offset = -1;
     inline int g_index_pid = -1;
+    inline int g_index_misses = 0;
 
-    inline int bone_index_offset(uint64_t hips_native, const Vector3& feet, const player::TransformLayout& l) {
-        if (g_index_pid == proc::pid && g_index_offset >= 0) return g_index_offset;
+    using BoneNatives = std::array<uint64_t, kCount>;
+
+    // 0 = the offset does not fit this player, higher = more of the rig fits.
+    inline int index_offset_score(const BoneNatives& natives, const Vector3& feet, const player::TransformLayout& l, int off) {
+        auto at = [&](int bone, Vector3& out) {
+            const uint64_t native = natives[size_t(bone)];
+            if (!native) return false;
+            const int index = rpm<int>(native + uint64_t(off));
+            if (index <= 0 || index >= kMaxIndex) return false;  // a bone is never the hierarchy root
+            return player::decode_transform(native, l.data_offset, off, l.entries_offset, l.parents_offset, out, kMaxIndex);
+        };
+        auto flat = [&](const Vector3& v) { const float dx = v.x - feet.x, dz = v.z - feet.z; return std::sqrt(dx * dx + dz * dz); };
+        Vector3 hips, head;
+        if (!at(Hips, hips) || !at(Head, head)) return 0;
+        const float hy = hips.y - feet.y, ey = head.y - feet.y;
+        if (hy < 0.35f || hy > 1.3f || ey < 0.8f || ey > 2.1f || ey - hy < 0.3f || ey - hy > 1.0f) return 0;
+        if (flat(hips) > 1.0f || flat(head) > 1.2f) return 0;
+        int score = 2;
+        for (int foot : {LFoot, RFoot}) {
+            Vector3 f;
+            if (at(foot, f) && f.y - feet.y > -0.3f && f.y - feet.y < 0.45f && flat(f) < 0.8f) { ++score; break; }
+        }
+        if (off == l.data_offset + 8) ++score;  // TransformAccess {hierarchy, index}: index right after the pointer
+        return score;
+    }
+
+    inline int bone_index_offset(const BoneNatives& natives, const Vector3& feet, const player::TransformLayout& l) {
+        if (g_index_pid == proc::pid && g_index_offset >= 0) {
+            if (index_offset_score(natives, feet, l, g_index_offset) > 0) { g_index_misses = 0; return g_index_offset; }
+            if (++g_index_misses < 3) return g_index_offset;  // one pose can be odd (falling, ladder)
+            diag::log("WARN", "bone transform index offset +0x%x no longer fits, measuring again", g_index_offset);
+            g_index_offset = -1;
+        }
+        int best = -1, best_score = 0;
         for (int off = 0x8; off <= 0x80; off += 4) {
             if (off >= l.data_offset && off < l.data_offset + 8) continue;
-            const int index = rpm<int>(hips_native + uint64_t(off));
-            if (index <= 0 || index >= kMaxIndex) continue;  // the hips are never the hierarchy root
-            Vector3 at;
-            if (!player::decode_transform(hips_native, l.data_offset, off, l.entries_offset, l.parents_offset, at, kMaxIndex)) continue;
-            const float dx = at.x - feet.x, dy = at.y - feet.y, dz = at.z - feet.z;
-            if (dx * dx + dz * dz > 1.5f * 1.5f || dy < 0.2f || dy > 2.0f) continue;
-            g_index_offset = off;
-            g_index_pid = proc::pid;
-            diag::log("INFO", "bone transform index offset = +0x%x (layout probe said +0x%x; hips %.2f m above the feet)",
-                      off, l.index_offset, dy);
-            return off;
+            const int score = index_offset_score(natives, feet, l, off);
+            if (score > best_score) { best_score = score; best = off; }
         }
-        return -1;
+        if (best < 0) return -1;
+        g_index_offset = best;
+        g_index_pid = proc::pid;
+        g_index_misses = 0;
+        diag::log("INFO", "bone transform index offset = +0x%x (score %d; layout probe said +0x%x)", best, best_score, l.index_offset);
+        return best;
     }
 
     inline bool build(uint64_t p, const Vector3& feet, Cache& cache, long long now) {
@@ -184,12 +214,13 @@ namespace skeleton {
         std::vector<std::tuple<int, int, uint64_t>> all;  // key, index, hierarchy
         int bad_native = 0, bad_data = 0, bad_index = 0;
         char trace[200] = "";
-        int index_offset = -1;
+        BoneNatives natives{};
         for (const BoneRef& ref : refs) {
-            if (ref.key != Hips) continue;
+            if (ref.key >= kCount) continue;
             const uint64_t native = rpm<uint64_t>(ref.managed + v100::unity_cached_ptr);
-            if (plausible(native)) index_offset = bone_index_offset(native, feet, *l);
+            if (plausible(native)) natives[size_t(ref.key)] = native;
         }
+        int index_offset = bone_index_offset(natives, feet, *l);
         const bool measured = index_offset >= 0;
         if (!measured) index_offset = l->index_offset;
         for (const BoneRef& ref : refs) {
