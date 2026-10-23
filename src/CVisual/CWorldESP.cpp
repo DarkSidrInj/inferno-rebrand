@@ -32,6 +32,59 @@ namespace {
         return std::clamp(1.f - (age - .25f) / .75f, 0.f, 1.f);
     }
 
+    // Overlay chams: the body drawn on screen as filled limbs along the bones, so it shows through
+    // walls whatever the renderer does. Each limb is a capsule whose radius is a body-part width
+    // in meters, projected at the limb's depth.
+    void draw_overlay(ImDrawList* dl, const Pose& pose, const matrix& view, const matrix& projection) {
+        const float alpha = pose_alpha(pose);
+        if (alpha <= 0.f) return;
+        const float* m = reinterpret_cast<const float*>(&view);
+        const Vector3 up(m[1], m[5], m[9]);  // camera up, from the view matrix
+        auto project = [&](int bone, float radius, ImVec2& at, float& r) {
+            if (!pose.valid[bone] || !world_to_screen(pose.position[bone], view, projection, at)) return false;
+            ImVec2 edge;
+            if (!world_to_screen(pose.position[bone] + up * radius, view, projection, edge)) return false;
+            r = std::max(1.f, std::hypot(edge.x - at.x, edge.y - at.y));
+            return r < 400.f;
+        };
+        const ImU32 fill = tint(cfg::chams::overlay_col, alpha);
+        const int upper = pose.valid[Chest] ? Chest : (pose.valid[Spine] ? Spine : Neck);
+        struct Limb { int a, b; float ra, rb; };
+        const Limb limbs[] = {
+            {Hips, upper, .15f, .17f}, {upper, Neck, .15f, .06f},
+            {LUpperLeg, LLowerLeg, .085f, .065f}, {RUpperLeg, RLowerLeg, .085f, .065f},
+            {LLowerLeg, LFoot, .065f, .05f}, {RLowerLeg, RFoot, .065f, .05f},
+            {LFoot, LToes, .05f, .04f}, {RFoot, RToes, .05f, .04f},
+            {Hips, LUpperLeg, .1f, .09f}, {Hips, RUpperLeg, .1f, .09f},
+            {LShoulder, LUpperArm, .06f, .055f}, {RShoulder, RUpperArm, .06f, .055f},
+            {LUpperArm, LLowerArm, .055f, .045f}, {RUpperArm, RLowerArm, .055f, .045f},
+            {LLowerArm, LHand, .045f, .04f}, {RLowerArm, RHand, .045f, .04f},
+            {upper, LShoulder, .08f, .06f}, {upper, RShoulder, .08f, .06f},
+        };
+        for (const Limb& l : limbs) {
+            ImVec2 a, b;
+            float ra = 0.f, rb = 0.f;
+            if (!project(l.a, l.ra, a, ra) || !project(l.b, l.rb, b, rb)) continue;
+            // Tapered capsule: quad between the two end circles, plus the circles.
+            const float dx = b.x - a.x, dy = b.y - a.y, len = std::hypot(dx, dy);
+            if (len > .5f) {
+                const float nx = -dy / len, ny = dx / len;
+                dl->AddQuadFilled(ImVec2(a.x + nx * ra, a.y + ny * ra), ImVec2(b.x + nx * rb, b.y + ny * rb),
+                                  ImVec2(b.x - nx * rb, b.y - ny * rb), ImVec2(a.x - nx * ra, a.y - ny * ra), fill);
+            }
+            dl->AddCircleFilled(a, ra, fill, 16);
+            dl->AddCircleFilled(b, rb, fill, 16);
+        }
+        ImVec2 head;
+        float rh = 0.f;
+        if (project(Head, .12f, head, rh)) {
+            // The head bone sits at the skull base: the skull is centered a bit above it.
+            ImVec2 top;
+            if (pose.valid[Head] && world_to_screen(pose.position[Head] + up * .09f, view, projection, top)) head = top;
+            dl->AddCircleFilled(head, rh, fill, 24);
+        }
+    }
+
     void draw_pose(ImDrawList* dl, const Pose& pose, const matrix& view, const matrix& projection) {
         ImVec2 screen[kCount];
         bool visible[kCount];
@@ -121,7 +174,8 @@ void visuals::draw_skeletons(const matrix& view, const matrix& projection, const
         const Vector3 feet = player::position(enemy);
         Pose pose;
         if (!skeleton::get(enemy, feet, pose)) continue;
-        draw_pose(dl, pose, view, projection);
+        if (cfg::chams::enabled && cfg::chams::overlay) draw_overlay(dl, pose, view, projection);
+        if (cfg::esp::skeleton) draw_pose(dl, pose, view, projection);
     }
     skeleton::prune(diag::now_ms());
 

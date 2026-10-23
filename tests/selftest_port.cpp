@@ -859,6 +859,40 @@ int main() {
             CHECK(chams::desired_id(reinterpret_cast<uint64_t>(bindings), true) == -12001, "wall material choice");
             cfg::chams::wall_material = 0;
             CHECK(chams::desired_id(reinterpret_cast<uint64_t>(bindings), true) == -12000, "wall material default");
+
+            // Occlusion culling off on the main camera while through walls is on, back after.
+            route(v100::camera_set_occlusion_injected, base + fx::UnityEngine_Camera__set_useOcclusionCulling_Injected);
+            *at(fx::slot_set_occlusion) = base + fx::Camera_set_useOcclusionCulling_Injected;
+            main_cam[0x250] = 1;
+            cfg::chams::enabled = true; cfg::chams::no_occlusion = true;
+            chams::occlusion_tick(reinterpret_cast<uint64_t>(main_cam));  // resolves
+            chams::wait();
+            CHECK(chams::g_occlusion_offset.load() == 0x250, "useOcclusionCulling +0x%x", chams::g_occlusion_offset.load());
+            chams::occlusion_tick(reinterpret_cast<uint64_t>(main_cam));
+            CHECK(main_cam[0x250] == 0, "occlusion culling off");
+            cfg::chams::through_walls = false;
+            chams::occlusion_tick(reinterpret_cast<uint64_t>(main_cam));
+            CHECK(main_cam[0x250] == 1, "occlusion culling back on");
+            cfg::chams::enabled = false;
+
+            // renderer+0x134: patched with the array only where it holds slot 0's id.
+            {
+                int32_t ids_a[1] = {-9100}, ids_b[1] = {-9200};
+                uint8_t* ra = static_cast<uint8_t*>(calloc(1, 0x200));
+                uint8_t* rb = static_cast<uint8_t*>(calloc(1, 0x200));
+                for (uint8_t* r : {ra, rb}) *reinterpret_cast<uint64_t*>(r + chams::g_data_offset.load() + 0x10) = 1;
+                *reinterpret_cast<uint64_t*>(ra + chams::g_data_offset.load()) = reinterpret_cast<uint64_t>(ids_a);
+                *reinterpret_cast<uint64_t*>(rb + chams::g_data_offset.load()) = reinterpret_cast<uint64_t>(ids_b);
+                *reinterpret_cast<int32_t*>(ra + 0x134) = -9100;  // a copy of the id
+                *reinterpret_cast<int32_t*>(rb + 0x134) = 77;     // something else
+                chams::patch(reinterpret_cast<uint64_t>(ra), -424);
+                chams::patch(reinterpret_cast<uint64_t>(rb), -424);
+                CHECK(ids_a[0] == -424 && *reinterpret_cast<int32_t*>(ra + 0x134) == -424, "+0x134 copy patched");
+                CHECK(ids_b[0] == -424 && *reinterpret_cast<int32_t*>(rb + 0x134) == 77, "+0x134 left alone when it is not the id");
+                chams::restore_all();
+                CHECK(ids_a[0] == -9100 && *reinterpret_cast<int32_t*>(ra + 0x134) == -9100 && *reinterpret_cast<int32_t*>(rb + 0x134) == 77,
+                      "+0x134 restored");
+            }
             cfg::chams::through_walls = false;
 
             // Anti-aim turns only the model root.

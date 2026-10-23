@@ -247,3 +247,14 @@ unsigned char UnityEngine_Renderer__get_enabled_Injected(void* self, const void*
 void UnityEngine_Renderer__set_enabled_Injected(void* self, unsigned char value, const void* method) {
     RESOLVE(slot_set_enabled, f_set_enabled, "UnityEngine.Renderer::set_enabled_Injected(System.IntPtr,System.Boolean)"); f(self, value);
 }
+
+// Camera.useOcclusionCulling: a bool in the camera.
+void Camera_set_useOcclusionCulling_Injected(Camera* c, unsigned char value) {
+    CHECK_THREAD("set_useOcclusionCulling");
+    ((unsigned char*)c)[0x250] = value != 0;
+}
+typedef void (*f_set_occlusion)(Camera*, unsigned char);
+f_set_occlusion slot_set_occlusion;
+void UnityEngine_Camera__set_useOcclusionCulling_Injected(void* self, unsigned char value, const void* method) {
+    RESOLVE(slot_set_occlusion, f_set_occlusion, "UnityEngine.Camera::set_useOcclusionCulling_Injected(System.IntPtr,System.Boolean)"); f((Camera*)self, value);
+}

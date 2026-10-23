@@ -29,6 +29,7 @@ void visuals::draw() {
                cfg::thirdperson::enabled || cfg::antiaim::enabled;
     if (!any) {
         chams::tick({}, 0, 0);
+        chams::occlusion_tick(0);
         matrix unused{};
         thirdperson::tick(nullptr, unused);
         localview::tick(0, false);
@@ -46,6 +47,7 @@ void visuals::draw() {
             matrix unused{};
             thirdperson::tick(nullptr, unused);
             localview::tick(0, false);
+            chams::occlusion_tick(0);
         }
     } tp_guard;
     std::vector<uint64_t> Players = players();
@@ -130,6 +132,7 @@ void visuals::draw() {
         // Third person owns the camera's matrix: draw with the one written this frame.
         tp_guard.active = thirdperson::tick(&GameCamera, ViewMatrix);
         tp_guard.ticked = true;
+        chams::occlusion_tick(GameCamera.native);
         localview::tick(LocalPlayer, tp_guard.active, GameCamera.native);
         if (g_camera != GameCamera.native)
             diag::log("CAMERA", "selected game camera native=0x%llx holder=0x%llx", (unsigned long long)GameCamera.native,
@@ -285,11 +288,12 @@ void visuals::draw() {
     for (const auto& Enemy : frame_enemies) enemy_objects.push_back(Enemy.object);
     // Animators kept running while culled: enemies for the skeleton behind walls, the own body
     // in third person (it is never on screen in first person, so the game stops animating it).
+    const bool posed = cfg::esp::skeleton || (cfg::chams::enabled && cfg::chams::overlay);
     std::vector<uint64_t> animate;
-    if (cfg::esp::skeleton && cfg::esp::skeleton_occlusion) animate = enemy_objects;
+    if (posed && cfg::esp::skeleton_occlusion) animate = enemy_objects;
     if (tp_guard.active) animate.push_back(LocalPlayer);
     animcull::tick(animate, !animate.empty());
-    if (cfg::esp::skeleton) draw_skeletons(ViewMatrix, ProjectionMatrix, enemy_objects);
+    if (posed) draw_skeletons(ViewMatrix, ProjectionMatrix, enemy_objects);
     draw_world_items(ViewMatrix, ProjectionMatrix, LocalPosition);
 
     static long long frame_log = 0;

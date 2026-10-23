@@ -31,6 +31,7 @@
 #include "CClass.hpp"
 #include "CPlayer.hpp"
 #include "CSkeleton.hpp"
+#include "CAnimCull.hpp"
 #include "../CUtils/CArm64.hpp"
 #include "../CConfigs/CConfig.hpp"
 #include <atomic>
@@ -53,6 +54,8 @@ namespace chams {
         uint64_t array{};                // material id array the originals were read from
         std::vector<int32_t> original;   // per slot
         int32_t written{};               // id we put there
+        bool mirror{};                   // renderer+0x134 held slot 0's id too: written as well
+        int32_t mirror_original{};
     };
     inline std::unordered_map<uint64_t, Patched> g_patched;  // native renderer -> what we changed
 
@@ -358,12 +361,121 @@ namespace chams {
             const uint64_t slot = p.array + i * 4;
             if (rpm<int32_t>(slot) == p.written) wpm<int32_t>(slot, p.original[i]);
         }
+        if (p.mirror && rpm<int32_t>(renderer + v100::legacy_material_id) == p.written)
+            wpm<int32_t>(renderer + v100::legacy_material_id, p.mirror_original);
     }
 
     inline void restore_all() {
         for (const auto& entry : g_patched) release(entry.first, entry.second);
         if (!g_patched.empty()) diag::log("CHAMS", "restored %zu renderers", g_patched.size());
         g_patched.clear();
+    }
+
+    // ---- occlusion culling ------------------------------------------------------------------------
+    // Unity's occlusion culling drops renderers hidden behind walls before anything is drawn, so a
+    // through-wall material never gets a chance. Camera.useOcclusionCulling is switched off on the
+    // main camera while through walls is on. Its field comes from tracing the game's own setter
+    // (the store of its argument); changes replay that setter, a plain write is the fallback.
+    inline std::atomic<int> g_occlusion_offset{-1};
+    inline std::atomic<uint64_t> g_occlusion_setter{0};
+    inline std::atomic<bool> g_occlusion_resolving{false};
+    inline long long g_last_occlusion_resolve = 0, g_last_occlusion_write = 0;
+    inline uint64_t g_occlusion_camera = 0, g_occlusion_vtable = 0;
+    inline uint8_t g_occlusion_before = 1;
+
+    // The byte a bool setter writes: run it with 0 and with 1 (no writes) and take the byte inside
+    // `self` that gets 0 in the first run and 1 in the second. Bool setters store `value != 0`,
+    // which an argument tag does not survive, so the tagged trace is not used here.
+    inline int bool_field(uint64_t fn, uint64_t self, std::string& why) {
+        std::vector<a64::Store> runs[2];
+        for (int v = 0; v < 2; ++v) {
+            a64::Session session;
+            a64::Machine start;
+            start.pc = fn;
+            start.x[0] = {self, true, 0, 0};
+            start.x[1] = {uint64_t(v), true, 0, 0};
+            start.x[2] = {0, true, 0, 0};
+            auto goal = [&](const a64::Machine& m) {
+                if (!m.returned || m.blind_stores) return false;
+                for (const auto& st : m.stores)
+                    if (st.size == 1 && st.known && st.address >= self + 8 && st.address < self + 0x1000 && (st.value & 0xFF) == uint64_t(v)) return true;
+                return false;
+            };
+            a64::Machine found;
+            if (!a64::explore(session, start, goal, found)) { why = session.why; return -1; }
+            runs[v] = found.stores;
+        }
+        for (const auto& a : runs[0]) {
+            if (a.size != 1 || !a.known || (a.value & 0xFF) != 0 || a.address < self + 8 || a.address >= self + 0x1000) continue;
+            for (const auto& b : runs[1])
+                if (b.address == a.address && b.size == 1 && b.known && (b.value & 0xFF) == 1) return int(a.address - self);
+        }
+        why = "no byte follows the argument";
+        return -1;
+    }
+
+    inline void resolve_occlusion(uint64_t camera) {
+        std::vector<std::pair<const char*, uint64_t>> tries;
+        const uint64_t wrapper = proc::lib + v100::camera_set_occlusion_injected;
+        if (!icalls::slot_empty(wrapper)) tries.push_back({"setter wrapper", wrapper});
+        for (const auto& c : icalls::candidates("UnityEngine.Camera::set_useOcclusionCulling_Injected")) tries.push_back({c.how, c.fn});
+        std::string why;
+        for (const auto& t : tries) {
+            const int off = bool_field(t.second, camera, why);
+            if (off < 8) continue;
+            const uint8_t now = rpm<uint8_t>(camera + uint64_t(off));
+            if (now > 1) continue;  // not a bool
+            g_occlusion_setter = t.second;
+            g_occlusion_offset = off;
+            diag::log("CHAMS", "Camera.useOcclusionCulling at +0x%x (%s, now %u)", off, t.first, now);
+            return;
+        }
+        diag::log("WARN", "CHAMS useOcclusionCulling field not found (%zu setters%s%s)", tries.size(), why.empty() ? "" : ", last: ", why.c_str());
+    }
+
+    inline void set_occlusion(uint64_t camera, bool on) {
+        const uint64_t field = camera + uint64_t(g_occlusion_offset.load());
+        if (const uint64_t fn = g_occlusion_setter.load()) {
+            a64::Machine m;
+            m.pc = fn;
+            m.x[0] = {camera, true, 0, 0};
+            m.x[1] = {on ? 1u : 0u, true, 0, a64::kArg};
+            std::vector<a64::Store> stores;
+            std::string why;
+            if (a64::replay(m, field, stores, why) && a64::commit(stores)) return;
+        }
+        wpm<uint8_t>(field, on ? 1 : 0);
+    }
+
+    // Once per frame with the main camera (0 = none this frame).
+    inline void occlusion_tick(uint64_t camera) {
+        const bool want_off = cfg::chams::enabled && cfg::chams::through_walls && cfg::chams::no_occlusion && camera;
+        const int off = g_occlusion_offset.load();
+        auto give_back = [&] {
+            if (g_occlusion_camera && off >= 0 && rpm<uint64_t>(g_occlusion_camera) == g_occlusion_vtable && g_occlusion_before)
+                set_occlusion(g_occlusion_camera, true);
+            g_occlusion_camera = 0;
+        };
+        if (!want_off) { give_back(); return; }
+        if (off < 0) {
+            const long long now = diag::now_ms();
+            if (g_occlusion_resolving.load() || now - g_last_occlusion_resolve < 10000) return;
+            g_last_occlusion_resolve = now;
+            g_occlusion_resolving = true;
+            std::thread([camera] { resolve_occlusion(camera); g_occlusion_resolving = false; }).detach();
+            return;
+        }
+        if (g_occlusion_camera != camera) {
+            give_back();
+            g_occlusion_camera = camera;
+            g_occlusion_vtable = rpm<uint64_t>(camera);
+            g_occlusion_before = rpm<uint8_t>(camera + uint64_t(off));
+            diag::log("CHAMS", "occlusion culling off on camera 0x%llx (was %u)", (unsigned long long)camera, g_occlusion_before);
+        }
+        const long long now = diag::now_ms();
+        if (now - g_last_occlusion_write < 250) return;
+        g_last_occlusion_write = now;
+        if (rpm<uint8_t>(camera + uint64_t(off)) != 0) set_occlusion(camera, false);
     }
 
     // ---- local weapon -----------------------------------------------------------------------------
@@ -444,11 +556,21 @@ namespace chams {
             Patched fresh;
             fresh.array = array;
             fresh.original.assign(ids, ids + count);
+            // A shared offset says the renderer also keeps a material id at +0x134. Only trusted where
+            // it really holds slot 0's id; then it is patched with the array.
+            const int32_t legacy = rpm<int32_t>(renderer + v100::legacy_material_id);
+            if (legacy != 0 && legacy == ids[0]) { fresh.mirror = true; fresh.mirror_original = legacy; }
+            static int mirrors = 0, checked = 0;
+            mirrors += fresh.mirror;
+            if (++checked <= 32 && (checked == 32 || fresh.mirror))
+                diag::log("CHAMS", "renderer+0x134 holds the material id on %d of %d renderers checked", mirrors, checked);
             it = g_patched.emplace(renderer, fresh).first;
         }
         it->second.written = want;
         for (int i = 0; i < count && i < int(it->second.original.size()); ++i)
             if (ids[i] != want) wpm<int32_t>(array + uint64_t(i) * 4, want);
+        if (it->second.mirror && rpm<int32_t>(renderer + v100::legacy_material_id) != want)
+            wpm<int32_t>(renderer + v100::legacy_material_id, want);
         return true;
     }
 
@@ -461,6 +583,10 @@ namespace chams {
             g_pid = proc::pid;
             g_mask_ids[0] = g_mask_ids[1] = 0;
             g_last_mask_scan = 0;
+            g_occlusion_offset = -1;
+            g_occlusion_setter = 0;
+            g_occlusion_camera = 0;
+            g_last_occlusion_resolve = 0;
             g_data_offset = -1;
             g_size_offset = -1;
             g_ui_material = 0;
@@ -557,6 +683,6 @@ namespace chams {
     }
 
     inline void wait() {
-        while (g_resolving.load() || g_weapon_scanning.load() || g_mask_scanning.load()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        while (g_resolving.load() || g_weapon_scanning.load() || g_mask_scanning.load() || g_occlusion_resolving.load()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 }

@@ -85,6 +85,12 @@ namespace ui::menu {
         separator(a);
         combo("Wall material", &cfg::chams::wall_material, {"Outline mask 1", "Outline mask 2", "UI default"}, a);
         separator(a);
+        checkbox("Occlusion culling off", &cfg::chams::no_occlusion, a);
+        separator(a);
+        checkbox("Overlay chams", &cfg::chams::overlay, a);
+        separator(a);
+        colorpick("Overlay color", &cfg::chams::overlay_col, a);
+        separator(a);
         checkbox("Grenades", &cfg::esp::grenade, a);
         separator(a);
         checkbox("Dropped weapons", &cfg::esp::dropped, a);

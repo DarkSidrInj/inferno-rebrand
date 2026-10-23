@@ -89,6 +89,8 @@ namespace v100 {
     inline constexpr uint64_t native_instance_id = 0x08;                     // native Object.m_InstanceID (device: -132432 style ids)
     inline constexpr uint64_t renderer_material_count_injected = 0x75EF534;  // static GetMaterialCount_Injected(IntPtr)
     inline constexpr uint64_t legacy_renderer_materials = 0x140;             // pre-Unity-6 m_Materials data (legacy chams)
+    inline constexpr uint64_t legacy_material_id = 0x134;                    // kLegacyMaterialIdPointer (shared offset): an int copy of a material id
+    inline constexpr uint64_t camera_set_occlusion_injected = 0x6D0E930;     // static Camera.set_useOcclusionCulling_Injected(IntPtr, bool)
     inline constexpr uint64_t canvas_default_material_injected = 0x7A6957C;  // static Canvas.GetDefaultCanvasMaterial_Injected()
 
     // --- Third person: Camera accessors (dump.cs; the worldToCameraMatrix setter is stripped

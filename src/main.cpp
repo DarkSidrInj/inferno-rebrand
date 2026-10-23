@@ -139,6 +139,7 @@ int main() {
     localview::wait();
     localview::restore_all();
     antiaim::release();
+    chams::occlusion_tick(0);
     shutdown();
     return 0;
 }
