@@ -25,6 +25,8 @@
 
 #include "CGameContext.hpp"
 #include "CClass.hpp"
+#include "CChams.hpp"
+#include "CSkeleton.hpp"
 #include "../CConfigs/CConfig.hpp"
 #include <atomic>
 #include <cstring>
@@ -380,6 +382,82 @@ namespace skins {
         });
     }
 
+    // ---- what the weapon in hands draws ------------------------------------------------------------
+    // jgi (the player model) keeps its weapon content gby at +0x38 (jgi.<dwoa> : qjv). gby: MeshFilters
+    // @+0x28 and @+0x38, MeshRenderers @+0x30 and @+0x40 (Lists), one more MeshFilter @+0x68. Logged
+    // whenever any of them changes (mesh and material ids), to see what the knife shows when a skin
+    // loads; the next step writes them, the way chams writes materials.
+    inline constexpr uint64_t kModelWeaponView = 0x38;
+    inline constexpr uint64_t kViewFilters[2] = {0x28, 0x38}, kViewRenderers[2] = {0x30, 0x40}, kViewFilter = 0x68;
+    inline uint64_t g_view = 0, g_view_for = 0, g_look_sig = 0;
+    inline long long g_view_at = 0, g_look_at = 0, g_look_log = 0;
+
+    inline uint64_t weapon_view(uint64_t local) {
+        const long long now = diag::now_ms();
+        if (local == g_view_for && g_view && now - g_view_at < 1000) return g_view;
+        g_view_for = local;
+        g_view_at = now;
+        const uint64_t model = skeleton::find_model(local);
+        const uint64_t v = plausible(model) ? rpm<uint64_t>(model + kModelWeaponView) : 0;
+        g_view = class_of(v) == "gby" ? v : 0;
+        return g_view;
+    }
+
+    inline void natives_of(uint64_t list, std::vector<uint64_t>& out) {
+        const uint64_t items = plausible(list) ? rpm<uint64_t>(list + v100::list_items) : 0;
+        const int n = plausible(list) ? rpm<int>(list + v100::list_count) : 0;
+        for (int i = 0; plausible(items) && i < n && i < 32; ++i)
+            if (const uint64_t native = chams::native_of(rpm<uint64_t>(items + v100::array_data + uint64_t(i) * 8))) out.push_back(native);
+    }
+
+    inline void look_report(uint64_t local, int held) {
+        const long long now = diag::now_ms();
+        if (now - g_look_at < 100) return;
+        g_look_at = now;
+        const uint64_t view = weapon_view(local);
+        if (!view) {
+            if (diag::every(g_look_log, 10000)) diag::log("SKINS", "look: weapon view (gby) not found");
+            return;
+        }
+        std::vector<uint64_t> filters, renderers;
+        for (uint64_t off : kViewFilters) natives_of(rpm<uint64_t>(view + off), filters);
+        if (const uint64_t extra = chams::native_of(rpm<uint64_t>(view + kViewFilter))) filters.push_back(extra);
+        for (uint64_t off : kViewRenderers) natives_of(rpm<uint64_t>(view + off), renderers);
+        const int data_off = chams::g_data_offset.load() >= 0 ? chams::g_data_offset.load() : int(v100::legacy_renderer_materials);
+        const int size_off = chams::g_size_offset.load() >= 0 ? chams::g_size_offset.load() : data_off + 0x10;
+        uint64_t sig = 1469598103934665603ull;
+        auto mix = [&](uint64_t v) { sig = (sig ^ v) * 1099511628211ull; };
+        std::vector<std::vector<int32_t>> words(filters.size()), mats(renderers.size());
+        for (size_t i = 0; i < filters.size(); ++i) {
+            words[i].assign(24, 0);
+            mem_read(filters[i] + 0x20, words[i].data(), words[i].size() * 4);
+            for (int32_t w : words[i]) mix(uint32_t(w));
+        }
+        for (size_t i = 0; i < renderers.size(); ++i) {
+            const uint64_t data = rpm<uint64_t>(renderers[i] + uint64_t(data_off));
+            const int n = std::min(rpm<int>(renderers[i] + uint64_t(size_off)), 8);
+            for (int k = 0; plausible(data) && k < n; ++k) mats[i].push_back(rpm<int32_t>(data + uint64_t(k) * 4));
+            for (int32_t m : mats[i]) mix(uint32_t(m));
+            mix(renderers[i]);
+        }
+        if (sig == g_look_sig) return;
+        g_look_sig = sig;
+        diag::log("SKINS", "look: weapon %d (skin id held: %s), gby 0x%llx, %zu filters, %zu renderers", held,
+                  g_hold.at ? std::to_string(g_hold.written).c_str() : "no", (unsigned long long)view, filters.size(), renderers.size());
+        for (size_t i = 0; i < filters.size(); ++i) {
+            std::string line;
+            char one[16];
+            for (int32_t w : words[i]) { std::snprintf(one, sizeof(one), " %x", uint32_t(w)); line += one; }
+            diag::log("SKINS", "  filter[%zu] 0x%llx +0x20:%s", i, (unsigned long long)filters[i], line.c_str());
+        }
+        for (size_t i = 0; i < renderers.size(); ++i) {
+            std::string line;
+            char one[16];
+            for (int32_t m : mats[i]) { std::snprintf(one, sizeof(one), " %d", m); line += one; }
+            diag::log("SKINS", "  renderer[%zu] 0x%llx materials:%s", i, (unsigned long long)renderers[i], line.c_str());
+        }
+    }
+
     inline void release_hold() {
         if (g_hold.at && rpm<int>(g_hold.at + kMetaSkin) == g_hold.written) wpm<int>(g_hold.at + kMetaSkin, g_hold.original);
         g_hold = {};
@@ -427,6 +505,7 @@ namespace skins {
         if (cached == kSpoiled) return;  // our reload is pending
         const int held = rpm<uint8_t>(b + kBehState);
         g_held_weapon = held;
+        if (knife(held)) look_report(local, held);
         if (!resolve(b)) { set_status("weapon content not found"); return; }
 
         // Every weapon with a chosen skin (they stay changed, so switching shows them at once).
