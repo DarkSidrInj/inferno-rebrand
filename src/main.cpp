@@ -7,6 +7,7 @@
 #include "CGame/CFog.hpp"
 #include "CGame/CThirdPerson.hpp"
 #include "CGame/CAntiAim.hpp"
+#include "CGame/CSkins.hpp"
 #include "CGame/CLocalView.hpp"
 #include "CVisual/CVisualManager.hpp"
 #include "CProtection/COxorany.hpp"
@@ -142,6 +143,7 @@ int main() {
     localview::g_layer_move = 0;
     localview::restore_all();
     antiaim::release();
+    skins::restore();
     chams::occlusion_tick(0);
     shutdown();
     return 0;

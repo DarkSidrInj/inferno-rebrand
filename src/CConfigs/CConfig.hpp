@@ -64,6 +64,11 @@ namespace thirdperson {
     inline float model_outline = 1.5f;
 }
 
+namespace skins {
+    inline bool enabled = false;
+    inline int chosen[256]{};       // WeaponId raw -> SkinDefinition id (0: the game's own)
+}
+
 namespace antiaim {
     inline bool enabled = false;
     inline int yaw_mode = 1;        // 0 legacy (degenerate quaternions), 1 spin, 2 jitter, 3 backwards, 4 none

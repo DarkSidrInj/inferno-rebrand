@@ -13,6 +13,7 @@
 #include "CGame/CAntiAim.hpp"
 #include "CGame/CLocalView.hpp"
 #include "CGame/CSceneNode.hpp"
+#include "CGame/CSkins.hpp"
 #include "fixtures/rs_accessors.h"
 #include "CConfigs/CConfig.hpp"
 #include <sys/mman.h>
@@ -1034,6 +1035,109 @@ int main() {
             cfg::antiaim::enabled = false;
             antiaim::tick(me, feet);
             CHECK(aa_entries[1].rotation.w == 1.f, "model restored on disable (%.3f)", aa_entries[1].rotation.w);
+
+            // Skin changer: definitions from the heap, meta index calibrated from other players'
+            // skins, the entry of the weapon in hands patched and its view made to load again.
+            {
+                auto named_class = [&](const char* name, const char* space) {
+                    uint8_t* k = static_cast<uint8_t*>(calloc(1, 0x300));
+                    char* t = static_cast<char*>(calloc(1, 32)); std::strcpy(t, name);
+                    char* n = static_cast<char*>(calloc(1, 48)); std::strcpy(n, space);
+                    *reinterpret_cast<uint64_t*>(k + klass::g_name_offset) = reinterpret_cast<uint64_t>(t);
+                    *reinterpret_cast<uint64_t*>(k + klass::g_name_offset + 8) = reinterpret_cast<uint64_t>(n);
+                    return k;
+                };
+                uint8_t* def_class = named_class("SkinDefinition", "Axlebolt.Standoff.Main.Inventory");
+                uint8_t* st_class = named_class("StatTrackSkinDefinition", "Axlebolt.Standoff.Main.Inventory");
+                uint8_t* beh_class = named_class("beh", "");
+                *reinterpret_cast<uint64_t*>(unity + 0x780) = reinterpret_cast<uint64_t>(def_class);
+                *reinterpret_cast<uint64_t*>(unity + 0x788) = reinterpret_cast<uint64_t>(st_class);
+                struct D { int id; int weapon; const char* name; bool st; };
+                const D ds[] = {{101, 44, "AKR | Alpha", false}, {102, 44, "AKR | Beta", false}, {103, 44, "AKR | Beta ST", true},
+                                {201, 12, "USP | Gamma", false}, {202, 12, "USP | Delta", false}};
+                for (const D& d : ds) {
+                    uint8_t* o = static_cast<uint8_t*>(calloc(1, 0x40));
+                    uint8_t* native = static_cast<uint8_t*>(calloc(1, 0x80));
+                    char* name = static_cast<char*>(calloc(1, 32)); std::strcpy(name, d.name);
+                    *reinterpret_cast<uint64_t*>(native + 0x30) = reinterpret_cast<uint64_t>(name);
+                    *reinterpret_cast<uint64_t*>(o) = reinterpret_cast<uint64_t>(d.st ? st_class : def_class);
+                    *reinterpret_cast<uint64_t*>(o + 0x10) = reinterpret_cast<uint64_t>(native);
+                    *reinterpret_cast<int32_t*>(o + 0x18) = d.id;
+                    o[0x1C] = uint8_t(d.weapon);
+                }
+                // Registry: entry i belongs to owner i; even entries carry an AKR skin, odd ones a USP skin.
+                const int kEntries = 8;
+                uint8_t* items = static_cast<uint8_t*>(calloc(1, 0x20 + kEntries * 0x38));
+                *reinterpret_cast<uint64_t*>(items + 0x18) = kEntries;
+                auto skin_at = [&](int i) { return reinterpret_cast<int32_t*>(items + 0x20 + i * 0x38 + 4); };
+                for (int i = 0; i < kEntries; ++i) { items[0x20 + i * 0x38] = uint8_t(i); *skin_at(i) = i % 2 ? 201 : 101; }
+                *skin_at(5) = 0;  // the local player's AKR has no skin
+                uint8_t* list = static_cast<uint8_t*>(calloc(1, 0x20));
+                *reinterpret_cast<uint64_t*>(list + 0x10) = reinterpret_cast<uint64_t>(items);
+                *reinterpret_cast<int32_t*>(list + 0x18) = kEntries;
+                uint8_t* yvh = static_cast<uint8_t*>(calloc(1, 0x20));
+                *reinterpret_cast<uint64_t*>(yvh + 0x10) = reinterpret_cast<uint64_t>(list);
+                auto make_player = [&](int weapon, int meta, uint8_t*& beh_out) {
+                    uint8_t* beh = static_cast<uint8_t*>(calloc(1, 0xC0));
+                    *reinterpret_cast<uint64_t*>(beh) = reinterpret_cast<uint64_t>(beh_class);
+                    beh[0x40] = uint8_t(weapon);
+                    *reinterpret_cast<uint16_t*>(beh + 0x42) = uint16_t(meta);
+                    *reinterpret_cast<uint64_t*>(beh + 0x80) = reinterpret_cast<uint64_t>(yvh);
+                    uint8_t* parts = static_cast<uint8_t*>(calloc(1, 0x30));
+                    *reinterpret_cast<uint64_t*>(parts + 0x18) = 2;
+                    *reinterpret_cast<uint64_t*>(parts + 0x20) = reinterpret_cast<uint64_t>(calloc(1, 0x40));  // some other part
+                    *reinterpret_cast<uint64_t*>(parts + 0x28) = reinterpret_cast<uint64_t>(beh);
+                    uint8_t* wmz = static_cast<uint8_t*>(calloc(1, 0x50));
+                    *reinterpret_cast<uint64_t*>(wmz + 0x18) = reinterpret_cast<uint64_t>(parts);
+                    uint8_t* player = static_cast<uint8_t*>(calloc(1, 0x100));
+                    *reinterpret_cast<uint64_t*>(player + v100::net_systems) = reinterpret_cast<uint64_t>(wmz);
+                    beh_out = beh;
+                    return reinterpret_cast<uint64_t>(player);
+                };
+                std::vector<uint64_t> players_s;
+                uint8_t* unused_beh = nullptr;
+                for (int k = 0; k < 4; ++k) players_s.push_back(make_player(k % 2 ? 12 : 44, k + 1, unused_beh));  // meta = index + 1
+                uint8_t* local_beh = nullptr;
+                const uint64_t local_s = make_player(44, 6, local_beh);
+                players_s.push_back(local_s);
+
+                skins::g_pid = -1;
+                cfg::skins::enabled = true;
+                cfg::skins::chosen[44] = 102;
+                skins::tick(local_s, players_s);  // starts the definition scan
+                while (skins::g_scanning.load()) usleep(1000);
+                CHECK(skins::g_scanned.load() && skins::g_def_by_id.size() == 5, "skin definitions found: %zu", skins::g_def_by_id.size());
+                skins::tick(local_s, players_s);
+                CHECK(skins::g_index_shift == 1, "meta index shift %d", skins::g_index_shift);
+                CHECK(*skin_at(5) == 102 && *reinterpret_cast<uint16_t*>(local_beh + 0x42) == 0xFFFE,
+                      "held AKR gets skin 102 and its view reloads (skin %d, cache %d)", *skin_at(5), *reinterpret_cast<uint16_t*>(local_beh + 0x42));
+                const skins::View v = skins::view();
+                CHECK(v.weapon == 44 && v.names.size() == 4 && v.names[1] == "AKR | Alpha" && v.names[3] == "AKR | Beta ST (ST)" && v.current == 2,
+                      "menu list for the AKR: %zu names, current %d", v.names.size(), v.current);
+                // The game loads again: its cache is back and the op id moved.
+                *reinterpret_cast<uint16_t*>(local_beh + 0x42) = 6;
+                *reinterpret_cast<int32_t*>(local_beh + 0x48) += 1;
+                skins::g_reload_at -= 1000;
+                skins::tick(local_s, players_s);
+                CHECK(*skin_at(5) == 102 && skins::g_reload_at == 0, "skin kept, reload seen");
+                cfg::skins::chosen[44] = 0;
+                skins::tick(local_s, players_s);
+                CHECK(*skin_at(5) == 0, "original skin back when nothing is chosen (%d)", *skin_at(5));
+                // A reload that never comes: the cache is put back by itself.
+                CHECK(*reinterpret_cast<uint16_t*>(local_beh + 0x42) == 0xFFFE, "reload requested");
+                skins::g_reload_at -= 1000;
+                skins::tick(local_s, players_s);
+                CHECK(*reinterpret_cast<uint16_t*>(local_beh + 0x42) == 6, "cache restored without a reload");
+                cfg::skins::chosen[44] = 101;
+                skins::g_reload_at = 0;
+                skins::tick(local_s, players_s);
+                CHECK(*skin_at(5) == 101, "skin 101");
+                *reinterpret_cast<uint16_t*>(local_beh + 0x42) = 6;
+                cfg::skins::enabled = false;
+                skins::g_reload_at = 0;
+                skins::tick(local_s, players_s);
+                CHECK(*skin_at(5) == 0 && *skin_at(4) == 101 && *skin_at(6) == 101, "disabled: original back, others untouched");
+            }
         }
 
         // Every slot empty: no trace may invent an address, and the code dump must run.

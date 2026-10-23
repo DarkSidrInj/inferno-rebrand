@@ -7,6 +7,7 @@
 #include "../CGame/CChams.hpp"
 #include "../CGame/CThirdPerson.hpp"
 #include "../CGame/CAntiAim.hpp"
+#include "../CGame/CSkins.hpp"
 #include "../CGame/CLocalView.hpp"
 #include "../CMenu/Theme/CTheme.hpp"
 #include "../CConfigs/CConfig.hpp"
@@ -26,7 +27,8 @@ static void esp_wait(const char* stage) {
 void visuals::draw() {
     bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health || cfg::esp::distance ||
                cfg::esp::skeleton || cfg::esp::grenade || cfg::esp::dropped || cfg::chams::enabled ||
-               cfg::chams::overlay || cfg::thirdperson::enabled || cfg::antiaim::enabled;
+               cfg::chams::overlay || cfg::thirdperson::enabled || cfg::antiaim::enabled ||
+               cfg::skins::enabled;
     if (!any) {
         chams::tick({}, 0, 0);
         chams::occlusion_tick(0);
@@ -36,6 +38,7 @@ void visuals::draw() {
         thirdperson::tick(nullptr, unused);
         localview::tick(0, false);
         antiaim::tick(0, {});
+        skins::tick(0, {});
         esp_wait("all ESP options disabled");
         return;
     }
@@ -103,6 +106,7 @@ void visuals::draw() {
     if (LocalTeam != 1 && LocalTeam != 2) { esp_wait("local team validation"); return; }
     chams::tick(Players, LocalPlayer, LocalTeam);
     antiaim::tick(LocalPlayer, LocalPosition);
+    skins::tick(LocalPlayer, Players);
     if (!std::isfinite(LocalPosition.x) ||
         (LocalPosition.x == 0.f && LocalPosition.y == 0.f && LocalPosition.z == 0.f)) {
         esp_wait("local transform hierarchy"); return;

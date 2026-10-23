@@ -4,6 +4,7 @@
 #include "../CConfigs/CConfig.hpp"
 #include "Theme/CTheme.hpp"
 #include "Widgets/CWidgets.hpp"
+#include "../CGame/CSkins.hpp"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "Android_draw/draw.h"
@@ -37,7 +38,7 @@ namespace ui::menu {
     static const char* tabs[] = {"Visuals", "Settings"};
     static constexpr int tc = sizeof(tabs) / sizeof(tabs[0]);
 
-    static const char* vstabs[] = {"ESP", "Misc"};
+    static const char* vstabs[] = {"ESP", "Skins", "Misc"};
     static constexpr int vstc = sizeof(vstabs) / sizeof(vstabs[0]);
 
     static float lrp(float a, float b, float t) { return a + (b - a) * t; }
@@ -112,6 +113,24 @@ namespace ui::menu {
         colorpick("Dropped color", &cfg::esp::dropped_col, a);
     }
 
+    static void skins_tab(float a) {
+        checkbox("Skin changer", &cfg::skins::enabled, a);
+        separator(a);
+        static skins::View view;
+        static long long refreshed = 0;
+        const long long now = diag::now_ms();
+        if (now - refreshed > 250) { refreshed = now; view = skins::view(); }
+        const std::string title = "Skin: " + view.status;
+        int pick = view.current;
+        if (stepper(title.c_str(), &pick, view.names, a) && view.weapon >= 0 && view.weapon < 256 && pick < (int)view.ids.size()) {
+            cfg::skins::chosen[view.weapon] = view.ids[pick];
+            view.current = pick;
+        }
+        separator(a);
+        button("Reset all skins", a, [] { for (int& id : cfg::skins::chosen) id = 0; });
+        button("Reload skin list", a, [] { skins::rescan(); });
+    }
+
     static void misc_tab(float a) {
         checkbox("Anti-aim", &cfg::antiaim::enabled, a);
         separator(a);
@@ -126,7 +145,8 @@ namespace ui::menu {
     static void visuals_tab(float a) {
         switch (stab) {
             case 0: esp_tab(a); break;
-            case 1: misc_tab(a); break;
+            case 1: skins_tab(a); break;
+            case 2: misc_tab(a); break;
         }
     }
 

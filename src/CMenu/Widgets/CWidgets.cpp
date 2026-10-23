@@ -385,6 +385,68 @@ namespace widgets {
         return false;
     }
 
+    bool stepper(const char* name, int* v, const std::vector<std::string>& items, float a) {
+        if (a < 0.01f || items.empty()) return false;
+
+        ImGuiWindow* w = ImGui::GetCurrentWindow();
+        if (w->SkipItems) return false;
+
+        std::string ids = std::string("stp_") + name;
+        ImGuiID id = w->GetID(ids.c_str());
+
+        float ww = content_w > 0 ? content_w : ImGui::GetContentRegionAvail().x;
+        float h = 50.f * S;
+        float pad = 8.f * S;
+        float bh = 22.f * S;
+
+        ImVec2 pos = w->DC.CursorPos;
+        ImRect r(pos, ImVec2(pos.x + ww, pos.y + h));
+        ImRect row(ImVec2(r.Min.x + pad, r.Max.y - pad - bh), ImVec2(r.Max.x - pad, r.Max.y - pad));
+        ImRect left(row.Min, ImVec2(row.Min.x + bh * 1.4f, row.Max.y));
+        ImRect right(ImVec2(row.Max.x - bh * 1.4f, row.Min.y), row.Max);
+
+        ImGui::ItemSize(r);
+        if (!ImGui::ItemAdd(r, id)) return false;
+
+        const int n = (int)items.size();
+        if (*v < 0 || *v >= n) *v = 0;
+        bool changed = false;
+        for (int side = 0; side < 2; ++side) {
+            const ImRect& b = side ? right : left;
+            if (ImGui::IsMouseHoveringRect(b.Min, b.Max) && !popup() && ImGui::IsMouseClicked(0) && !clicked) {
+                *v = side ? (*v + 1) % n : (*v + n - 1) % n;
+                clicked = true;
+                changed = true;
+            }
+        }
+
+        ImDrawList* dl = w->DrawList;
+        dl->AddRectFilled(r.Min, r.Max, col(clr::panel, a));
+        dl->AddRect(r.Min, r.Max, col(clr::border, a));
+
+        ImGui::PushFont(fontMedium);
+        dl->AddText(ImVec2(r.Min.x + pad, r.Min.y + 6.f * S), col(clr::text, a), name);
+        dl->AddRectFilled(row.Min, row.Max, col(clr::widget, a));
+        dl->AddRect(row.Min, row.Max, col(clr::border, a));
+        for (int side = 0; side < 2; ++side) {
+            const ImRect& b = side ? right : left;
+            const float hv = anim(ids + (side ? "_r" : "_l"), ImGui::IsMouseHoveringRect(b.Min, b.Max) && !popup() ? 1.f : 0.f, 14.f);
+            dl->AddRectFilled(b.Min, b.Max, col(lrp_col(clr::widget, clr::accent, 0.25f + 0.35f * hv), a));
+            const ImVec2 c = b.GetCenter();
+            const float s = 4.f * S, d = side ? 1.f : -1.f;
+            dl->AddTriangleFilled(ImVec2(c.x + d * s, c.y), ImVec2(c.x - d * s, c.y - s), ImVec2(c.x - d * s, c.y + s), col(clr::accent, a));
+        }
+        const std::string& text = items[*v];
+        const ImVec2 ts = ImGui::CalcTextSize(text.c_str());
+        const float space = right.Min.x - left.Max.x - 8.f * S;
+        const float tx = ts.x < space ? row.GetCenter().x - ts.x * 0.5f : left.Max.x + 4.f * S;
+        dl->PushClipRect(ImVec2(left.Max.x + 2.f * S, row.Min.y), ImVec2(right.Min.x - 2.f * S, row.Max.y), true);
+        dl->AddText(ImVec2(tx, row.GetCenter().y - fontMedium->FontSize * 0.5f), col(clr::text, a), text.c_str());
+        dl->PopClipRect();
+        ImGui::PopFont();
+        return changed;
+    }
+
     static std::string cp_id = "";
     static ImVec4* cp_ptr = nullptr;
     static std::unordered_map<std::string, ImVec4> hsv_cache;
