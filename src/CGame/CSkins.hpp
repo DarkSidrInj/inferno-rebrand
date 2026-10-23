@@ -428,22 +428,27 @@ namespace skins {
     //   site 2 (RVA 0x98B32E4, SetWeaponContent)  ldr w9,[x19,#0x54] : the SkinId read from the registry entry of
     //                                                                 the meta id -> the chosen skin (also stored
     //                                                                 back, the loader reads it a second time)
-    // only for the local beh (site 1: x19 == data.beh, site 2: x20 == data.beh), for knives (70..89). Every
-    // other player passes through unchanged and the match's registry is never touched.
+    // only for the local beh (site 1: x19 == data.beh and a knife 70..89 coming in; site 2: x20 == data.beh and the
+    // weapon being loaded is the one site 1 handed out). Every other player passes through unchanged and the
+    // match's registry is never touched.
     inline constexpr uint64_t kSite1Rva = 0x98A9264, kSite2Rva = 0x98B32E4;
     inline constexpr uint32_t kOriginal1 = 0x39404121, kOriginal2 = 0xb9405669;
     inline constexpr uint32_t kCave[26] = {
         0x39404121, 0x51011831, 0x7100523f, 0x54000102, 0x100002d0, 0xf9400211, 0xeb13023f, 0x54000081,
         0xb9400a11, 0x34000051, 0x2a1103e1, 0xd65f03c0,                     // A: weapon id, ends with ret at 0x2c
-        0xb9405669, 0x100001aa, 0xf940014b, 0xeb0b029f, 0x54000121, 0x3940d26b, 0x5101196b, 0x71004d7f,
-        0x540000a8, 0xb9400d4b, 0x3400006b, 0x2a0b03e9, 0xb9005669, 0xd65f03c0};   // B (at 0x30): skin id, ret at 0x64
+        0xb9405669, 0x100001aa, 0xf940014b, 0xeb0b029f, 0x54000121, 0x3940d26b, 0xb940094c, 0x6b0c017f,
+        0x540000a1, 0xb9400d4b, 0x3400006b, 0x2a0b03e9, 0xb9005669, 0xd65f03c0};   // B (at 0x30): skin id, ret at 0x64
     inline constexpr uint64_t kCaveEntryB = 0x30, kCaveData = 0x68, kCaveSize = 0x80;   // data: u64 beh, u32 weapon, u32 skin
     struct CaveData { uint64_t beh{}; uint32_t weapon{}, skin{}; };
     struct CodePatch { uint64_t site1{}, site2{}, cave{}; CaveData now{}; };
     inline CodePatch g_patch;
 
+    struct Probe { bool on = false, waiting = false; int id = 0; long long started = 0; int hits = 0; };
+    inline Probe g_probe;
+    inline std::atomic<bool> g_probe_request{false};
+
     inline void after_reload() {
-        if (g_patch.now.weapon) { dump_contents(int(g_patch.now.weapon)); dump_contents(70); }
+        if (g_patch.now.weapon && !g_probe.on) { dump_contents(int(g_patch.now.weapon)); dump_contents(70); }
     }
     inline uint64_t g_cave_override = 0;                      // tests
 
@@ -547,6 +552,73 @@ namespace skins {
         g_patch = {};
     }
 
+    // ---- which WeaponId is which knife (button in the menu) ---------------------------------------
+    // The knife types (Butterfly, Karambit, ...) are WeaponIds of their own whose base content is looked up
+    // by template name; the ids are not known offline. The probe hands the local knife one candidate id after
+    // another, waits for the game to build content for it and names it by the mesh params it got.
+
+    inline uint64_t built_mesh(int weapon, int skin) {
+        uint64_t mesh = 0;
+        if (!plausible(g_resolver)) return 0;
+        each_entry(rpm<uint64_t>(g_resolver + kResolverCache), [&](uint64_t e) {
+            if (rpm<uint8_t>(e + kEntryKey) != weapon || rpm<int>(e + kEntryKey + 4) != skin) return true;
+            const uint64_t c = rpm<uint64_t>(e + kEntryValue);
+            mesh = plausible(c) ? rpm<uint64_t>(c + 0x10) : 0;
+            return false;
+        });
+        return mesh;
+    }
+
+    inline std::string template_of(uint64_t mesh) {
+        std::string name;
+        if (!g_params[0].by_name) return name;
+        each_entry(g_params[0].by_name, [&](uint64_t e) {
+            if (rpm<uint64_t>(e + kEntryValue) != mesh) return true;
+            name = managed_text(rpm<uint64_t>(e + kEntryKey));
+            return false;
+        });
+        return name;
+    }
+
+    inline bool has_weapon_entry(int weapon) {
+        return g_params[0].by_weapon && find_value(g_params[0].by_weapon, uint64_t(weapon), 4);
+    }
+
+    // One step per frame while the probe is on; true while it is.
+    inline bool probe_step(uint64_t b) {
+        if (!g_probe.on) return false;
+        if (!g_patch.site1) { diag::log("SKINS", "probe: needs \"Full model\" on"); g_probe.on = false; return false; }
+        const long long now = diag::now_ms();
+        if (g_probe.waiting) {
+            const uint64_t mesh = built_mesh(g_probe.id, 0);
+            if (!mesh && now - g_probe.started < 1100) return true;
+            if (mesh) {
+                const std::string name = template_of(mesh);
+                diag::log("SKINS", "probe: WeaponId %d builds content (mesh params 0x%llx) %s", g_probe.id, (unsigned long long)mesh, name.c_str());
+                ++g_probe.hits;
+                if (name == kButterflyModel) {
+                    cfg::skins::model = g_probe.id;
+                    diag::log("SKINS", "probe: the Butterfly is WeaponId %d, set as the knife model id", g_probe.id);
+                }
+            }
+            g_probe.waiting = false;
+            ++g_probe.id;
+        }
+        while (g_probe.id < 256 && (g_probe.id < 72 || has_weapon_entry(g_probe.id))) ++g_probe.id;
+        if (g_probe.id > 255) {
+            diag::log("SKINS", "probe done: %d WeaponIds build content", g_probe.hits);
+            g_probe.on = false;
+            patch_set(b, cfg::skins::chosen[70] > 0 ? cfg::skins::model : 0, std::max(cfg::skins::chosen[70], 0));
+            return false;
+        }
+        patch_set(b, g_probe.id, 47502);   // a changed tuple: the game loads it by itself
+        g_probe.waiting = true;
+        g_probe.started = now;
+        return true;
+    }
+
+    inline void probe_request() { g_probe_request = true; }   // the menu thread asks, the frame loop starts it
+
     inline void release_hold() {
         if (g_hold.at && rpm<int>(g_hold.at + kMetaSkin) == g_hold.written) wpm<int>(g_hold.at + kMetaSkin, g_hold.original);
         g_hold = {};
@@ -640,6 +712,19 @@ namespace skins {
             set_status("code patch not possible, see the log");
         }
         if (!cfg::skins::code_patch && g_patch.site1) patch_remove();
+        if (g_probe_request.exchange(false)) {
+            g_probe = {};
+            g_probe.on = true;
+            g_probe.id = 72;
+            diag::log("SKINS", "probe: WeaponIds 72..255 one by one (about 3 minutes), keep the knife in hands");
+            if (g_params[0].by_name)
+                each_entry(g_params[0].by_name, [&](uint64_t e) {
+                    diag::log("SKINS", "probe: template %s = mesh params 0x%llx", managed_text(rpm<uint64_t>(e + kEntryKey)).c_str(), (unsigned long long)rpm<uint64_t>(e + kEntryValue));
+                    return true;
+                });
+            for (int w : {70, 71}) diag::log("SKINS", "probe: WeaponId %d = mesh params 0x%llx", w, (unsigned long long)built_mesh(w, 0));
+        }
+        if (probe_step(b)) return;
         bool patch_changed = false;
         const bool patched = g_patch.site1 != 0;
         if (patched) {
