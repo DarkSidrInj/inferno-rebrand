@@ -1036,9 +1036,9 @@ int main() {
             antiaim::tick(me, feet);
             CHECK(aa_entries[1].rotation.w == 1.f, "model restored on disable (%.3f)", aa_entries[1].rotation.w);
 
-            // Skin changer: the item in hands gets the skin in its meta copy, two copies of that meta
-            // data go to the end of the registry and its meta id points at them; a Butterfly skin on
-            // the default knife makes it a Butterfly. Its view is made to load again.
+            // Skin changer: the snapshot of each weapon with a chosen skin points at our own registry
+            // entry (a Butterfly skin also makes the default knife a Butterfly); written again when the
+            // game writes it back; the weapon in hands loads again; all put back on Original / disable.
             {
                 auto named_class = [&](const char* name) {
                     uint8_t* k = static_cast<uint8_t*>(calloc(1, 0x300));
@@ -1047,82 +1047,94 @@ int main() {
                     return k;
                 };
                 uint8_t* beh_class = named_class("beh");
-                uint8_t* qjf_class = named_class("qjf");
-                const int kCapacity = 8;
-                uint8_t* items = static_cast<uint8_t*>(calloc(1, 0x20 + kCapacity * 0x38));
-                *reinterpret_cast<uint64_t*>(items + 0x18) = kCapacity;
+                uint8_t* qqt_class = named_class("qqt");
+                // Registry as on device: 3 of 4, entry 0 blank, 1 and 2 skinned.
+                uint8_t* items = static_cast<uint8_t*>(calloc(1, 0x20 + 4 * 0x38));
+                *reinterpret_cast<uint64_t*>(items + 0x18) = 4;
                 auto skin_at = [&](int i) { return reinterpret_cast<int32_t*>(items + 0x20 + i * 0x38 + 4); };
-                *skin_at(1) = 240007; items[0x20 + 0x38] = 3;  // someone's skinned weapon
+                *skin_at(1) = 240095; items[0x20 + 0x38] = 2;
+                *skin_at(2) = 240361; items[0x20 + 2 * 0x38] = 3;
                 uint8_t* list = static_cast<uint8_t*>(calloc(1, 0x20));
                 *reinterpret_cast<uint64_t*>(list + 0x10) = reinterpret_cast<uint64_t>(items);
                 *reinterpret_cast<int32_t*>(list + 0x18) = 3;
                 auto count = [&] { return *reinterpret_cast<int32_t*>(list + 0x18); };
                 uint8_t* yvh = static_cast<uint8_t*>(calloc(1, 0x20));
                 *reinterpret_cast<uint64_t*>(yvh + 0x10) = reinterpret_cast<uint64_t>(list);
-                uint8_t* item = static_cast<uint8_t*>(calloc(1, 0x80));
-                *reinterpret_cast<uint64_t*>(item) = reinterpret_cast<uint64_t>(qjf_class);
-                item[0x10] = 70;          // default knife
-                item[0x18] = 5;           // owner
-                *reinterpret_cast<int32_t*>(item + 0x20) = 9;  // charm
-                uint8_t* part = static_cast<uint8_t*>(calloc(1, 0x100));
-                *reinterpret_cast<uint64_t*>(part + 0x78) = reinterpret_cast<uint64_t>(item);
-                uint8_t* beh = static_cast<uint8_t*>(calloc(1, 0xC0));
-                *reinterpret_cast<uint64_t*>(beh) = reinterpret_cast<uint64_t>(beh_class);
-                beh[0x40] = 70;
-                *reinterpret_cast<uint64_t*>(beh + 0x58) = reinterpret_cast<uint64_t>(part);
-                *reinterpret_cast<uint64_t*>(beh + 0x80) = reinterpret_cast<uint64_t>(yvh);
-                uint8_t* parts = static_cast<uint8_t*>(calloc(1, 0x30));
-                *reinterpret_cast<uint64_t*>(parts + 0x18) = 1;
-                *reinterpret_cast<uint64_t*>(parts + 0x20) = reinterpret_cast<uint64_t>(beh);
-                uint8_t* wmz = static_cast<uint8_t*>(calloc(1, 0x50));
-                *reinterpret_cast<uint64_t*>(wmz + 0x10) = reinterpret_cast<uint64_t>(parts);
-                uint8_t* player = static_cast<uint8_t*>(calloc(1, 0x100));
-                *reinterpret_cast<uint64_t*>(player + v100::net_systems) = reinterpret_cast<uint64_t>(wmz);
-                const uint64_t local_s = reinterpret_cast<uint64_t>(player);
+                auto make_player = [&](int weapon, int meta, uint8_t*& beh_out, uint8_t* weaponry) {
+                    uint8_t* beh = static_cast<uint8_t*>(calloc(1, 0xC0));
+                    *reinterpret_cast<uint64_t*>(beh) = reinterpret_cast<uint64_t>(beh_class);
+                    beh[0x40] = uint8_t(weapon);
+                    *reinterpret_cast<uint16_t*>(beh + 0x42) = uint16_t(meta);
+                    *reinterpret_cast<uint64_t*>(beh + 0x80) = reinterpret_cast<uint64_t>(yvh);
+                    uint8_t* parts = static_cast<uint8_t*>(calloc(1, 0x30));
+                    *reinterpret_cast<uint64_t*>(parts + 0x18) = 2;
+                    *reinterpret_cast<uint64_t*>(parts + 0x20) = reinterpret_cast<uint64_t>(beh);
+                    *reinterpret_cast<uint64_t*>(parts + 0x28) = reinterpret_cast<uint64_t>(weaponry ? weaponry : static_cast<uint8_t*>(calloc(1, 0x40)));
+                    uint8_t* wmz = static_cast<uint8_t*>(calloc(1, 0x50));
+                    *reinterpret_cast<uint64_t*>(wmz + 0x18) = reinterpret_cast<uint64_t>(parts);
+                    uint8_t* player = static_cast<uint8_t*>(calloc(1, 0x100));
+                    *reinterpret_cast<uint64_t*>(player + v100::net_systems) = reinterpret_cast<uint64_t>(wmz);
+                    beh_out = beh;
+                    return reinterpret_cast<uint64_t>(player);
+                };
+                // Local weaponry: [0] gun 33 (slot 0), [1] default knife 70 (slot 2, in hands).
+                uint8_t* snaps = static_cast<uint8_t*>(calloc(1, 0x20 + 4 * 0x10));
+                *reinterpret_cast<uint64_t*>(snaps + 0x18) = 4;
+                auto sw = [&](int i) { return snaps + 0x20 + i * 0x10; };
+                sw(0)[0] = 33; sw(0)[0xC] = 0;
+                sw(1)[0] = 70; sw(1)[0xC] = 2;
+                uint8_t* slist = static_cast<uint8_t*>(calloc(1, 0x20));
+                *reinterpret_cast<uint64_t*>(slist + 0x10) = reinterpret_cast<uint64_t>(snaps);
+                *reinterpret_cast<int32_t*>(slist + 0x18) = 2;
+                uint8_t* qqt = static_cast<uint8_t*>(calloc(1, 0x80));
+                *reinterpret_cast<uint64_t*>(qqt) = reinterpret_cast<uint64_t>(qqt_class);
+                *reinterpret_cast<uint64_t*>(qqt + 0x58) = reinterpret_cast<uint64_t>(slist);
+                qqt[0x60] = 2;
+                uint8_t *beh = nullptr, *other = nullptr;
+                const uint64_t local_s = make_player(70, 0, beh, qqt);
+                const std::vector<uint64_t> players_s = {make_player(44, 1, other, nullptr), make_player(12, 2, other, nullptr), local_s};
+                auto meta_of = [&](int i) { return *reinterpret_cast<uint16_t*>(sw(i) + 2); };
                 auto beh_meta = [&] { return *reinterpret_cast<uint16_t*>(beh + 0x42); };
-                auto item_skin = [&] { return *reinterpret_cast<int32_t*>(item + 0x1C); };
-                auto item_id = [&] { return *reinterpret_cast<uint16_t*>(item + 0x50); };
-                auto game_reloads = [&] { *reinterpret_cast<uint16_t*>(beh + 0x42) = item_id(); beh[0x40] = item[0x10]; *reinterpret_cast<int32_t*>(beh + 0x48) += 1; };
+                auto game_loads = [&] { beh[0x40] = sw(1)[0]; *reinterpret_cast<uint16_t*>(beh + 0x42) = meta_of(1); *reinterpret_cast<int32_t*>(beh + 0x48) += 1; };
 
                 skins::g_pid = -1;
                 cfg::skins::enabled = true;
                 cfg::skins::chosen[70] = 47502;
-                skins::tick(local_s, {local_s});
-                CHECK(item[0x10] == 75 && item_skin() == 47502 && item_id() == 4 && count() == 5 && *skin_at(3) == 47502 && *skin_at(4) == 47502 &&
-                      items[0x20 + 4 * 0x38] == 5 && *reinterpret_cast<int32_t*>(items + 0x20 + 4 * 0x38 + 8) == 9 && beh_meta() == 0xFFFE,
-                      "knife -> Butterfly 47502 (weapon %d skin %d id %d count %d)", item[0x10], item_skin(), item_id(), count());
+                skins::tick(local_s, players_s);
+                CHECK(skins::g_shift == 0, "meta id numbering %d", skins::g_shift);
+                CHECK(sw(1)[0] == 75 && meta_of(1) == 3 && count() == 4 && *skin_at(3) == 47502 && sw(0)[0] == 33 && meta_of(0) == 0 &&
+                      beh_meta() == 0xFFFE, "knife -> Butterfly with its own entry (w%d m%d count %d)", sw(1)[0], meta_of(1), count());
                 const skins::View v = skins::view();
-                CHECK(v.weapon == 70 && v.names.size() == 16 && v.names[1] == "Butterfly Gold" && v.current == 1, "menu list: %zu, current %d", v.names.size(), v.current);
-                game_reloads();
-                skins::g_reload_at -= 1000;
+                CHECK(v.weapon == 70 && v.names.size() == 16 && v.current == 1, "menu: weapon %d current %d", v.weapon, v.current);
+                game_loads();
+                skins::g_reload_at = 0;
+                sw(1)[0] = 70; *reinterpret_cast<uint16_t*>(sw(1) + 2) = 0;  // the game writes the snapshot back
+                skins::tick(local_s, players_s);
+                CHECK(sw(1)[0] == 75 && meta_of(1) == 3 && count() == 4 && skins::g_rewrites == 1, "written again (rewrites %d)", skins::g_rewrites);
                 const int op = *reinterpret_cast<int32_t*>(beh + 0x48);
-                skins::tick(local_s, {local_s});
-                skins::tick(local_s, {local_s});
-                CHECK(count() == 5 && *reinterpret_cast<int32_t*>(beh + 0x48) == op && beh_meta() == 4, "kept in place after the reload");
-                cfg::skins::chosen[70] = 240369;  // another skin: fresh meta data
-                skins::tick(local_s, {local_s});
-                CHECK(item[0x10] == 75 && item_skin() == 240369 && item_id() == 4 && count() == 5 && *skin_at(4) == 240369,
-                      "skin changed in place of the old copies (id %d count %d)", item_id(), count());
-                game_reloads();
-                skins::g_reload_at = 0;
+                skins::tick(local_s, players_s);
+                CHECK(beh_meta() == 3 && *reinterpret_cast<int32_t*>(beh + 0x48) == op, "no reload while it shows the skin");
                 cfg::skins::chosen[70] = 0;
-                skins::tick(local_s, {local_s});
-                CHECK(item[0x10] == 70 && item_skin() == 0 && item_id() == 0 && count() == 3, "original knife back (count %d)", count());
-                // Registry without room: the meta copy alone, and no churn.
-                game_reloads();
+                skins::tick(local_s, players_s);
+                CHECK(sw(1)[0] == 70 && meta_of(1) == 0 && beh_meta() == 0xFFFE, "Original: knife back, reloads");
+                game_loads();
                 skins::g_reload_at = 0;
-                *reinterpret_cast<uint64_t*>(items + 0x18) = 3;
-                cfg::skins::chosen[70] = 47503;
-                skins::tick(local_s, {local_s});
-                CHECK(item[0x10] == 75 && item_skin() == 47503 && item_id() == 0 && count() == 3, "registry full: meta copy only");
-                game_reloads();
+                cfg::skins::chosen[70] = 240369;  // the knife's entry is used again with the new skin
+                skins::tick(local_s, players_s);
+                CHECK(sw(1)[0] == 75 && meta_of(1) == 3 && count() == 4 && *skin_at(3) == 240369 && beh_meta() == 0xFFFE,
+                      "another skin in the same entry (w%d m%d count %d skin %d)", sw(1)[0], meta_of(1), count(), *skin_at(3));
+                game_loads();
                 skins::g_reload_at = 0;
-                const int op2 = *reinterpret_cast<int32_t*>(beh + 0x48);
-                skins::tick(local_s, {local_s});
-                CHECK(beh_meta() == 0 && *reinterpret_cast<int32_t*>(beh + 0x48) == op2, "no churn");
+                skins::tick(local_s, players_s);
+                CHECK(beh_meta() == 3, "settled");
+                cfg::skins::chosen[33] = 47503;   // no room for the gun's own entry: left alone
+                skins::tick(local_s, players_s);
+                CHECK(sw(0)[0] == 33 && meta_of(0) == 0 && count() == 4, "registry full: gun unchanged");
+                cfg::skins::chosen[33] = 0;
                 cfg::skins::enabled = false;
-                skins::tick(local_s, {local_s});
-                CHECK(item[0x10] == 70 && item_skin() == 0 && item_id() == 0 && count() == 3, "disabled: original back");
+                skins::g_reload_at = 0;
+                skins::tick(local_s, players_s);
+                CHECK(sw(1)[0] == 70 && meta_of(1) == 0 && count() == 3, "disabled: all back (w%d m%d count %d)", sw(1)[0], meta_of(1), count());
             }
         }
 
