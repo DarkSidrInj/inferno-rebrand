@@ -342,7 +342,11 @@ namespace chams {
     // ---- targets ------------------------------------------------------------------------------
     enum Target { Enemy, Teammate, LocalBody, LocalArms, LocalWeapon, kTargets };
     inline const char* const kTargetNames[kTargets] = {"enemy", "teammate", "local body", "local arms", "local weapon"};
+    // Set by third person (CLocalView.hpp) while it hides the first-person arms and weapon.
+    inline bool g_tp_hides_first_person = false;
+
     inline bool target_on(Target t) {
+        if (g_tp_hides_first_person && (t == LocalArms || t == LocalWeapon)) return false;
         switch (t) {
             case Enemy: return cfg::chams::enemies;
             case Teammate: return cfg::chams::teammates;

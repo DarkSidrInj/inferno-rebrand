@@ -4,7 +4,13 @@
 // its shadow, is never drawn) and draws the first-person arms, gloves and weapon. Third person
 // swaps that: body ShadowCastingMode.On, arms / gloves / first-person weapon ShadowsOnly.
 //
-// Every change is the game's own Renderer.set_shadowCastingMode, replayed (CUtils/CArm64.hpp),
+// The first-person body is also hidden by its material (the reference third person of other
+// cheats draws it white: the flat material, id 0). So materials are swapped too, through the
+// m_Materials array chams resolves: body -> flat (or the chams material when chams draws the
+// local body), arms / gloves / weapon -> the body's original first-person material, which draws
+// nothing visible. Originals are kept per slot and put back when third person goes off.
+//
+// Every shadow mode change is the game's own Renderer.set_shadowCastingMode, replayed (CUtils/CArm64.hpp),
 // so whatever Unity updates behind the field (renderer scene flags, bitfields) is updated too.
 // The mode a renderer had is read by dry-running the setter for each mode: the mode whose writes
 // leave the renderer's bytes as they are is the current one. Switching off replays the setter
@@ -46,6 +52,49 @@ namespace localview {
     inline uint64_t g_weapon_owner = 0;
     inline bool g_active = false;
     inline uint64_t g_dumped_for = 0;
+
+    // Material swap, same bookkeeping as chams::Patched.
+    inline std::unordered_map<uint64_t, chams::Patched> g_materials;
+    inline int32_t g_hidden_id = 0;   // the body's own first-person material
+    inline bool g_have_hidden = false;
+    inline int g_logged_materials = -1;
+
+    inline bool patch_material(uint64_t r, int32_t want, std::unordered_map<uint64_t, bool>& seen) {
+        const int data_off = chams::g_data_offset.load(), size_off = chams::g_size_offset.load();
+        if (!plausible(r) || data_off < 0) return false;
+        const uint64_t array = rpm<uint64_t>(r + uint64_t(data_off));
+        const int count = size_off >= 0 ? rpm<int32_t>(r + uint64_t(size_off)) : 1;
+        if (!plausible(array) || count < 1 || count > chams::kMaxSlots) return false;
+        int32_t ids[chams::kMaxSlots]{};
+        if (!mem_read(array, ids, size_t(count) * 4)) return false;
+        seen[r] = true;
+        auto it = g_materials.find(r);
+        if (it != g_materials.end() && it->second.array != array) { g_materials.erase(it); it = g_materials.end(); }
+        if (it == g_materials.end()) {
+            chams::Patched fresh;
+            fresh.array = array;
+            fresh.original.assign(ids, ids + count);
+            it = g_materials.emplace(r, fresh).first;
+        }
+        it->second.written = want;
+        for (int i = 0; i < count && i < int(it->second.original.size()); ++i)
+            if (ids[i] != want) wpm<int32_t>(array + uint64_t(i) * 4, want);
+        return true;
+    }
+
+    inline void restore_materials() {
+        const int data_off = chams::g_data_offset.load();
+        for (const auto& e : g_materials) {
+            const chams::Patched& p = e.second;
+            if (data_off < 0 || rpm<uint64_t>(e.first + uint64_t(data_off)) != p.array) continue;
+            for (size_t i = 0; i < p.original.size(); ++i)
+                if (rpm<int32_t>(p.array + i * 4) == p.written) wpm<int32_t>(p.array + i * 4, p.original[i]);
+        }
+        if (!g_materials.empty()) diag::log("TP", "first-person materials restored on %zu renderers", g_materials.size());
+        g_materials.clear();
+        g_have_hidden = false;
+        g_logged_materials = -1;
+    }
 
     // Once per body: the hidden body renderer next to the visible arms renderer, and their
     // GameObjects (native Component +0x20). The bytes that differ show how the game hides the body.
@@ -160,6 +209,8 @@ namespace localview {
     }
 
     inline void restore_all() {
+        chams::g_tp_hides_first_person = false;
+        restore_materials();
         std::lock_guard<std::mutex> lock(g_mutex);
         int restored = 0;
         for (auto& e : g_touched) {
@@ -179,22 +230,55 @@ namespace localview {
             if (body) resolve(body);
         }
         dump_look(bindings);
-        if (!g_setter.load()) return;
         if (scan_weapons) {
             g_weapon_objects = chams::scan_weapons(bindings);
             g_weapon_owner = bindings;
             diag::log("TP", "first-person weapon: %zu weapon content objects", g_weapon_objects.size());
         }
-        std::unordered_map<uint64_t, bool> seen;
-        want(chams::native_of(rpm<uint64_t>(bindings + v100::bindings_character_renderer)), On, seen);
-        want(chams::native_of(rpm<uint64_t>(bindings + v100::bindings_arms_renderer)), ShadowsOnly, seen);
-        want(chams::native_of(rpm<uint64_t>(bindings + v100::bindings_gloves_renderer)), ShadowsOnly, seen);
+        const uint64_t body = chams::native_of(rpm<uint64_t>(bindings + v100::bindings_character_renderer));
+        std::vector<uint64_t> first_person;  // arms, gloves, first-person weapon
+        for (uint64_t field : {v100::bindings_arms_renderer, v100::bindings_gloves_renderer})
+            if (const uint64_t r = chams::native_of(rpm<uint64_t>(bindings + field))) first_person.push_back(r);
         for (uint64_t object : g_weapon_objects) {
             if (rpm<uint64_t>(object + chams::kWeaponBindings) != bindings) continue;  // freed or reused
-            std::vector<uint64_t> renderers;
-            chams::weapon_renderers(object, renderers);
-            for (uint64_t r : renderers) want(r, ShadowsOnly, seen);
+            chams::weapon_renderers(object, first_person);
         }
+        chams::g_tp_hides_first_person = true;  // chams leaves arms and weapon to us meanwhile
+
+        // Materials. The material array offset comes from chams; resolved here if chams never ran.
+        if (chams::g_data_offset.load() < 0 && body && !chams::g_resolving.exchange(true)) {
+            chams::resolve(body);
+            chams::g_resolving = false;
+        }
+        std::unordered_map<uint64_t, bool> seen_materials;
+        if (chams::g_data_offset.load() >= 0 && body) {
+            if (!g_have_hidden) {
+                const auto mine = g_materials.find(body);
+                const auto theirs = chams::g_patched.find(body);
+                const uint64_t array = rpm<uint64_t>(body + uint64_t(chams::g_data_offset.load()));
+                if (mine != g_materials.end() && !mine->second.original.empty()) g_hidden_id = mine->second.original[0];
+                else if (theirs != chams::g_patched.end() && !theirs->second.original.empty()) g_hidden_id = theirs->second.original[0];
+                else g_hidden_id = rpm<int32_t>(array);
+                g_have_hidden = plausible(array);
+            }
+            int done = 0;
+            if (!cfg::chams::enabled || !cfg::chams::local_body) done += patch_material(body, 0, seen_materials);
+            else seen_materials[body] = g_materials.count(body) > 0;  // chams draws the body
+            if (g_have_hidden)
+                for (uint64_t r : first_person) done += patch_material(r, g_hidden_id, seen_materials);
+            if (done != g_logged_materials) {
+                g_logged_materials = done;
+                diag::log("TP", "materials: body -> %s, %zu first-person renderers -> body's own material id %d (%d patched)",
+                          cfg::chams::enabled && cfg::chams::local_body ? "chams" : "flat (id 0)", first_person.size(), g_hidden_id, done);
+            }
+        }
+        for (auto it = g_materials.begin(); it != g_materials.end();)
+            it = seen_materials.count(it->first) ? std::next(it) : g_materials.erase(it);  // gone: the game made new ones
+
+        if (!g_setter.load()) return;
+        std::unordered_map<uint64_t, bool> seen;
+        want(body, On, seen);
+        for (uint64_t r : first_person) want(r, ShadowsOnly, seen);
         std::lock_guard<std::mutex> lock(g_mutex);
         for (auto it = g_touched.begin(); it != g_touched.end();)
             it = seen.count(it->first) ? std::next(it) : g_touched.erase(it);  // gone: the game made new ones
@@ -212,6 +296,8 @@ namespace localview {
             g_weapon_owner = 0;
             g_active = false;
             g_dumped_for = 0;
+            g_materials.clear();
+            g_have_hidden = false;
         }
         if (g_busy.load()) return;
         if (!active || !local || !cfg::thirdperson::show_body) {

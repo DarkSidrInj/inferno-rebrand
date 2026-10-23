@@ -738,8 +738,10 @@ int main() {
         {
             route(v100::renderer_set_shadow_casting_injected, base + fx::UnityEngine_Renderer__set_shadowCastingMode_Injected);
             *at(fx::slot_set_shadow_mode) = base + fx::Renderer_set_shadowCastingMode_Injected;
-            auto make_renderer = [&](int mode, uint8_t scene_index, uint8_t*& native_out) {
+            auto make_renderer = [&](int mode, uint8_t scene_index, int32_t* ids, int count, uint8_t*& native_out) {
                 uint8_t* native = static_cast<uint8_t*>(calloc(1, 0x200));
+                *reinterpret_cast<uint64_t*>(native + 0x118) = reinterpret_cast<uint64_t>(ids);  // m_Materials, as chams found it
+                *reinterpret_cast<uint64_t*>(native + 0x128) = uint64_t(count);
                 *reinterpret_cast<uint64_t*>(native) = reinterpret_cast<uint64_t>(native) + 0x1F0;  // a vtable pointer
                 native[0x108] = uint8_t(0x41 | (mode << 2));  // other bits set: the field is a bitfield
                 native[0x10C] = scene_index;
@@ -750,9 +752,10 @@ int main() {
             };
             uint8_t *body = nullptr, *arms = nullptr, *gloves = nullptr;
             uint8_t* bindings = static_cast<uint8_t*>(calloc(1, 0x80));
-            *reinterpret_cast<uint64_t*>(bindings + v100::bindings_character_renderer) = make_renderer(localview::ShadowsOnly, 1, body);
-            *reinterpret_cast<uint64_t*>(bindings + v100::bindings_arms_renderer) = make_renderer(localview::On, 2, arms);
-            *reinterpret_cast<uint64_t*>(bindings + v100::bindings_gloves_renderer) = make_renderer(localview::On, 3, gloves);
+            int32_t body_ids[2] = {-8000, -8001}, arms_ids[1] = {-8100}, gloves_ids[1] = {-8200};
+            *reinterpret_cast<uint64_t*>(bindings + v100::bindings_character_renderer) = make_renderer(localview::ShadowsOnly, 1, body_ids, 2, body);
+            *reinterpret_cast<uint64_t*>(bindings + v100::bindings_arms_renderer) = make_renderer(localview::On, 2, arms_ids, 1, arms);
+            *reinterpret_cast<uint64_t*>(bindings + v100::bindings_gloves_renderer) = make_renderer(localview::On, 3, gloves_ids, 1, gloves);
 
             auto* aa_entries = static_cast<player::TransformEntry*>(calloc(8, sizeof(player::TransformEntry)));
             auto* aa_parents = static_cast<int*>(calloc(8, sizeof(int)));
@@ -797,12 +800,16 @@ int main() {
             CHECK(mode_of(body) == localview::On && mode_of(arms) == localview::ShadowsOnly && mode_of(gloves) == localview::ShadowsOnly,
                   "third-person look: body %d arms %d gloves %d", mode_of(body), mode_of(arms), mode_of(gloves));
             CHECK((body[0x108] & 0x41) == 0x41 && scene[1] == body[0x108] && scene[2] == arms[0x108], "bitfield kept, scene updated");
+            CHECK(body_ids[0] == 0 && body_ids[1] == 0 && arms_ids[0] == -8000 && gloves_ids[0] == -8000,
+                  "materials: body %d %d, arms %d, gloves %d", body_ids[0], body_ids[1], arms_ids[0], gloves_ids[0]);
             localview::g_last_pass = 0;
             localview::tick(me, false);
             localview::wait();
             CHECK(mode_of(body) == localview::ShadowsOnly && mode_of(arms) == localview::On && mode_of(gloves) == localview::On,
                   "first-person look restored: body %d arms %d gloves %d", mode_of(body), mode_of(arms), mode_of(gloves));
             CHECK(scene[1] == body[0x108] && scene[3] == gloves[0x108], "scene restored with the setter");
+            CHECK(body_ids[0] == -8000 && body_ids[1] == -8001 && arms_ids[0] == -8100 && gloves_ids[0] == -8200,
+                  "materials restored: body %d %d, arms %d, gloves %d", body_ids[0], body_ids[1], arms_ids[0], gloves_ids[0]);
 
             // Anti-aim turns only the model root.
             skeleton::g_index_pid = -1;
