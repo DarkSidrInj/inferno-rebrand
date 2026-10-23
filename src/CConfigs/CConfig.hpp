@@ -45,14 +45,13 @@ namespace thirdperson {
     inline float distance = 2.5f;   // meters behind the eye
     inline float height = 0.3f;     // meters above the eye
     inline float side = 0.f;        // meters to the right (negative: left shoulder)
-    inline bool show_body = true;   // render every layer, so the own body hidden from first person shows
+    inline bool show_body = true;   // draw the own body, hide first-person arms, gloves and weapon
 }
 
 namespace antiaim {
     inline bool enabled = false;
     inline int yaw_mode = 1;        // 0 legacy (degenerate quaternions), 1 spin, 2 jitter, 3 backwards, 4 none
     inline int pitch_mode = 0;      // 0 none, 1 down, 2 up
-    inline int target = 0;          // 0 both pivots, 1 ios+0x50, 2 ios+0x58
     inline float spin_speed = 720.f;  // degrees per second
     inline float jitter = 90.f;       // degrees each side
 }

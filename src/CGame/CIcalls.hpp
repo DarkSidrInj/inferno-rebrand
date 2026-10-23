@@ -45,6 +45,7 @@ namespace icalls {
         "UnityEngine.Canvas::GetDefaultCanvasMaterial_Injected",
         "UnityEngine.Camera::set_worldToCameraMatrix_Injected", "UnityEngine.Camera::get_worldToCameraMatrix_Injected",
         "UnityEngine.Camera::get_cullingMask_Injected", "UnityEngine.Camera::set_cullingMask_Injected",
+        "UnityEngine.Renderer::set_shadowCastingMode_Injected", "UnityEngine.Renderer::get_enabled_Injected",
     };
     inline const char* const kPrefixes[] = {"UnityEngine.RenderSettings::", "UnityEngine.Animator::", "UnityEngine.Renderer::",
                                            "UnityEngine.Canvas::", "UnityEngine.Camera::"};

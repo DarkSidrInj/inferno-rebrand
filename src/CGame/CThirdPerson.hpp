@@ -13,6 +13,8 @@
 // Either way the result is checked live: once taken over, the matrix must stay what was written.
 // If the game overwrites it, the flag is put back and third person reports itself unavailable.
 //
+// The own body / first-person arms swap is CLocalView.hpp.
+//
 // The eye pose comes from the game's own camera pose (GameCamera holder: nrl.irub transform, or
 // the ckk pose it follows), chosen by matching the live matrix before taking over.
 
@@ -54,8 +56,6 @@ namespace thirdperson {
     inline int g_overwrites = 0;
     inline bool g_verified = false;
     inline uint8_t g_flag_before = 1;
-    inline uint32_t g_mask_before = 0;
-    inline bool g_mask_set = false;
     inline long long g_calib_log = 0;
 
     inline float diff(const matrix& a, const matrix& b) {
@@ -206,7 +206,7 @@ namespace thirdperson {
         if (g_flag_offset.load() < 0)
             diag::log("WARN", "TP implicit-matrix flag not found (%s%s)", why.empty() ? "no accessor traced" : "last: ", why.c_str());
 
-        // Culling mask, so the own body (hidden from the first-person camera) can be shown.
+        // Culling mask: logged only (the own body is hidden by its shadow casting mode, see CLocalView.hpp).
         struct Try { const char* how; uint64_t fn; bool setter; };
         std::vector<Try> tries;
         const uint64_t get_w = proc::lib + v100::camera_get_culling_mask_injected, set_w = proc::lib + v100::camera_set_culling_mask_injected;
@@ -222,7 +222,7 @@ namespace thirdperson {
             diag::log("TP", "culling mask at +0x%x (%s, now 0x%08x)", off, t.how, rpm<uint32_t>(camera + uint64_t(off)));
             break;
         }
-        if (g_mask_offset.load() < 0) diag::log("TP", "culling mask not found: own body stays as the game hides it");
+        if (g_mask_offset.load() < 0) diag::log("TP", "culling mask not found (diagnostic only)");
         g_resolved = true;
     }
 
@@ -231,12 +231,9 @@ namespace thirdperson {
             matrix v{}, p{};
             if (g_flag_offset.load() >= 0 && validate_camera(g_camera, v, p, false))
                 wpm<uint8_t>(g_camera + uint64_t(g_flag_offset.load()), g_flag_before ? g_flag_before : 1);
-            if (g_mask_set && g_mask_offset.load() >= 0 && validate_camera(g_camera, v, p, false))
-                wpm<uint32_t>(g_camera + uint64_t(g_mask_offset.load()), g_mask_before);
             diag::log("TP", "camera 0x%llx given back", (unsigned long long)g_camera);
         }
         g_camera = 0;
-        g_mask_set = false;
         g_have_written = false;
     }
 
@@ -248,7 +245,6 @@ namespace thirdperson {
         g_last_resolve = 0;
         g_camera = 0;
         g_source = None;
-        g_mask_set = false;
         g_have_written = false;
     }
 
@@ -311,16 +307,6 @@ namespace thirdperson {
         g_written = view;
         g_have_written = true;
 
-        const int mask = g_mask_offset.load();
-        if (mask >= 0 && cfg::thirdperson::show_body && !g_mask_set) {
-            g_mask_before = rpm<uint32_t>(camera + uint64_t(mask));
-            g_mask_set = true;
-            diag::log("TP", "culling mask 0x%08x -> 0xffffffff", g_mask_before);
-        }
-        if (mask >= 0 && g_mask_set) {
-            if (cfg::thirdperson::show_body) wpm<uint32_t>(camera + uint64_t(mask), 0xFFFFFFFFu);
-            else { wpm<uint32_t>(camera + uint64_t(mask), g_mask_before); g_mask_set = false; }
-        }
         out = view;
         return true;
     }

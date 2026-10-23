@@ -7,6 +7,7 @@
 #include "../CGame/CChams.hpp"
 #include "../CGame/CThirdPerson.hpp"
 #include "../CGame/CAntiAim.hpp"
+#include "../CGame/CLocalView.hpp"
 #include "../CMenu/Theme/CTheme.hpp"
 #include "../CConfigs/CConfig.hpp"
 #include "../CProtection/COxorany.hpp"
@@ -30,6 +31,7 @@ void visuals::draw() {
         chams::tick({}, 0, 0);
         matrix unused{};
         thirdperson::tick(nullptr, unused);
+        localview::tick(0, false);
         antiaim::tick(0, {});
         esp_wait("all ESP options disabled");
         return;
@@ -38,8 +40,13 @@ void visuals::draw() {
     // Any path that ends the frame without the game camera gives it back to the game, so a
     // third-person matrix never stays frozen on screen.
     struct ThirdPersonGuard {
-        bool ticked = false;
-        ~ThirdPersonGuard() { if (!ticked) { matrix unused{}; thirdperson::tick(nullptr, unused); } }
+        bool ticked = false, active = false;
+        ~ThirdPersonGuard() {
+            if (ticked) return;
+            matrix unused{};
+            thirdperson::tick(nullptr, unused);
+            localview::tick(0, false);
+        }
     } tp_guard;
     std::vector<uint64_t> Players = players();
     if (Players.empty()) { antiaim::tick(0, {}); esp_wait("player discovery / registry scan"); return; }
@@ -121,8 +128,9 @@ void visuals::draw() {
         ViewMatrix = GameCamera.view;
         ProjectionMatrix = GameCamera.projection;
         // Third person owns the camera's matrix: draw with the one written this frame.
-        thirdperson::tick(&GameCamera, ViewMatrix);
+        tp_guard.active = thirdperson::tick(&GameCamera, ViewMatrix);
         tp_guard.ticked = true;
+        localview::tick(LocalPlayer, tp_guard.active);
         if (g_camera != GameCamera.native)
             diag::log("CAMERA", "selected game camera native=0x%llx holder=0x%llx", (unsigned long long)GameCamera.native,
                       (unsigned long long)GameCamera.holder);
@@ -275,8 +283,13 @@ void visuals::draw() {
     std::vector<uint64_t> enemy_objects;
     enemy_objects.reserve(frame_enemies.size());
     for (const auto& Enemy : frame_enemies) enemy_objects.push_back(Enemy.object);
+    // Animators kept running while culled: enemies for the skeleton behind walls, the own body
+    // in third person (it is never on screen in first person, so the game stops animating it).
+    std::vector<uint64_t> animate;
+    if (cfg::esp::skeleton && cfg::esp::skeleton_occlusion) animate = enemy_objects;
+    if (tp_guard.active) animate.push_back(LocalPlayer);
+    animcull::tick(animate, !animate.empty());
     if (cfg::esp::skeleton) draw_skeletons(ViewMatrix, ProjectionMatrix, enemy_objects);
-    else animcull::tick({}, false);  // skeleton off: give the animators their culling back
     draw_world_items(ViewMatrix, ProjectionMatrix, LocalPosition);
 
     static long long frame_log = 0;

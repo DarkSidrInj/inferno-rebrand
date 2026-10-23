@@ -198,3 +198,20 @@ void UnityEngine_Camera__get_worldToCameraMatrix_Injected(void* self, Matrix4* r
 int UnityEngine_Camera__get_cullingMask_Injected(void* self, const void* method) {
     RESOLVE(slot_get_culling_mask, f_get_mask, "UnityEngine.Camera::get_cullingMask_Injected(System.IntPtr)"); return f((Camera*)self);
 }
+
+// Renderer shadow casting mode: a 2-bit field in a flags byte, mirrored into the renderer scene.
+unsigned char g_scene_flags[64];
+void Renderer_set_shadowCastingMode_Injected(void* self, int mode) {
+    CHECK_THREAD("set_shadowCastingMode");
+    unsigned char* r = (unsigned char*)self;
+    unsigned char flags = r[0x108];
+    if (((flags >> 2) & 3) == mode) return;
+    flags = (unsigned char)((flags & ~0xC) | ((mode & 3) << 2));
+    r[0x108] = flags;
+    g_scene_flags[r[0x10C] & 63] = flags;
+}
+typedef void (*f_set_shadow)(void*, int);
+f_set_shadow slot_set_shadow_mode;
+void UnityEngine_Renderer__set_shadowCastingMode_Injected(void* self, int mode, const void* method) {
+    RESOLVE(slot_set_shadow_mode, f_set_shadow, "UnityEngine.Renderer::set_shadowCastingMode_Injected(System.IntPtr,UnityEngine.Rendering.ShadowCastingMode)"); f(self, mode);
+}

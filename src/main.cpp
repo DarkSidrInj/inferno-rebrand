@@ -7,6 +7,7 @@
 #include "CGame/CFog.hpp"
 #include "CGame/CThirdPerson.hpp"
 #include "CGame/CAntiAim.hpp"
+#include "CGame/CLocalView.hpp"
 #include "CVisual/CVisualManager.hpp"
 #include "CProtection/COxorany.hpp"
 #include <cstdio>
@@ -135,6 +136,8 @@ int main() {
 
     // Never leave the game with a frozen camera matrix or rotated pivots.
     thirdperson::release();
+    localview::wait();
+    localview::restore_all();
     antiaim::release();
     shutdown();
     return 0;

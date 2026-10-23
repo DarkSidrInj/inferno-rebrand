@@ -11,6 +11,7 @@
 #include "CGame/CChams.hpp"
 #include "CGame/CThirdPerson.hpp"
 #include "CGame/CAntiAim.hpp"
+#include "CGame/CLocalView.hpp"
 #include "fixtures/rs_accessors.h"
 #include "CConfigs/CConfig.hpp"
 #include <sys/mman.h>
@@ -697,16 +698,15 @@ int main() {
             matrix written{};
             std::memcpy(&written, cam + 0x70, sizeof(written));
             CHECK(thirdperson::diff(out, expected) < 1e-5f && thirdperson::diff(written, expected) < 1e-5f, "third-person matrix written");
-            uint32_t mask = 0;
-            std::memcpy(&mask, cam + 0x220, 4);
-            CHECK(cam[0x240] == 0 && mask == 0xFFFFFFFFu, "flag off (%u), every layer (0x%08x)", cam[0x240], mask);
+            CHECK(cam[0x240] == 0, "flag off (%u)", cam[0x240]);
             thirdperson::g_taken_at -= 1000;
             thirdperson::tick(&reading, out);
             CHECK(thirdperson::g_verified && !thirdperson::g_failed, "the matrix held");
             cfg::thirdperson::enabled = false;
             thirdperson::tick(&reading, out);
+            uint32_t mask = 0;
             std::memcpy(&mask, cam + 0x220, 4);
-            CHECK(cam[0x240] == 1 && mask == mask0, "camera given back: flag %u mask 0x%08x", cam[0x240], mask);
+            CHECK(cam[0x240] == 1 && mask == mask0, "camera given back: flag %u, mask untouched 0x%08x", cam[0x240], mask);
 
             // No setter: the getter's flag check gives the flag.
             {
@@ -733,8 +733,27 @@ int main() {
             cfg::thirdperson::enabled = false;
         }
 
-        // Anti-aim: pivots of the local ios, rotation written into their local transform entry.
+        // Third person look and anti-aim on one local player: body / arms / gloves renderers and the
+        // model root transform.
         {
+            route(v100::renderer_set_shadow_casting_injected, base + fx::UnityEngine_Renderer__set_shadowCastingMode_Injected);
+            *at(fx::slot_set_shadow_mode) = base + fx::Renderer_set_shadowCastingMode_Injected;
+            auto make_renderer = [&](int mode, uint8_t scene_index, uint8_t*& native_out) {
+                uint8_t* native = static_cast<uint8_t*>(calloc(1, 0x200));
+                *reinterpret_cast<uint64_t*>(native) = reinterpret_cast<uint64_t>(native) + 0x1F0;  // a vtable pointer
+                native[0x108] = uint8_t(0x41 | (mode << 2));  // other bits set: the field is a bitfield
+                native[0x10C] = scene_index;
+                uint8_t* managed = static_cast<uint8_t*>(calloc(1, 0x40));
+                *reinterpret_cast<uint64_t*>(managed + v100::unity_cached_ptr) = reinterpret_cast<uint64_t>(native);
+                native_out = native;
+                return reinterpret_cast<uint64_t>(managed);
+            };
+            uint8_t *body = nullptr, *arms = nullptr, *gloves = nullptr;
+            uint8_t* bindings = static_cast<uint8_t*>(calloc(1, 0x80));
+            *reinterpret_cast<uint64_t*>(bindings + v100::bindings_character_renderer) = make_renderer(localview::ShadowsOnly, 1, body);
+            *reinterpret_cast<uint64_t*>(bindings + v100::bindings_arms_renderer) = make_renderer(localview::On, 2, arms);
+            *reinterpret_cast<uint64_t*>(bindings + v100::bindings_gloves_renderer) = make_renderer(localview::On, 3, gloves);
+
             auto* aa_entries = static_cast<player::TransformEntry*>(calloc(8, sizeof(player::TransformEntry)));
             auto* aa_parents = static_cast<int*>(calloc(8, sizeof(int)));
             for (int i = 0; i < 8; ++i) {
@@ -747,45 +766,63 @@ int main() {
             *reinterpret_cast<uint64_t*>(data + 0x18) = reinterpret_cast<uint64_t>(aa_entries);
             *reinterpret_cast<uint64_t*>(data + 0x20) = reinterpret_cast<uint64_t>(aa_parents);
             player::g_transform_layout = {0x38, 0x40, 0x18, 0x20, proc::pid};
-            auto make_pivot = [&](int index) {
-                uint8_t* native = static_cast<uint8_t*>(calloc(1, 0x80));
-                *reinterpret_cast<uint64_t*>(native + 0x38) = reinterpret_cast<uint64_t>(data);
-                std::memcpy(native + 0x30, &index, 4);
-                const int wrong = 7;  // the layout's +0x40 points elsewhere
-                std::memcpy(native + 0x40, &wrong, 4);
-                uint8_t* managed = static_cast<uint8_t*>(calloc(1, 0x40));
-                *reinterpret_cast<uint64_t*>(managed + v100::unity_cached_ptr) = reinterpret_cast<uint64_t>(native);
-                return reinterpret_cast<uint64_t>(managed);
-            };
-            uint8_t* ios = static_cast<uint8_t*>(calloc(1, 0x80));
-            *reinterpret_cast<uint64_t*>(ios) = rpm<uint64_t>(proc::lib + v100::ios_typeinfo);
-            *reinterpret_cast<uint64_t*>(ios + v100::ios_pivot_a) = make_pivot(1);
-            *reinterpret_cast<uint64_t*>(ios + v100::ios_pivot_b) = make_pivot(2);
-            uint8_t* comps = static_cast<uint8_t*>(calloc(1, 0x30));
-            *reinterpret_cast<uint64_t*>(comps + v100::array_length) = 1;
-            *reinterpret_cast<uint64_t*>(comps + v100::array_data) = reinterpret_cast<uint64_t>(ios);
-            uint8_t* container = static_cast<uint8_t*>(calloc(1, 0x40));
-            *reinterpret_cast<uint64_t*>(container + 0x10) = reinterpret_cast<uint64_t>(comps);
-            uint8_t* me = static_cast<uint8_t*>(calloc(1, 0x100));
-            *reinterpret_cast<uint64_t*>(me + 0x20) = reinterpret_cast<uint64_t>(container);
+            uint8_t* tnative = static_cast<uint8_t*>(calloc(1, 0x80));
+            *reinterpret_cast<uint64_t*>(tnative + 0x38) = reinterpret_cast<uint64_t>(data);
+            const int model_index = 1, wrong = 7;  // the layout's +0x40 points elsewhere
+            std::memcpy(tnative + 0x30, &model_index, 4);
+            std::memcpy(tnative + 0x40, &wrong, 4);
+            uint8_t* tmanaged = static_cast<uint8_t*>(calloc(1, 0x40));
+            *reinterpret_cast<uint64_t*>(tmanaged + v100::unity_cached_ptr) = reinterpret_cast<uint64_t>(tnative);
+
+            uint8_t* model = static_cast<uint8_t*>(calloc(1, 0x80));
+            *reinterpret_cast<uint64_t*>(model) = rpm<uint64_t>(proc::lib + v100::model_typeinfo);
+            *reinterpret_cast<uint64_t*>(model + v100::model_bindings) = reinterpret_cast<uint64_t>(bindings);
+            *reinterpret_cast<uint64_t*>(model + v100::model_transform) = reinterpret_cast<uint64_t>(tmanaged);
+            uint8_t* array = static_cast<uint8_t*>(calloc(1, 0x30));
+            *reinterpret_cast<uint64_t*>(array + v100::array_length) = 1;
+            *reinterpret_cast<uint64_t*>(array + v100::array_data) = reinterpret_cast<uint64_t>(model);
+            uint8_t* wmz = static_cast<uint8_t*>(calloc(1, 0x100));
+            *reinterpret_cast<uint64_t*>(wmz + v100::wmz_first_array) = reinterpret_cast<uint64_t>(array);
+            uint8_t* net = static_cast<uint8_t*>(calloc(1, 0x200));
+            *reinterpret_cast<uint64_t*>(net + v100::net_systems) = reinterpret_cast<uint64_t>(wmz);
+            const uint64_t me = reinterpret_cast<uint64_t>(net);
+            auto mode_of = [](const uint8_t* r) { return (r[0x108] >> 2) & 3; };
+            const uint8_t* scene = reinterpret_cast<const uint8_t*>(base + fx::g_scene_flags);
+
+            cfg::thirdperson::show_body = true;
+            localview::g_pid = -1;
+            localview::tick(me, true);
+            localview::wait();
+            CHECK(localview::g_setter.load() != 0, "shadow casting setter found");
+            CHECK(mode_of(body) == localview::On && mode_of(arms) == localview::ShadowsOnly && mode_of(gloves) == localview::ShadowsOnly,
+                  "third-person look: body %d arms %d gloves %d", mode_of(body), mode_of(arms), mode_of(gloves));
+            CHECK((body[0x108] & 0x41) == 0x41 && scene[1] == body[0x108] && scene[2] == arms[0x108], "bitfield kept, scene updated");
+            localview::g_last_pass = 0;
+            localview::tick(me, false);
+            localview::wait();
+            CHECK(mode_of(body) == localview::ShadowsOnly && mode_of(arms) == localview::On && mode_of(gloves) == localview::On,
+                  "first-person look restored: body %d arms %d gloves %d", mode_of(body), mode_of(arms), mode_of(gloves));
+            CHECK(scene[1] == body[0x108] && scene[3] == gloves[0x108], "scene restored with the setter");
+
+            // Anti-aim turns only the model root.
             skeleton::g_index_pid = -1;
-            cfg::antiaim::enabled = true; cfg::antiaim::yaw_mode = 3; cfg::antiaim::pitch_mode = 0; cfg::antiaim::target = 0;
+            cfg::antiaim::enabled = true; cfg::antiaim::yaw_mode = 3; cfg::antiaim::pitch_mode = 0;
             antiaim::g_pid = -1;
-            const uint64_t local_aa = reinterpret_cast<uint64_t>(me);
-            antiaim::tick(local_aa, Vector3(0.f, 0.f, 0.f));
-            CHECK(antiaim::g_pivots[0].index_offset == 0x30 && antiaim::g_pivots[1].index_offset == 0x30,
-                  "pivot index offsets +0x%x +0x%x", antiaim::g_pivots[0].index_offset, antiaim::g_pivots[1].index_offset);
+            const Vector3 feet(0.f, 0.f, 0.f);
+            antiaim::tick(me, feet);
+            CHECK(antiaim::g_model.index_offset == 0x30, "model index offset +0x%x", antiaim::g_model.index_offset);
             auto yaw180 = [](const Vector4& q) { return std::fabs(q.y) > .999f && std::fabs(q.w) < 1e-3f; };
-            CHECK(yaw180(aa_entries[1].rotation) && yaw180(aa_entries[2].rotation), "backwards written");
-            CHECK(aa_entries[0].rotation.w == 1.f && aa_entries[3].rotation.w == 1.f, "other entries untouched");
-            antiaim::tick(local_aa, Vector3(0.f, 0.f, 0.f));  // the game left the pivots alone: no compounding
-            CHECK(yaw180(aa_entries[1].rotation) && antiaim::g_pivots[0].held == 1, "held without compounding");
-            aa_entries[2].rotation = Vector4(0.f, 0.f, 0.f, 1.f);  // the game re-posed the second pivot
-            antiaim::tick(local_aa, Vector3(0.f, 0.f, 0.f));
-            CHECK(yaw180(aa_entries[2].rotation) && antiaim::g_pivots[1].rewritten == 1, "re-applied on top of the game's pose");
+            CHECK(yaw180(aa_entries[1].rotation), "backwards written");
+            CHECK(aa_entries[0].rotation.w == 1.f && aa_entries[2].rotation.w == 1.f, "other entries untouched");
+            antiaim::tick(me, feet);  // the game left the model alone: no compounding
+            CHECK(yaw180(aa_entries[1].rotation) && antiaim::g_model.held == 1, "held without compounding");
+            aa_entries[1].rotation = Vector4(0.f, 0.f, 0.f, 1.f);  // the game re-posed the model
+            antiaim::tick(me, feet);
+            CHECK(yaw180(aa_entries[1].rotation) && antiaim::g_model.rewritten == 1, "re-applied on top of the game's pose");
+            antiaim::tick(me, feet);
             cfg::antiaim::enabled = false;
-            antiaim::tick(local_aa, Vector3(0.f, 0.f, 0.f));
-            CHECK(aa_entries[1].rotation.w == 1.f, "held pivot restored on disable (%.3f)", aa_entries[1].rotation.w);
+            antiaim::tick(me, feet);
+            CHECK(aa_entries[1].rotation.w == 1.f, "model restored on disable (%.3f)", aa_entries[1].rotation.w);
         }
 
         // Every slot empty: no trace may invent an address, and the code dump must run.

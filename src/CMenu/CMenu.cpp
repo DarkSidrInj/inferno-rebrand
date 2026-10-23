@@ -131,15 +131,13 @@ namespace ui::menu {
         slider("Camera height", &cfg::thirdperson::height, -1.f, 2.f, a, "%.1f m");
         slider("Camera side", &cfg::thirdperson::side, -2.f, 2.f, a, "%.1f m");
         separator(a);
-        checkbox("Show own body", &cfg::thirdperson::show_body, a);
+        checkbox("Show own body, hide first-person arms", &cfg::thirdperson::show_body, a);
         separator(a);
         checkbox("Anti-aim", &cfg::antiaim::enabled, a);
         separator(a);
         combo("Yaw", &cfg::antiaim::yaw_mode, {"Legacy", "Spin", "Jitter", "Backwards", "None"}, a);
         separator(a);
         combo("Pitch", &cfg::antiaim::pitch_mode, {"None", "Down", "Up"}, a);
-        separator(a);
-        combo("Pivot", &cfg::antiaim::target, {"Both", "First (+0x50)", "Second (+0x58)"}, a);
         separator(a);
         slider("Spin speed", &cfg::antiaim::spin_speed, 90.f, 2000.f, a, "%.0f deg/s");
         slider("Jitter range", &cfg::antiaim::jitter, 10.f, 180.f, a, "%.0f deg");
