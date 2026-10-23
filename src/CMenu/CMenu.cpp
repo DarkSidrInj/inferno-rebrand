@@ -5,6 +5,7 @@
 #include "Theme/CTheme.hpp"
 #include "Widgets/CWidgets.hpp"
 #include "../CGame/CSkins.hpp"
+#include "../CGame/CFog.hpp"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "Android_draw/draw.h"
@@ -38,7 +39,7 @@ namespace ui::menu {
     static const char* tabs[] = {"Visuals", "Settings"};
     static constexpr int tc = sizeof(tabs) / sizeof(tabs[0]);
 
-    static const char* vstabs[] = {"ESP", "Skins", "Misc"};
+    static const char* vstabs[] = {"ESP", "Skins", "World", "Misc"};
     static constexpr int vstc = sizeof(vstabs) / sizeof(vstabs[0]);
 
     static float lrp(float a, float b, float t) { return a + (b - a) * t; }
@@ -58,6 +59,10 @@ namespace ui::menu {
         checkbox("Name", &cfg::esp::name, a);
         separator(a);
         checkbox("Health bar", &cfg::esp::health, a);
+        separator(a);
+        checkbox("Armor bar", &cfg::esp::armor, a);
+        separator(a);
+        checkbox("Helmet mark", &cfg::esp::helmet, a);
         separator(a);
         checkbox("Distance", &cfg::esp::distance, a);
         separator(a);
@@ -100,6 +105,10 @@ namespace ui::menu {
         separator(a);
         colorpick("Health color", &cfg::esp::health_col, a);
         separator(a);
+        colorpick("Armor color", &cfg::esp::armor_col, a);
+        separator(a);
+        colorpick("Helmet color", &cfg::esp::helmet_col, a);
+        separator(a);
         colorpick("Distance color", &cfg::esp::distance_col, a);
         separator(a);
         slider("Skeleton width", &cfg::esp::skeleton_thickness, 1.f, 4.f, a, "%.1f");
@@ -141,7 +150,30 @@ namespace ui::menu {
         button("Reset all skins", a, [] { for (int& id : cfg::skins::chosen) id = 0; });
     }
 
+    static void world_tab(float a) {
+        checkbox("Night mode", &cfg::night::enabled, a);
+        separator(a);
+        slider("Night strength", &cfg::night::strength, 0.f, 1.f, a, "%.2f");
+        separator(a);
+        checkbox("Fog", &cfg::fog::enabled, a);
+        separator(a);
+        checkbox("Auto fog color", &cfg::fog::auto_color, a);
+        separator(a);
+        slider("Fog min distance", &cfg::fog::min_distance, 0.f, 200.f, a, "%.0f m");
+        slider("Fog max distance", &cfg::fog::max_distance, 10.f, 400.f, a, "%.0f m");
+        separator(a);
+        colorpick("Fog color", &cfg::fog::color, a);
+        separator(a);
+        button("Rescan world", a, [] { worldfog::rescan(); });
+    }
+
     static void misc_tab(float a) {
+        checkbox("Auto strafe", &cfg::strafe::enabled, a);
+        separator(a);
+        slider("Strafe turn per step", &cfg::strafe::turn, 0.5f, 15.f, a, "%.1f deg");
+        slider("Strafe extra speed", &cfg::strafe::gain, 0.f, 3.f, a, "%.1f %%");
+        slider("Strafe min speed", &cfg::strafe::min_speed, 0.f, 10.f, a, "%.1f m/s");
+        separator(a);
         checkbox("Anti-aim", &cfg::antiaim::enabled, a);
         separator(a);
         combo("Yaw", &cfg::antiaim::yaw_mode, {"Legacy", "Spin", "Jitter", "Backwards", "None"}, a);
@@ -156,7 +188,8 @@ namespace ui::menu {
         switch (stab) {
             case 0: esp_tab(a); break;
             case 1: skins_tab(a); break;
-            case 2: misc_tab(a); break;
+            case 2: world_tab(a); break;
+            case 3: misc_tab(a); break;
         }
     }
 

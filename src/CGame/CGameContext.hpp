@@ -65,6 +65,9 @@ namespace v100 {
     inline constexpr uint64_t player_team = 0x90;
     inline constexpr uint64_t stats_hp = 0x10;
     inline constexpr uint64_t stats_max_hp = 0x14;
+    inline constexpr uint64_t stats_armor = 0x16;       // ylw.<edyw> ushort
+    inline constexpr uint64_t stats_max_armor = 0x1A;   // ylw.<cqqi> ushort
+    inline constexpr uint64_t stats_helmet = 0x1C;      // ylw.<bwzb> bool
     inline constexpr uint64_t parts_list = 0x10;
     inline constexpr uint64_t transform_a = 0x28;
     inline constexpr uint64_t transform_b = 0x30;

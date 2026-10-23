@@ -8,6 +8,7 @@
 #include "CGame/CThirdPerson.hpp"
 #include "CGame/CAntiAim.hpp"
 #include "CGame/CSkins.hpp"
+#include "CConfigs/CConfig.hpp"
 #include "CGame/CLocalView.hpp"
 #include "CVisual/CVisualManager.hpp"
 #include "CProtection/COxorany.hpp"
@@ -144,6 +145,10 @@ int main() {
     localview::restore_all();
     antiaim::release();
     skins::restore();
+    cfg::fog::enabled = false;      // the map's own fog and light go back
+    cfg::night::enabled = false;
+    worldfog::tick();
+    worldfog::wait();
     chams::occlusion_tick(0);
     shutdown();
     return 0;

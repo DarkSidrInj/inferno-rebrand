@@ -7,6 +7,8 @@ namespace esp {
     inline bool box = true;
     inline bool name = false;
     inline bool health = true;
+    inline bool armor = false;        // armor bar on the right of the box
+    inline bool helmet = false;       // "H" mark when the player wears a helmet
     inline bool distance = false;
     inline int box_type = 0;
     inline float fallback_fov = 60.f;  // vertical FOV of the synthetic camera (only when the game Camera is not found)
@@ -14,6 +16,8 @@ namespace esp {
     inline ImVec4 box_col = ImVec4(162/255.f, 144/255.f, 225/255.f, 1.f);
     inline ImVec4 name_col = ImVec4(1.f, 1.f, 1.f, 1.f);
     inline ImVec4 health_col = ImVec4(162/255.f, 144/255.f, 225/255.f, 1.f);
+    inline ImVec4 armor_col = ImVec4(90/255.f, 170/255.f, 255/255.f, 1.f);
+    inline ImVec4 helmet_col = ImVec4(255/255.f, 210/255.f, 90/255.f, 1.f);
     inline ImVec4 distance_col = ImVec4(162/255.f, 144/255.f, 225/255.f, 1.f);
 
     inline bool skeleton = false;
@@ -88,6 +92,17 @@ namespace fog {
     inline ImVec4 color = ImVec4(0.12f, 0.13f, 0.16f, 1.f);  // manual color (auto_color off)
 }
 
+
+namespace night {
+    inline bool enabled = false;
+    inline float strength = 0.8f;   // 0 = the map's own light, 1 = darkest
 }
 
-
+namespace strafe {
+    inline bool enabled = false;
+    inline float turn = 4.f;        // degrees the horizontal velocity may turn per frame
+    inline float gain = 0.f;        // extra speed per frame in percent (0: direction only)
+    inline float min_speed = 2.f;   // m/s: below this nothing is touched
+    inline bool log = true;         // calibration lines in the log
+}
+}

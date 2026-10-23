@@ -8,6 +8,7 @@
 #include "../CGame/CThirdPerson.hpp"
 #include "../CGame/CAntiAim.hpp"
 #include "../CGame/CSkins.hpp"
+#include "../CGame/CStrafe.hpp"
 #include "../CGame/CLocalView.hpp"
 #include "../CMenu/Theme/CTheme.hpp"
 #include "../CConfigs/CConfig.hpp"
@@ -28,7 +29,7 @@ void visuals::draw() {
     bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health || cfg::esp::distance ||
                cfg::esp::skeleton || cfg::esp::grenade || cfg::esp::dropped || cfg::chams::enabled ||
                cfg::chams::overlay || cfg::thirdperson::enabled || cfg::antiaim::enabled ||
-               cfg::skins::enabled;
+               cfg::skins::enabled || cfg::esp::armor || cfg::esp::helmet || cfg::strafe::enabled;
     if (!any) {
         chams::tick({}, 0, 0);
         chams::occlusion_tick(0);
@@ -39,6 +40,7 @@ void visuals::draw() {
         localview::tick(0, false);
         antiaim::tick(0, {});
         skins::tick(0, {});
+        strafe::tick(0, Vector3{}, nullptr);
         esp_wait("all ESP options disabled");
         return;
     }
@@ -117,6 +119,7 @@ void visuals::draw() {
         Vector3 position{};
         int health{};
         float distance{};
+        player::Armor armor{};
     };
     std::vector<enemy_frame> frame_enemies;
     for (uint64_t Player : Players) {
@@ -136,7 +139,9 @@ void visuals::draw() {
         float Distance = calculate_distance(PlayerPosition, LocalPosition);
         if (Distance > 500.f) continue;
 
-        frame_enemies.push_back({Player, PlayerPosition, Health, Distance});
+        player::Armor Armor;
+        if (cfg::esp::armor || cfg::esp::helmet) Armor = player::armor(Player);
+        frame_enemies.push_back({Player, PlayerPosition, Health, Distance, Armor});
     }
 
     // The game's own camera (GameCamera holder -> UnityEngine.Camera -> native Camera) carries
@@ -255,6 +260,8 @@ void visuals::draw() {
 
     }
 
+    strafe::tick(LocalPlayer, LocalPosition, &ViewMatrix);
+
     for (const auto& Enemy : frame_enemies) {
         const uint64_t Player = Enemy.object;
         const Vector3 PlayerPosition = Enemy.position;
@@ -290,6 +297,11 @@ void visuals::draw() {
 
         if (cfg::esp::health) {
             dhp(Health, BoxMin, BoxMax, bh, 1.f);
+        }
+
+        if ((cfg::esp::armor || cfg::esp::helmet) && Enemy.armor.valid) {
+            darmor(cfg::esp::armor ? Enemy.armor.armor : 0, std::max(Enemy.armor.max, 1), cfg::esp::helmet && Enemy.armor.helmet,
+                   BoxMin, BoxMax, 1.f);
         }
 
         if (cfg::esp::name) {
@@ -450,6 +462,33 @@ void visuals::dhp(int hp, const ImVec2& t, const ImVec2& b, float box_h, float a
         if (ty < top_y) ty = top_y;
         if (ty + ts.y > bot_y) ty = bot_y - ts.y;
         draw_text_outlined(dl, espFont, fs, ImVec2(tx, ty), IM_COL32(255, 255, 255, (int)(255 * a)), txt);
+    }
+}
+
+// Armor: a thin bar on the right of the box (filled by armor / max armor), and an "H" above it for a helmet.
+void visuals::darmor(int armor, int max_armor, bool helmet, const ImVec2& t, const ImVec2& b, float a) {
+    if (a < 0.01f) return;
+    ImDrawList* dl = ImGui::GetBackgroundDrawList();
+    const float bx = roundf(b.x + 4.f), bw = 3.f;
+    const float bh = roundf(b.y - t.y);
+    const auto color = [&](const ImVec4& c, float scale) {
+        return IM_COL32(int(c.x * 255 * scale), int(c.y * 255 * scale), int(c.z * 255 * scale), int(c.w * 255 * a));
+    };
+    if (cfg::esp::armor) {
+        const float fill = bh * std::clamp(armor / float(max_armor), 0.f, 1.f);
+        dl->AddRectFilled(ImVec2(bx - 2.f, t.y - 2.f), ImVec2(bx + bw + 2.f, b.y + 2.f), IM_COL32(0, 0, 0, int(120 * a)), 1.f);
+        dl->AddRectFilled(ImVec2(bx - 1.f, t.y - 1.f), ImVec2(bx + bw + 1.f, b.y + 1.f), IM_COL32(0, 0, 0, int(200 * a)), 0.f);
+        if (fill > 1.f) {
+            const ImU32 top = color(cfg::esp::armor_col, 1.f), bottom = color(cfg::esp::armor_col, 0.7f);
+            dl->AddRectFilledMultiColor(ImVec2(bx, roundf(b.y - fill)), ImVec2(bx + bw, b.y), top, top, bottom, bottom);
+        }
+    }
+    if (helmet && espFont) {
+        const float fs = 11.f;
+        const ImVec2 ts = espFont->CalcTextSizeA(fs, FLT_MAX, 0.f, "H");
+        const float hx = cfg::esp::armor ? bx + bw + 4.f : bx;
+        draw_text_outlined(dl, espFont, fs, ImVec2(roundf(hx), roundf(t.y)), color(cfg::esp::helmet_col, 1.f), "H");
+        (void)ts;
     }
 }
 

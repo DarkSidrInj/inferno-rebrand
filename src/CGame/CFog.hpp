@@ -41,7 +41,7 @@
 
 namespace worldfog {
     enum Kind { Bool, Int, Float, Color };
-    enum Field { Fog, Mode, Density, Start, End, FogColor, Equator, Sky, kFields };
+    enum Field { Fog, Mode, Density, Start, End, FogColor, Equator, Sky, Intensity, kFields };
 
     struct Spec {
         const char* name;
@@ -67,6 +67,8 @@ namespace worldfog {
          "get_ambientEquatorColor_Injected", "set_ambientEquatorColor_Injected", 0, false},
         {"ambientSky", Color, v100::rs_get_ambient_sky_injected, v100::rs_set_ambient_sky_injected,
          "get_ambientSkyColor_Injected", "set_ambientSkyColor_Injected", 0, false},
+        {"ambientIntensity", Float, v100::rs_get_ambient_intensity, v100::rs_set_ambient_intensity,
+         "get_ambientIntensity", "set_ambientIntensity", 0, false},
     };
 
     struct Resolved {
@@ -78,6 +80,7 @@ namespace worldfog {
 
     struct Original {
         uint8_t fog{}; int32_t mode{}; float density{}, start{}, end{}; float color[4]{};
+        float sky[4]{}, equator[4]{}; float intensity{}; bool ambient{};   // night mode: what the map has
     };
 
     inline int g_pid = -1;
@@ -205,6 +208,7 @@ namespace worldfog {
             case Mode: { const int32_t v = rpm<int32_t>(a); return v >= 1 && v <= 3; }
             case Density: { const float v = rpm<float>(a); return std::isfinite(v) && v >= 0.f && v <= 10.f; }
             case Start: case End: { const float v = rpm<float>(a); return std::isfinite(v) && v >= 0.f && v <= 1000000.f; }
+            case Intensity: { const float v = rpm<float>(a); return std::isfinite(v) && v >= 0.f && v <= 16.f; }
             default: {
                 float c[4]{};
                 if (!mem_read(a, c, sizeof(c))) return false;
@@ -299,7 +303,7 @@ namespace worldfog {
         for (int f = 0; f < kFields; ++f)
             diag::log("FOG", "  %-15s 0x%llx  %s", kSpecs[f].name, (unsigned long long)g_fields[f].address, g_fields[f].how.c_str());
 
-        for (Field f : {Fog, Mode, Start, End, FogColor}) find_setter(f);
+        for (Field f : {Fog, Mode, Start, End, FogColor, Equator, Sky, Intensity}) find_setter(f);
         diag::log("FOG", "setters: fog=%s mode=%s start=%s end=%s color=%s", g_setter[Fog] ? "yes" : "no",
                   g_setter[Mode] ? "yes" : "no", g_setter[Start] ? "yes" : "no", g_setter[End] ? "yes" : "no",
                   g_setter[FogColor] ? "yes" : "no");
@@ -332,6 +336,9 @@ namespace worldfog {
         g_original.start = rpm<float>(g_fields[Start].address);
         g_original.end = rpm<float>(g_fields[End].address);
         if (g_fields[FogColor].address) mem_read(g_fields[FogColor].address, g_original.color, sizeof(g_original.color));
+        g_original.ambient = g_fields[Sky].address && g_fields[Equator].address &&
+                             mem_read(g_fields[Sky].address, g_original.sky, 16) && mem_read(g_fields[Equator].address, g_original.equator, 16);
+        g_original.intensity = g_fields[Intensity].address ? rpm<float>(g_fields[Intensity].address) : -1.f;
     }
 
     // Where a failed replay spent its steps: the setter's code, the hottest instructions with the
@@ -454,7 +461,20 @@ namespace worldfog {
         }
     }
 
+    inline bool g_ambient_written = false;   // night mode changed the ambient light: the map's values go back
+
+    inline void restore_ambient() {
+        if (!g_ambient_written) return;
+        g_ambient_written = false;
+        if (g_original.ambient) {
+            set_field(Sky, g_original.sky, 16);
+            set_field(Equator, g_original.equator, 16);
+        }
+        if (g_original.intensity >= 0.f) set_field(Intensity, &g_original.intensity, 4);
+    }
+
     inline void restore() {
+        restore_ambient();
         set_field(Fog, &g_original.fog, 1);
         if (g_fields[Mode].address) set_field(Mode, &g_original.mode, 4);
         set_field(Start, &g_original.start, 4);
@@ -616,7 +636,15 @@ namespace worldfog {
         for (int i = 0; i < 3; ++i) out[i] = std::clamp(g_original.color[i], 0.f, 1.f);
     }
 
-    struct Want { uint8_t fog; int32_t mode; float start, end; float color[4]; };
+    struct Want {
+        uint8_t fog; int32_t mode; float start, end; float color[4];
+        bool ambient; float sky[4], equator[4]; float intensity;   // night mode
+    };
+
+    inline void mix(const float* from, const float* to, float t, float* out) {
+        for (int i = 0; i < 3; ++i) out[i] = from[i] + (to[i] - from[i]) * t;
+        out[3] = 1.f;
+    }
 
     inline Want desired() {
         Want w{};
@@ -625,8 +653,27 @@ namespace worldfog {
         w.start = std::max(cfg::fog::min_distance, 0.f);
         w.end = std::max(cfg::fog::max_distance, w.start + 1.f);
         w.color[3] = 1.f;
-        if (cfg::fog::auto_color) estimate_color(w.color);
-        else { w.color[0] = cfg::fog::color.x; w.color[1] = cfg::fog::color.y; w.color[2] = cfg::fog::color.z; }
+        if (cfg::fog::enabled) {
+            if (cfg::fog::auto_color) estimate_color(w.color);
+            else { w.color[0] = cfg::fog::color.x; w.color[1] = cfg::fog::color.y; w.color[2] = cfg::fog::color.z; }
+        }
+        if (cfg::night::enabled) {
+            // Night: the ambient light of dynamic objects goes dark blue, and a dark blue fog closes the view in.
+            // The map's baked light cannot be reached from here, the fog is what darkens the rest.
+            const float s = std::clamp(cfg::night::strength, 0.f, 1.f);
+            static const float kFog[3] = {0.02f, 0.03f, 0.08f}, kSky[3] = {0.03f, 0.05f, 0.12f}, kEquator[3] = {0.02f, 0.03f, 0.07f};
+            if (!cfg::fog::enabled) {
+                w.start = 0.f;
+                w.end = 320.f - 250.f * s;
+            }
+            mix(g_original.color, kFog, std::min(1.f, s * 1.2f), w.color);
+            if (g_original.ambient) {
+                w.ambient = true;
+                mix(g_original.sky, kSky, s, w.sky);
+                mix(g_original.equator, kEquator, s, w.equator);
+            }
+            w.intensity = g_original.intensity >= 0.f ? g_original.intensity * (1.f - 0.85f * s) : -1.f;
+        }
         return w;
     }
 
@@ -637,7 +684,9 @@ namespace worldfog {
 
     inline bool fields_differ(const Want& w) {
         return differs(Fog, &w.fog, 1) || differs(Mode, &w.mode, 4) || differs(Start, &w.start, 4) ||
-               differs(End, &w.end, 4) || differs(FogColor, w.color, 16);
+               differs(End, &w.end, 4) || differs(FogColor, w.color, 16) ||
+               (w.ambient && (differs(Sky, w.sky, 16) || differs(Equator, w.equator, 16))) ||
+               (w.ambient && w.intensity >= 0.f && differs(Intensity, &w.intensity, 4));
     }
 
     // Field changes (setter replays) run on the worker thread.
@@ -647,6 +696,12 @@ namespace worldfog {
         set_field(Start, &w.start, 4);
         set_field(End, &w.end, 4);
         set_field(FogColor, w.color, 16);
+        if (w.ambient) {
+            g_ambient_written = true;
+            set_field(Sky, w.sky, 16);
+            set_field(Equator, w.equator, 16);
+            if (w.intensity >= 0.f) set_field(Intensity, &w.intensity, 4);
+        }
     }
 
     inline void apply() {
@@ -658,8 +713,8 @@ namespace worldfog {
         }
         if (!g_applied) {
             g_applied = true;
-            diag::log("FOG", "applied start=%.1f end=%.1f color=(%.2f %.2f %.2f) %s", w.start, w.end, w.color[0], w.color[1],
-                      w.color[2], cfg::fog::auto_color ? "estimated" : "manual");
+            diag::log("FOG", "applied start=%.1f end=%.1f color=(%.2f %.2f %.2f) %s%s", w.start, w.end, w.color[0], w.color[1],
+                      w.color[2], cfg::fog::auto_color ? "estimated" : "manual", w.ambient ? ", night ambient" : "");
         }
     }
 
@@ -686,12 +741,13 @@ namespace worldfog {
             g_colors.clear();
         }
         if (proc::pid <= 0 || !plausible(proc::lib)) return;
-        if (!cfg::fog::enabled && !g_applied) return;
+        const bool active = cfg::fog::enabled || cfg::night::enabled;
+        if (!active && !g_applied) return;
         const long long now = diag::now_ms();
 
         if (g_resolving.load()) return;
         if (!g_ready) {
-            if (!cfg::fog::enabled || now - g_last_resolve < (g_dumped ? 15000 : 3000)) return;
+            if (!active || now - g_last_resolve < (g_dumped ? 15000 : 3000)) return;
             g_last_resolve = now;
             g_resolving = true;
             std::thread([] { resolve_all(); g_resolving = false; }).detach();
@@ -709,11 +765,16 @@ namespace worldfog {
             }
         }
 
-        if (!cfg::fog::enabled) {
+        if (!active) {
             restore_params();
             g_resolving = true;
             std::thread([] { restore(); g_resolving = false; }).detach();
             g_applied = false;
+            return;
+        }
+        if (!cfg::night::enabled && g_ambient_written) {   // night off, fog still on
+            g_resolving = true;
+            std::thread([] { restore_ambient(); g_resolving = false; }).detach();
             return;
         }
         if (!g_applied && g_params.empty()) read_original();

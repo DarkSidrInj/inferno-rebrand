@@ -415,4 +415,21 @@ namespace player {
         uint16_t max_hp = rpm<uint16_t>(stats + v100::stats_max_hp);
         return max_hp > 0 && max_hp <= 10000 && hp <= max_hp ? int(hp) : 0;
     }
+
+    // Armor, max armor and helmet from the same stats object as the health (offsets from the 1.0.0 dump, the
+    // meanings are the project's own reading of it): valid only when the values make sense together.
+    struct Armor { int armor = 0, max = 0; bool helmet = false, valid = false; };
+
+    inline Armor armor(uint64_t p) noexcept {
+        Armor out;
+        uint64_t stats = rpm<uint64_t>(p + v100::player_stats);
+        uint64_t stats_class = rpm<uint64_t>(proc::lib + v100::stats_typeinfo);
+        if (!exact_class(stats, stats_class)) return out;
+        const uint16_t armor = rpm<uint16_t>(stats + v100::stats_armor);
+        const uint16_t max_armor = rpm<uint16_t>(stats + v100::stats_max_armor);
+        const uint8_t helmet = rpm<uint8_t>(stats + v100::stats_helmet);
+        if (max_armor > 1000 || armor > max_armor || helmet > 1) return out;
+        out = {int(armor), int(max_armor), helmet == 1, true};
+        return out;
+    }
 }

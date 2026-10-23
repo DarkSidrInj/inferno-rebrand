@@ -14,6 +14,7 @@
 #include "CGame/CLocalView.hpp"
 #include "CGame/CSceneNode.hpp"
 #include "CGame/CSkins.hpp"
+#include "CGame/CStrafe.hpp"
 #include "fixtures/rs_accessors.h"
 #include "CConfigs/CConfig.hpp"
 #include <sys/mman.h>
@@ -341,7 +342,8 @@ int main() {
         };
         const uint64_t traps[] = {v100::rs_set_fog, v100::rs_set_fog_mode, v100::rs_get_fog_density,
                                   v100::rs_set_fog_density, v100::rs_set_fog_color_injected, v100::rs_set_ambient_equator_injected,
-                                  v100::rs_get_ambient_sky_injected, v100::rs_set_ambient_sky_injected};
+                                  v100::rs_get_ambient_sky_injected, v100::rs_set_ambient_sky_injected,
+                                  v100::rs_get_ambient_intensity, v100::rs_set_ambient_intensity};
         for (uint64_t rva : traps) route(rva, 0);
         route(v100::rs_get_fog, base + fx::UnityEngine_RenderSettings__get_fog);
         route(v100::rs_get_fog_start, base + fx::UnityEngine_RenderSettings__get_fogStartDistance);
@@ -467,6 +469,27 @@ int main() {
         std::memcpy(&mode, rs2 + 0x44, 4);
         CHECK(rs2[0x40] == 0 && mode == 3 && f == 300.f, "restored fog=%d mode=%d end=%.1f", rs2[0x40], mode, f);
         CHECK(std::fabs(params[3] - 1.f) < 1e-5f, "renderer params restored with the range: %f", params[3]);
+
+        // Night mode alone (fog off): dark ambient light, a dark closing fog; everything back when it is off.
+        {
+            auto rd = [&](int off) { float v; std::memcpy(&v, rs2 + off, 4); return v; };
+            cfg::night::enabled = true; cfg::night::strength = 1.f;
+            worldfog::g_last_write = 0;
+            worldfog::tick();
+            worldfog::wait();
+            worldfog::g_last_write = 0;
+            worldfog::tick();
+            worldfog::wait();
+            CHECK(rs2[0x40] == 1 && std::fabs(rd(0x5C) - 70.f) < 1e-3f && rd(0x58) == 0.f, "night fog: on, 0..%.1f m", rd(0x5C));
+            CHECK(std::fabs(rd(0x48) - .02f) < 1e-4f && std::fabs(rd(0x50) - .08f) < 1e-4f, "night fog color %.3f %.3f", rd(0x48), rd(0x50));
+            CHECK(std::fabs(rd(0x80) - .02f) < 1e-4f && std::fabs(rd(0x88) - .07f) < 1e-4f, "night ambient equator %.3f %.3f", rd(0x80), rd(0x88));
+            CHECK(std::fabs(rd(0x70) - .03f) < 1e-4f && std::fabs(rd(0x78) - .12f) < 1e-4f, "night ambient sky %.3f %.3f", rd(0x70), rd(0x78));
+            cfg::night::enabled = false;
+            worldfog::tick();
+            worldfog::wait();
+            CHECK(rs2[0x40] == 0 && std::fabs(rd(0x80) - .3f) < 1e-5f && std::fabs(rd(0x70) - .1f) < 1e-5f && rd(0x5C) == 300.f,
+                  "night off: the map's fog and ambient light are back (fog %d end %.1f equator %.2f)", rs2[0x40], rd(0x5C), rd(0x80));
+        }
 
         // Occlusion bypass: the culling offset comes from tracing Animator.get_cullingMode_Injected
         // on a real enemy animator; enemies go to AlwaysAnimate and come back when switched off.
@@ -1299,6 +1322,82 @@ int main() {
         waitpid(child, &status, 0);
         CHECK(second && WIFEXITED(status) && WEXITSTATUS(status) == 7, "child went on after the calls: %s status=0x%x",
               second ? "ok" : why.c_str(), status);
+    }
+
+    // Armor, max armor and helmet from the stats object; values that do not fit together are refused.
+    {
+        const uint64_t stats_class = rpm<uint64_t>(proc::lib + v100::stats_typeinfo);
+        uint8_t* stats = static_cast<uint8_t*>(calloc(1, 0x40));
+        *reinterpret_cast<uint64_t*>(stats) = stats_class;
+        *reinterpret_cast<uint16_t*>(stats + v100::stats_armor) = 75;
+        *reinterpret_cast<uint16_t*>(stats + v100::stats_max_armor) = 100;
+        stats[v100::stats_helmet] = 1;
+        uint8_t* net = static_cast<uint8_t*>(calloc(1, 0x200));
+        *reinterpret_cast<uint64_t*>(net + v100::player_stats) = reinterpret_cast<uint64_t>(stats);
+        const player::Armor a = player::armor(reinterpret_cast<uint64_t>(net));
+        CHECK(a.valid && a.armor == 75 && a.max == 100 && a.helmet, "armor %d/%d helmet %d", a.armor, a.max, a.helmet);
+        *reinterpret_cast<uint16_t*>(stats + v100::stats_armor) = 150;
+        CHECK(!player::armor(reinterpret_cast<uint64_t>(net)).valid, "armor above max refused");
+        stats[v100::stats_helmet] = 7;
+        *reinterpret_cast<uint16_t*>(stats + v100::stats_armor) = 0;
+        CHECK(!player::armor(reinterpret_cast<uint64_t>(net)).valid, "helmet byte that is no bool refused");
+    }
+
+    // Auto strafe: the velocity vector is told from two others by following the real movement, then in the air
+    // the vector turns with the view and on the ground it does not.
+    {
+        uint8_t* tof = static_cast<uint8_t*>(calloc(1, 0x80));
+        *reinterpret_cast<uint64_t*>(tof) = reinterpret_cast<uint64_t>(make_class("tof"));
+        uint8_t* nip = static_cast<uint8_t*>(calloc(1, 0x80));
+        *reinterpret_cast<uint64_t*>(nip) = reinterpret_cast<uint64_t>(make_class("nip"));
+        *reinterpret_cast<uint64_t*>(nip + 0x48) = reinterpret_cast<uint64_t>(tof);
+        uint8_t* array = static_cast<uint8_t*>(calloc(1, 0x30));
+        *reinterpret_cast<uint64_t*>(array + v100::array_length) = 1;
+        *reinterpret_cast<uint64_t*>(array + v100::array_data) = reinterpret_cast<uint64_t>(nip);
+        uint8_t* wmz = static_cast<uint8_t*>(calloc(1, 0x100));
+        *reinterpret_cast<uint64_t*>(wmz + v100::wmz_first_array) = reinterpret_cast<uint64_t>(array);
+        uint8_t* net = static_cast<uint8_t*>(calloc(1, 0x200));
+        *reinterpret_cast<uint64_t*>(net + v100::net_systems) = reinterpret_cast<uint64_t>(wmz);
+        const uint64_t local = reinterpret_cast<uint64_t>(net);
+
+        float* a_vec = reinterpret_cast<float*>(tof + 0x10);   // not a velocity
+        float* b_vec = reinterpret_cast<float*>(tof + 0x1C);   // the velocity
+        a_vec[0] = 1.f; a_vec[1] = 2.f; a_vec[2] = 3.f;
+        b_vec[0] = 8.f; b_vec[1] = 0.f; b_vec[2] = 0.f;        // 8 m/s east (+X)
+        auto view_with_yaw = [](float degrees) {
+            matrix m{};
+            float* a = reinterpret_cast<float*>(&m);
+            a[0] = a[5] = a[10] = a[15] = 1.f;
+            a[2] = -std::sin(degrees * 0.01745329f);
+            a[10] = -std::cos(degrees * 0.01745329f);
+            return m;
+        };
+        auto angle = [&] { return std::atan2(b_vec[0], b_vec[2]) * 57.29578f; };
+        cfg::strafe::enabled = true; cfg::strafe::turn = 4.f; cfg::strafe::gain = 0.f; cfg::strafe::min_speed = 2.f; cfg::strafe::log = false;
+        strafe::g_pid = -1;
+        Vector3 position(0.f, 0.f, 0.f);
+        float yaw = 90.f;
+        long long last = diag::now_ms();
+        auto step = [&](float rise) {   // the game moves the player along the vector
+            usleep(10000);
+            const long long now = diag::now_ms();
+            const float dt = float(now - last) / 1000.f;
+            last = now;
+            position.x += b_vec[0] * dt; position.z += b_vec[2] * dt; position.y += rise * dt;
+            const matrix view = view_with_yaw(yaw);
+            strafe::tick(local, position, &view);
+        };
+        for (int i = 0; i < 70; ++i) step(0.f);
+        CHECK(strafe::g_locked == 1 && std::fabs(strafe::g_scale - 1.0) < 0.15, "velocity vector found: index %d, factor %.2f", strafe::g_locked, strafe::g_scale);
+        for (int i = 0; i < 10; ++i) { yaw += 1.f; step(0.f); }
+        CHECK(std::fabs(angle() - 90.f) < 0.5f, "on the ground the vector stays (%.2f deg)", angle());
+        for (int i = 0; i < 25; ++i) { yaw += 2.f; step(3.f); }
+        const float speed = std::sqrt(b_vec[0] * b_vec[0] + b_vec[2] * b_vec[2]);
+        CHECK(angle() > 100.f && angle() < yaw + 0.5f, "in the air the vector follows the view: %.1f deg (view %.1f)", angle(), yaw);
+        CHECK(std::fabs(speed - 8.f) < 0.4f, "speed kept (%.2f)", speed);
+        CHECK(strafe::g_writes > 3 && strafe::g_kept > 0, "writes %d, kept %d", strafe::g_writes, strafe::g_kept);
+        cfg::strafe::enabled = false;
+        strafe::tick(0, Vector3{}, nullptr);
     }
 
     std::printf(failures ? "SELFTEST FAILED (%d)\n" : "SELFTEST OK\n", failures);

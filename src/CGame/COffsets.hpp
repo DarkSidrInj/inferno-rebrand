@@ -70,6 +70,8 @@ namespace v100 {
     inline constexpr uint64_t rs_set_ambient_equator_injected = 0x76030B8;    // 123744440
     inline constexpr uint64_t rs_get_ambient_sky_injected = 0x7609EF4;        // 123772660
     inline constexpr uint64_t rs_set_ambient_sky_injected = 0x75E48DC;        // 123619548
+    inline constexpr uint64_t rs_get_ambient_intensity = 0x75FE000;           // from the offsets collection
+    inline constexpr uint64_t rs_set_ambient_intensity = 0x75F05F4;
     inline constexpr uint64_t rs_get_render_settings_injected = 0x75E7F30;    // 123633456
 
     // --- Animator culling (dump.cs RVAs; read by the interpreter, never called) -----------------
