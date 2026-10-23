@@ -1081,7 +1081,10 @@ int main() {
                 for (int k = 0; k < 3; ++k) *reinterpret_cast<uint64_t*>(knife_content + 0x10 + k * 8) = 0x7000u + k;
                 uint8_t* gun_content = static_cast<uint8_t*>(calloc(1, 0x40));
                 for (int k = 0; k < 3; ++k) *reinterpret_cast<uint64_t*>(gun_content + 0x10 + k * 8) = 0x3300u + k;
-                uint8_t* cache = make_dict({{70, reinterpret_cast<uint64_t>(knife_content)}, {33, reinterpret_cast<uint64_t>(gun_content)}});
+                uint8_t* other_content = static_cast<uint8_t*>(calloc(1, 0x40));  // someone's Butterfly Kumo
+                for (int k = 0; k < 3; ++k) *reinterpret_cast<uint64_t*>(other_content + 0x10 + k * 8) = 0x5700u + k;
+                uint8_t* cache = make_dict({{70, reinterpret_cast<uint64_t>(knife_content)}, {33, reinterpret_cast<uint64_t>(gun_content)},
+                                            {75 | (uint64_t(157500) << 32), reinterpret_cast<uint64_t>(other_content)}});
                 uint8_t* ybt = static_cast<uint8_t*>(calloc(1, 0x60));
                 *reinterpret_cast<uint64_t*>(ybt) = reinterpret_cast<uint64_t>(ybt_class);
                 *reinterpret_cast<uint64_t*>(ybt + 0x38) = reinterpret_cast<uint64_t>(iwf[0]);
@@ -1126,8 +1129,11 @@ int main() {
                 skins::tick(local_s, {local_s});
                 CHECK(cfg::skins::chosen[70] == 0 && *value_of(by_weapon[0], 0) == 0x7000 && field(knife_content, 0) == 0x7000,
                       "unknown skin: knife back to its own");
-                cfg::skins::chosen[70] = 47502;
+                *reinterpret_cast<uint16_t*>(beh + 0x42) = 0;
+                skins::g_reload_at = 0;
+                cfg::skins::chosen[70] = 157500;  // not in the tables: from another player's built content
                 skins::tick(local_s, {local_s});
+                CHECK(*value_of(by_weapon[0], 0) == 0x5700 && field(knife_content, 2) == 0x5702, "skin from another player's content");
                 *reinterpret_cast<uint16_t*>(beh + 0x42) = 0;
                 skins::g_reload_at = 0;
                 cfg::skins::enabled = false;

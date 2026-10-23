@@ -48,7 +48,7 @@ namespace skins {
 
     struct View { int weapon = -1; int current = 0; std::vector<int> ids; std::vector<std::string> names; std::string status; };
     // The two dictionaries of one iwf<T>, found by their keys.
-    struct Params { uint64_t by_weapon{}, by_skin{}; };
+    struct Params { uint64_t by_weapon{}, by_skin{}, by_name{}; };
     struct Swap { uint64_t at{}; uint64_t original{}, written{}; };  // one pointer we changed
 
     inline int g_pid = -1;
@@ -102,6 +102,18 @@ namespace skins {
         return found;
     }
 
+    // A managed string as ASCII ("" when it is not one).
+    inline std::string managed_text(uint64_t str) {
+        if (!plausible(str)) return {};
+        const int n = rpm<int>(str + 0x10);
+        if (n <= 0 || n > 128) return {};
+        std::vector<uint16_t> w(size_t(n), 0);
+        if (!mem_read(str + 0x14, w.data(), w.size() * 2)) return {};
+        std::string out;
+        for (uint16_t c : w) out.push_back(c >= 0x20 && c < 0x7F ? char(c) : '?');
+        return out;
+    }
+
     // ---- dictionaries ------------------------------------------------------------------------------
     // Every used entry of a Dictionary<K, V> with an 8-byte-or-smaller key and a reference value.
     template <class F> inline void each_entry(uint64_t dict, F f) {
@@ -146,8 +158,44 @@ namespace skins {
             });
             if (small && !large && !other && !p.by_weapon) p.by_weapon = d;
             else if (large && !small && !other && !p.by_skin) p.by_skin = d;
+            else if (other && !small && !large && !p.by_name) {
+                bool text = false;
+                each_entry(d, [&](uint64_t e) { text = !managed_text(rpm<uint64_t>(e + kEntryKey)).empty(); return false; });
+                if (text) p.by_name = d;
+            }
         }
         return p;
+    }
+
+    // Once per resolver: every dictionary of the three tables and of the content cache, with keys.
+    inline void dump(uint64_t resolver) {
+        auto keys = [](uint64_t d, int max) {
+            std::string out;
+            int n = 0;
+            each_entry(d, [&](uint64_t e) {
+                const uint64_t k = rpm<uint64_t>(e + kEntryKey);
+                char one[64];
+                const std::string t = (k >> 32) ? managed_text(k) : std::string();
+                if (!t.empty()) std::snprintf(one, sizeof(one), " \"%.40s\"", t.c_str());
+                else std::snprintf(one, sizeof(one), " %llx", (unsigned long long)k);
+                out += one;
+                return ++n < max;
+            });
+            return out;
+        };
+        auto count = [](uint64_t d) { int n = 0; each_entry(d, [&](uint64_t) { ++n; return true; }); return n; };
+        for (int k = 0; k < 3; ++k) {
+            const uint64_t iwf = rpm<uint64_t>(resolver + kResolverParams[k]);
+            for (uint64_t off = 0x10; off <= 0x80; off += 8) {
+                const uint64_t d = rpm<uint64_t>(iwf + off);
+                if (class_of(d).rfind("Dictionary", 0) != 0) continue;
+                diag::log("SKINS", "%s +0x%llx: %d entries:%s", kParamNames[k], (unsigned long long)off, count(d), keys(d, 6).c_str());
+            }
+            diag::log("SKINS", "%s: by weapon %s, by skin id %s, by name %s", kParamNames[k], g_params[k].by_weapon ? "yes" : "no",
+                      g_params[k].by_skin ? "yes" : "no", g_params[k].by_name ? "yes" : "no");
+        }
+        const uint64_t cache = rpm<uint64_t>(resolver + kResolverCache);
+        diag::log("SKINS", "content cache: %d entries (weapon | skin << 32):%s", count(cache), keys(cache, 16).c_str());
     }
 
     inline bool resolve(uint64_t beh) {
@@ -162,16 +210,11 @@ namespace skins {
         bool ok = true;
         for (int k = 0; k < 3; ++k) {
             g_params[k] = find_params(rpm<uint64_t>(r + kResolverParams[k]));
-            ok &= g_params[k].by_weapon && g_params[k].by_skin;
+            ok &= g_params[k].by_weapon != 0;
         }
-        if (!g_params_logged || ok) {
+        if (!g_params_logged) {
             g_params_logged = true;
-            for (int k = 0; k < 3; ++k) {
-                int nw = 0, ns = 0;
-                if (g_params[k].by_weapon) each_entry(g_params[k].by_weapon, [&](uint64_t) { ++nw; return true; });
-                if (g_params[k].by_skin) each_entry(g_params[k].by_skin, [&](uint64_t) { ++ns; return true; });
-                diag::log("SKINS", "%s: %d weapons, %d skins", kParamNames[k], nw, ns);
-            }
+            dump(r);
         }
         return ok;
     }
@@ -199,10 +242,26 @@ namespace skins {
     // The weapon's content becomes the skin's; false (nothing changed) when the skin is not known.
     inline bool apply(int weapon, int skin) {
         uint64_t values[3]{};
+        const char* from = "skin id table";
+        const std::string id = std::to_string(skin);
         for (int k = 0; k < 3; ++k) {
-            const uint64_t at = find_value(g_params[k].by_skin, uint64_t(uint32_t(skin)), 4);
+            uint64_t at = g_params[k].by_skin ? find_value(g_params[k].by_skin, uint64_t(uint32_t(skin)), 4) : 0;
+            if (!at && g_params[k].by_name)  // the name table: the id as the key, or in it
+                each_entry(g_params[k].by_name, [&](uint64_t e) {
+                    const std::string t = managed_text(rpm<uint64_t>(e + kEntryKey));
+                    if (t == id || t.find(id) != std::string::npos) { at = e + kEntryValue; from = "name table"; return false; }
+                    return true;
+                });
             values[k] = at ? rpm<uint64_t>(at) : 0;
         }
+        if (!values[0])  // someone in the match has it: its built content
+            each_entry(rpm<uint64_t>(g_resolver + kResolverCache), [&](uint64_t e) {
+                const uint64_t content = rpm<uint64_t>(e + kEntryValue);
+                if (rpm<int>(e + kEntryKey + 4) != skin || !plausible(content)) return true;
+                for (int k = 0; k < 3; ++k) values[k] = rpm<uint64_t>(content + kContentParams[k]);
+                from = "content of another player's weapon";
+                return false;
+            });
         if (!values[0]) { diag::log("SKINS", "skin %d: no mesh entry (mesh %d anim %d sound %d)", skin, !!values[0], !!values[1], !!values[2]); return false; }
         put_back(weapon);
         std::vector<Swap> swaps;
@@ -231,7 +290,7 @@ namespace skins {
         });
         g_swaps[weapon] = swaps;
         g_applied[weapon] = skin;
-        diag::log("SKINS", "weapon %d -> skin %d: %zu pointers (%d cached contents)", weapon, skin, swaps.size(), cached);
+        diag::log("SKINS", "weapon %d -> skin %d (%s): %zu pointers (%d cached contents)", weapon, skin, from, swaps.size(), cached);
         return true;
     }
 
