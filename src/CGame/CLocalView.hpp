@@ -102,9 +102,42 @@ namespace localview {
 
     // Runs fn(self, arg) to its return; `out` = game stores. Strict: no call stepped over once the
     // code has touched `self` (the main-thread check before that may call what cannot be followed).
-    inline bool run(uint64_t fn, uint64_t self, uint64_t arg, bool strict, a64::Machine& found, std::string& why) {
+    // Where a failed replay spent its steps (once per function): enough to read the engine path offline.
+    inline void report_replay(const char* name, uint64_t fn, const a64::Session& s) {
+        static std::unordered_map<uint64_t, bool> reported;
+        if (!reported.emplace(fn, true).second) return;
+        auto dump = [](const char* what, uint64_t at, int count) {
+            std::vector<uint32_t> words(size_t(count), 0);
+            if (!mem_read(at, words.data(), words.size() * 4)) return;
+            std::string text;
+            char hex[10];
+            for (uint32_t w : words) { std::snprintf(hex, sizeof(hex), "%08x ", w); text += hex; }
+            diag::log("TPDIAG", "  %s 0x%llx (lib+0x%llx): %s", what, (unsigned long long)at, (unsigned long long)(at - proc::lib), text.c_str());
+        };
+        auto top = [](const std::unordered_map<uint64_t, uint32_t>& counts, size_t n) {
+            std::vector<std::pair<uint64_t, uint32_t>> v(counts.begin(), counts.end());
+            std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+            if (v.size() > n) v.resize(n);
+            return v;
+        };
+        diag::log("TPDIAG", "%s 0x%llx replay profile: %zu distinct pcs, %zu fork sites, %zu callees, %ld steps (%s)", name,
+                  (unsigned long long)fn, s.hot.size(), s.fork_sites.size(), s.call_targets.size(), s.total_steps, s.why);
+        dump("entry", fn, 40);
+        for (const auto& h : top(s.hot, 2)) { diag::log("TPDIAG", "  hot pc lib+0x%llx x%u", (unsigned long long)(h.first - proc::lib), h.second); dump("around", h.first - 32, 24); }
+        for (const auto& f : top(s.fork_sites, 4)) diag::log("TPDIAG", "  fork pc lib+0x%llx x%u", (unsigned long long)(f.first - proc::lib), f.second);
+        for (const auto& c : top(s.call_targets, 5)) { diag::log("TPDIAG", "  callee lib+0x%llx x%u", (unsigned long long)(c.first - proc::lib), c.second); dump("callee", c.first, 20); }
+    }
+
+    inline bool run(uint64_t fn, uint64_t self, uint64_t arg, bool strict, a64::Machine& found, std::string& why, bool heavy = false) {
         a64::Session session;
         confine(session, fn);
+        if (heavy) {  // the enabling path walks scene lists: bigger budgets, and a profile if it still fails
+            session.max_steps = 30000;
+            session.max_total = 600000;
+            session.max_site_forks = 64;
+            session.max_depth = 12;
+            session.profile = true;
+        }
         a64::Machine start;
         start.pc = fn;
         start.x[0] = {self, true, 0, 0};
@@ -119,6 +152,7 @@ namespace localview {
         };
         if (a64::explore(session, start, goal, found)) return true;
         why = session.why;
+        if (heavy) report_replay("set_enabled", fn, session);
         return false;
     }
 
@@ -134,12 +168,49 @@ namespace localview {
     inline bool set_enabled(uint64_t r, bool value, std::string& why) {
         if (!g_enabled_setter) { why = "no set_enabled"; return false; }
         a64::Machine m;
-        if (!run(g_enabled_setter, r, value ? 1 : 0, true, m, why)) return false;
+        if (!run(g_enabled_setter, r, value ? 1 : 0, true, m, why, true)) return false;
         std::vector<a64::Store> stores;
         for (const auto& st : m.stores) if (!a64::local(st.address)) stores.push_back(st);
         diag::log("TP", "set_enabled(%d) on 0x%llx: %zu stores", value ? 1 : 0, (unsigned long long)r, stores.size());
         return a64::commit(stores);
     }
+
+    // Last resort when the setter cannot be replayed: the flag byte and bit behind get_enabled.
+    // The byte is the first one-byte load inside the renderer; the bit is the one whose change flips
+    // the getter, found by running the getter on a copy of the byte with each bit set / cleared.
+    // Writing it does not register the renderer with the scene the way the setter does, so this
+    // only helps where Unity keeps the renderer registered while disabled.
+    inline bool find_flag(uint64_t r, uint64_t& addr, int& bit) {
+        a64::Session session;
+        confine(session, g_enabled_getter);
+        a64::Machine start;
+        start.pc = g_enabled_getter;
+        start.x[0] = {r, true, 0, 0};
+        start.x[1] = {0, true, 0, 0};
+        start.watch_lo = r;
+        start.watch_hi = r + 0x1000;
+        a64::Machine found;
+        if (!a64::explore(session, start, [](const a64::Machine& m) { return m.returned && m.watch_byte; }, found)) return false;
+        addr = found.watch_byte;
+        const uint8_t cur = rpm<uint8_t>(addr);
+        const int before = is_enabled(r);
+        for (int b = 0; b < 8; ++b) {
+            for (int set = 0; set < 2; ++set) {
+                a64::Session s2;
+                confine(s2, g_enabled_getter);
+                a64::Machine m = start;
+                m.overlay[addr] = int16_t(set ? (cur | (1 << b)) : (cur & ~(1 << b)));
+                a64::Machine out;
+                if (!a64::explore(s2, m, [](const a64::Machine& x) { return x.returned; }, out) || !out.x[0].known) continue;
+                const int now = int(out.x[0].value & 0xFF) ? 1 : 0;
+                if (set && before == 0 && now == 1) { bit = b; return true; }
+            }
+        }
+        return false;
+    }
+
+    inline uint64_t g_flag_addr = 0;
+    inline int g_flag_bit = -1;
 
     inline void resolve_accessors(uint64_t body, uint64_t arms) {
         g_accessors_resolved = true;
@@ -203,6 +274,62 @@ namespace localview {
         diag::log("TP", "second cameras: %d found, %zu draw layer 8", cameras, g_view_cameras.size());
     }
 
+    // ---- camera masks -----------------------------------------------------------------------------
+    // One place decides every camera mask from the game's own values:
+    //   first-person camera = original, minus layer 8 while third person is on, plus the moved layers
+    //   main camera         = original, minus the moved layers
+    // Moved layers are the enemies' (chams layer pass): the main camera stops drawing them and the
+    // first-person camera, which clears depth, draws them over the world.
+    inline bool g_hide_first_person = false;
+    inline uint32_t g_layer_move = 0;
+    inline uint64_t g_main_for = 0;
+    inline uint32_t g_main_before = 0;
+
+    inline void apply_masks(uint64_t main) {
+        const int off = thirdperson::g_mask_offset.load();
+        if (off < 0) return;
+        for (const auto& c : g_view_cameras) {
+            if (rpm<uint64_t>(c.native) != c.vtable) continue;
+            const uint32_t want = (c.mask_before & ~(g_hide_first_person ? kFirstPersonLayer : 0u)) | g_layer_move;
+            if (rpm<uint32_t>(c.native + uint64_t(off)) != want) wpm<uint32_t>(c.native + uint64_t(off), want);
+        }
+        if (!main || rpm<uint64_t>(main) == 0) return;
+        if (g_main_for != main) { g_main_for = main; g_main_before = rpm<uint32_t>(main + uint64_t(off)); }
+        const uint32_t want = g_main_before & ~g_layer_move;
+        if (rpm<uint32_t>(main + uint64_t(off)) != want) wpm<uint32_t>(main + uint64_t(off), want);
+    }
+
+    // Chams layer pass, once per frame. `enemy_layers` = bit per layer of the enemies' body renderers.
+    inline bool g_layer_started = false;
+    inline void layer_pass_tick(uint64_t main, uint32_t enemy_layers) {
+        const uint32_t protect = (1u << 0) | kFirstPersonLayer;  // the world and the arms never move
+        const bool want = cfg::chams::enabled && cfg::chams::layer_pass && main && enemy_layers && !(enemy_layers & protect);
+        static long long log_stamp = 0;
+        if (cfg::chams::enabled && cfg::chams::layer_pass && enemy_layers & protect && diag::every(log_stamp, 10000))
+            diag::log("CHAMS", "layer pass skipped: enemies share layer mask 0x%08x with the world / first-person layer", enemy_layers);
+        if (!want) {
+            if (g_layer_move) { g_layer_move = 0; apply_masks(main ? main : g_main_for); diag::log("CHAMS", "layer pass off"); }
+            return;
+        }
+        if (g_busy.load() || thirdperson::g_mask_resolving.load()) return;
+        if (thirdperson::g_mask_offset.load() < 0) {
+            thirdperson::g_mask_resolving = true;
+            std::thread([main] { thirdperson::resolve_mask(main); thirdperson::g_mask_resolving = false; }).detach();
+            return;
+        }
+        if (g_cameras_for != main) {
+            g_busy = true;
+            std::thread([main] { find_view_cameras(main); g_busy = false; }).detach();
+            return;
+        }
+        if (g_view_cameras.empty()) return;
+        if (g_layer_move != enemy_layers) {
+            g_layer_move = enemy_layers;
+            diag::log("CHAMS", "layer pass on: layers 0x%08x leave the main camera and go to the first-person camera", enemy_layers);
+        }
+        apply_masks(main);
+    }
+
     // ---- materials ----------------------------------------------------------------------------
     inline bool patch_material(uint64_t r, int32_t want) {
         const int data_off = chams::g_data_offset.load(), size_off = chams::g_size_offset.load();
@@ -241,15 +368,15 @@ namespace localview {
     // ---- frame --------------------------------------------------------------------------------
     inline void restore_all() {
         restore_materials();
-        const int mask_off = thirdperson::g_mask_offset.load();
-        for (const auto& c : g_view_cameras) {
-            matrix v{}, p{};
-            if (mask_off >= 0 && rpm<uint64_t>(c.native) == c.vtable && validate_camera(c.native, v, p, false))
-                wpm<uint32_t>(c.native + uint64_t(mask_off), c.mask_before);
-        }
+        g_hide_first_person = false;
+        apply_masks(g_main_for);
         if (g_enabled_body && plausible(g_enabled_vtable) && rpm<uint64_t>(g_enabled_body) == g_enabled_vtable) {
             std::string why;
-            if (!set_enabled(g_enabled_body, false, why)) diag::log("WARN", "TP body renderer left enabled: %s", why.c_str());
+            if (g_flag_addr && g_flag_bit >= 0) {
+                wpm<uint8_t>(g_flag_addr, uint8_t(rpm<uint8_t>(g_flag_addr) & ~(1 << g_flag_bit)));
+                g_flag_addr = 0;
+                g_flag_bit = -1;
+            } else if (!set_enabled(g_enabled_body, false, why)) diag::log("WARN", "TP body renderer left enabled: %s", why.c_str());
         }
         g_enabled_body = 0;
         g_checked_body = 0;
@@ -263,10 +390,8 @@ namespace localview {
 
         // First-person layer off the second camera(s).
         if (main_camera && g_cameras_for != main_camera) find_view_cameras(main_camera);
-        const int mask_off = thirdperson::g_mask_offset.load();
-        for (const auto& c : g_view_cameras)
-            if (mask_off >= 0 && rpm<uint64_t>(c.native) == c.vtable)
-                wpm<uint32_t>(c.native + uint64_t(mask_off), c.mask_before & ~kFirstPersonLayer);
+        g_hide_first_person = true;
+        apply_masks(main_camera);
 
         // Body renderer on.
         if (body && arms && !g_accessors_resolved) resolve_accessors(body, arms);
@@ -278,6 +403,21 @@ namespace localview {
                 if (set_enabled(body, true, why)) { g_enabled_body = body; g_enabled_vtable = rpm<uint64_t>(body); }
                 diag::log("TP", "body renderer was disabled: %s (now enabled=%d)", g_enabled_body ? "switched on" : why.c_str(),
                           is_enabled(body));
+                if (!g_enabled_body && g_enabled_getter) {
+                    uint64_t addr = 0;
+                    int bit = -1;
+                    if (find_flag(body, addr, bit)) {
+                        g_flag_addr = addr;
+                        g_flag_bit = bit;
+                        wpm<uint8_t>(addr, uint8_t(rpm<uint8_t>(addr) | (1 << bit)));
+                        g_enabled_body = body;
+                        g_enabled_vtable = rpm<uint64_t>(body);
+                        diag::log("TP", "body renderer flag written directly: byte 0x%llx (renderer+0x%llx) bit %d, now enabled=%d",
+                                  (unsigned long long)addr, (unsigned long long)(addr - body), bit, is_enabled(body));
+                    } else {
+                        diag::log("TP", "body renderer enabled flag not found: the body stays hidden");
+                    }
+                }
             } else {
                 diag::log("TP", "body renderer enabled=%d", on);
             }
@@ -306,6 +446,11 @@ namespace localview {
             g_cameras_for = 0;
             g_view_cameras.clear();
             g_enabled_body = g_checked_body = 0;
+            g_hide_first_person = false;
+            g_layer_move = 0;
+            g_main_for = 0;
+            g_flag_addr = 0;
+            g_flag_bit = -1;
             g_enabled_getter = g_enabled_setter = 0;
             g_accessors_resolved = false;
             g_materials.clear();

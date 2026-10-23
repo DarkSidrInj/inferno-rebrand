@@ -137,6 +137,7 @@ int main() {
     // Never leave the game with a frozen camera matrix or rotated pivots.
     thirdperson::release();
     localview::wait();
+    localview::g_layer_move = 0;
     localview::restore_all();
     antiaim::release();
     chams::occlusion_tick(0);

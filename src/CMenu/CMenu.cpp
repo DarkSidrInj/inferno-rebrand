@@ -83,9 +83,11 @@ namespace ui::menu {
         separator(a);
         checkbox("Chams through walls", &cfg::chams::through_walls, a);
         separator(a);
-        combo("Wall material", &cfg::chams::wall_material, {"Outline mask 1", "Outline mask 2", "UI default"}, a);
+        combo("Wall material", &cfg::chams::wall_material, {"Outline mask 1", "Outline mask 2", "UI default", "Untouchable", "Own outline"}, a);
         separator(a);
         checkbox("Occlusion culling off", &cfg::chams::no_occlusion, a);
+        separator(a);
+        checkbox("Layer pass (experimental)", &cfg::chams::layer_pass, a);
         separator(a);
         checkbox("Overlay chams", &cfg::chams::overlay, a);
         separator(a);

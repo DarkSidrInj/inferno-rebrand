@@ -140,6 +140,29 @@ namespace thirdperson {
         return false;
     }
 
+    // Camera.cullingMask inside the native Camera, traced from the game's accessors. Shared with the
+    // first-person look (CLocalView.hpp), which changes the masks of the cameras that draw layers.
+    inline std::atomic<bool> g_mask_resolving{false};
+    inline void resolve_mask(uint64_t camera) {
+        if (g_mask_offset.load() >= 0) return;
+        struct Try { const char* how; uint64_t fn; bool setter; };
+        std::vector<Try> tries;
+        const uint64_t get_w = proc::lib + v100::camera_get_culling_mask_injected, set_w = proc::lib + v100::camera_set_culling_mask_injected;
+        if (!icalls::slot_empty(get_w)) tries.push_back({"getter wrapper", get_w, false});
+        if (!icalls::slot_empty(set_w)) tries.push_back({"setter wrapper", set_w, true});
+        for (const auto& c : icalls::candidates("UnityEngine.Camera::get_cullingMask_Injected")) tries.push_back({c.how, c.fn, false});
+        for (const auto& c : icalls::candidates("UnityEngine.Camera::set_cullingMask_Injected")) tries.push_back({c.how, c.fn, true});
+        for (const Try& t : tries) {
+            std::string w;
+            const int off = animcull::trace(t.fn, camera, t.setter, w);
+            if (off < 8 || off == g_flag_offset.load()) continue;
+            g_mask_offset = off;
+            diag::log("TP", "culling mask at +0x%x (%s, now 0x%08x)", off, t.how, rpm<uint32_t>(camera + uint64_t(off)));
+            return;
+        }
+        diag::log("TP", "culling mask not found");
+    }
+
     inline void resolve(uint64_t camera) {
         const uint64_t lo = camera + 8, hi = camera + 0x800;
         auto inside = [&](uint64_t a) { return a >= lo && a < hi; };
@@ -206,23 +229,7 @@ namespace thirdperson {
         if (g_flag_offset.load() < 0)
             diag::log("WARN", "TP implicit-matrix flag not found (%s%s)", why.empty() ? "no accessor traced" : "last: ", why.c_str());
 
-        // Culling mask: logged only (the own body is hidden by its shadow casting mode, see CLocalView.hpp).
-        struct Try { const char* how; uint64_t fn; bool setter; };
-        std::vector<Try> tries;
-        const uint64_t get_w = proc::lib + v100::camera_get_culling_mask_injected, set_w = proc::lib + v100::camera_set_culling_mask_injected;
-        if (!icalls::slot_empty(get_w)) tries.push_back({"getter wrapper", get_w, false});
-        if (!icalls::slot_empty(set_w)) tries.push_back({"setter wrapper", set_w, true});
-        for (const auto& c : icalls::candidates("UnityEngine.Camera::get_cullingMask_Injected")) tries.push_back({c.how, c.fn, false});
-        for (const auto& c : icalls::candidates("UnityEngine.Camera::set_cullingMask_Injected")) tries.push_back({c.how, c.fn, true});
-        for (const Try& t : tries) {
-            std::string w;
-            const int off = animcull::trace(t.fn, camera, t.setter, w);
-            if (off < 8 || off == g_flag_offset.load()) continue;
-            g_mask_offset = off;
-            diag::log("TP", "culling mask at +0x%x (%s, now 0x%08x)", off, t.how, rpm<uint32_t>(camera + uint64_t(off)));
-            break;
-        }
-        if (g_mask_offset.load() < 0) diag::log("TP", "culling mask not found (diagnostic only)");
+        resolve_mask(camera);
         g_resolved = true;
     }
 

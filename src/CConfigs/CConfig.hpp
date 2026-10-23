@@ -43,7 +43,8 @@ namespace chams {
     inline float overlay_outline = 1.5f;  // pixels, 0 = none
     inline ImVec4 overlay_outline_col = ImVec4(0.f, 0.f, 0.f, 1.f);
     inline bool no_occlusion = true;  // camera occlusion culling off while through walls is on
-    inline int wall_material = 0;     // 0 / 1 the game's outline mask materials (rdj +0x38 / +0x40), 2 Unity default UI
+    inline bool layer_pass = false;   // experimental: enemies' layers move from the main camera to the first-person camera (depth cleared)
+    inline int wall_material = 2;     // 0 / 1 the game's outline mask materials (rdj +0x38 / +0x40), 2 Unity default UI, 3 untouchable, 4 own outline
 }
 
 namespace thirdperson {

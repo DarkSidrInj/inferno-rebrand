@@ -834,6 +834,31 @@ int main() {
             CHECK(mask_of(view_cam) == 0x100, "first-person camera mask restored (0x%08x)", mask_of(view_cam));
             CHECK(body_ids[0] == -8000 && body_ids[1] == -8001, "body materials restored (%d %d)", body_ids[0], body_ids[1]);
 
+            // Flag fallback: the byte and bit behind get_enabled, found from the getter alone.
+            {
+                uint64_t addr = 0;
+                int bit = -1;
+                CHECK(localview::find_flag(reinterpret_cast<uint64_t>(body), addr, bit) && addr == reinterpret_cast<uint64_t>(body) + 0x109 && bit == 4,
+                      "enabled flag found: +0x%llx bit %d", (unsigned long long)(addr - reinterpret_cast<uint64_t>(body)), bit);
+            }
+
+            // Chams layer pass: enemies on layer 11 leave the main camera for the first-person camera.
+            {
+                cfg::chams::enabled = true; cfg::chams::layer_pass = true;
+                localview::layer_pass_tick(reinterpret_cast<uint64_t>(main_cam), 1u << 11);
+                CHECK(mask_of(main_cam) == (0xFFFFFEFFu & ~(1u << 11)) && mask_of(view_cam) == (0x100u | (1u << 11)),
+                      "layer pass applied (0x%08x 0x%08x)", mask_of(main_cam), mask_of(view_cam));
+                localview::layer_pass_tick(reinterpret_cast<uint64_t>(main_cam), 1u << 0);   // the world's layer: never moved
+                CHECK(mask_of(main_cam) == 0xFFFFFEFFu && mask_of(view_cam) == 0x100u, "layer pass refuses the world layer (0x%08x 0x%08x)",
+                      mask_of(main_cam), mask_of(view_cam));
+                localview::layer_pass_tick(reinterpret_cast<uint64_t>(main_cam), 1u << 11);
+                cfg::chams::layer_pass = false;
+                localview::layer_pass_tick(reinterpret_cast<uint64_t>(main_cam), 1u << 11);
+                CHECK(mask_of(main_cam) == 0xFFFFFEFFu && mask_of(view_cam) == 0x100u, "layer pass off restores both (0x%08x 0x%08x)",
+                      mask_of(main_cam), mask_of(view_cam));
+                cfg::chams::enabled = false;
+            }
+
             // Chams through walls: the outline effect's mask materials, found by the rdj class pointer.
             uint8_t* rdj_class = static_cast<uint8_t*>(calloc(1, 0x300));
             char* rdj_name = static_cast<char*>(calloc(1, 16));

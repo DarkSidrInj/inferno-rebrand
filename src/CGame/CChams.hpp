@@ -327,13 +327,23 @@ namespace chams {
         int source = 0;
         int32_t id = 0;
         if (through_walls && cfg::chams::through_walls) {
-            // The chosen wall material first, then the others.
-            const int pick = std::clamp(cfg::chams::wall_material, 0, 2);
-            const int order[3][3] = {{0, 1, 2}, {1, 0, 2}, {2, 0, 1}};
-            for (int k = 0; k < 3 && !id; ++k) {
-                const int which = order[pick][k];
-                id = which < 2 ? g_mask_ids[which].load() : g_ui_material.load();
-                if (id) source = which < 2 ? 4 + which : 3;
+            // The chosen wall material first, then the rest in a fixed order. Candidates: the game's
+            // outline-effect mask materials, Unity's default UI material, the player's own
+            // untouchable and outline materials.
+            const int pick = std::clamp(cfg::chams::wall_material, 0, 4);
+            const int rest[5] = {2, 3, 4, 0, 1};
+            int order[5] = {pick, 0, 0, 0, 0};
+            int n = 1;
+            for (int w : rest) if (w != pick) order[n++] = w;
+            for (int k = 0; k < 5 && !id; ++k) {
+                const int which = order[k];
+                switch (which) {
+                    case 0: id = g_mask_ids[0].load(); source = id ? 4 : 0; break;
+                    case 1: id = g_mask_ids[1].load(); source = id ? 5 : 0; break;
+                    case 2: id = g_ui_material.load(); source = id ? 3 : 0; break;
+                    case 3: id = material_id(bindings, v100::bindings_untouchable_material); if (!id) id = g_shared_ids[1]; source = id ? 6 : 0; break;
+                    default: id = material_id(bindings, v100::bindings_outline_material); if (!id) id = g_shared_ids[2]; source = id ? 7 : 0; break;
+                }
             }
         }
         if (!id && cfg::chams::material != 0) {
@@ -346,7 +356,8 @@ namespace chams {
         if (source != logged) {
             logged = source;
             static const char* names[] = {"flat (id 0)", "untouchable", "outline", "Unity default UI (through walls)",
-                                          "outline mask +0x38 (through walls)", "outline mask +0x40 (through walls)"};
+                                          "outline mask +0x38 (through walls)", "outline mask +0x40 (through walls)",
+                                          "untouchable (through walls)", "own outline (through walls)"};
             diag::log("CHAMS", "%s targets: %s, id %d%s", through_walls ? "player" : "local", names[source], id,
                       through_walls && cfg::chams::through_walls && source < 3 ? " (through-walls material not found)" : "");
         }
@@ -576,6 +587,16 @@ namespace chams {
 
     inline int g_logged_targets[kTargets] = {-1, -1, -1, -1, -1};
 
+    // Unity layer of a renderer's GameObject (native GameObject +0x40, measured: body 0, arms 8).
+    inline int layer_of(uint64_t renderer) {
+        const uint64_t go = rpm<uint64_t>(renderer + 0x20);
+        if (!plausible(go)) return -1;
+        const uint32_t layer = rpm<uint32_t>(go + 0x40);
+        return layer < 32 ? int(layer) : -1;
+    }
+    inline std::atomic<uint32_t> g_layers[kTargets];  // layers seen on each target's renderers (bit per layer)
+    inline uint32_t g_logged_layers[kTargets] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+
     // Once per frame with every player of the match.
     inline void tick(const std::vector<uint64_t>& players, uint64_t local, int local_team) {
         if (g_pid != proc::pid) {
@@ -630,8 +651,10 @@ namespace chams {
         }
 
         // The outline effect's mask materials: searched on a worker, again every 30 s until found.
+        static int mask_attempts = 0;
         if (cfg::chams::through_walls && !g_mask_ids[0].load() && !g_mask_ids[1].load() && !g_mask_scanning.load() &&
-            now - g_last_mask_scan > 30000) {
+            mask_attempts < 3 && now - g_last_mask_scan > 30000) {
+            ++mask_attempts;
             g_last_mask_scan = now;
             g_mask_scanning = true;
             std::thread([] { resolve_outline_masks(); g_mask_scanning = false; }).detach();
@@ -642,8 +665,11 @@ namespace chams {
         collect_shared(players);
         std::unordered_map<uint64_t, bool> seen;
         int patched[kTargets]{};
+        uint32_t layers[kTargets]{};
         auto apply = [&](Target t, uint64_t renderer, uint64_t bindings) {
-            if (!renderer || !target_on(t)) return;
+            if (!renderer) return;
+            if (const int layer = layer_of(renderer); layer >= 0) layers[t] |= 1u << layer;
+            if (!target_on(t)) return;
             const bool through_walls = t == Enemy || t == Teammate;
             if (patch(renderer, desired_id(bindings, through_walls))) { seen[renderer] = true; ++patched[t]; }
         };
@@ -667,6 +693,13 @@ namespace chams {
                 std::vector<uint64_t> renderers;
                 weapon_renderers(object, renderers);
                 for (uint64_t r : renderers) apply(LocalWeapon, r, local_bindings);
+            }
+        }
+        for (int t = 0; t < kTargets; ++t) {
+            g_layers[t] = layers[t];
+            if (layers[t] != g_logged_layers[t] && layers[t]) {
+                g_logged_layers[t] = layers[t];
+                diag::log("CHAMS", "%s renderers are on layer mask 0x%08x", kTargetNames[t], layers[t]);
             }
         }
         for (int t = 0; t < kTargets; ++t) {
