@@ -1036,87 +1036,93 @@ int main() {
             antiaim::tick(me, feet);
             CHECK(aa_entries[1].rotation.w == 1.f, "model restored on disable (%.3f)", aa_entries[1].rotation.w);
 
-            // Skin changer: meta index calibrated from other players' skins (old ids carry the
-            // weapon), the entry of the weapon in hands patched and its view made to load again.
+            // Skin changer: the item in hands gets the skin in its meta copy, two copies of that meta
+            // data go to the end of the registry and its meta id points at them; a Butterfly skin on
+            // the default knife makes it a Butterfly. Its view is made to load again.
             {
-                auto named_class = [&](const char* name, const char* space) {
+                auto named_class = [&](const char* name) {
                     uint8_t* k = static_cast<uint8_t*>(calloc(1, 0x300));
                     char* t = static_cast<char*>(calloc(1, 32)); std::strcpy(t, name);
-                    char* n = static_cast<char*>(calloc(1, 48)); std::strcpy(n, space);
                     *reinterpret_cast<uint64_t*>(k + klass::g_name_offset) = reinterpret_cast<uint64_t>(t);
-                    *reinterpret_cast<uint64_t*>(k + klass::g_name_offset + 8) = reinterpret_cast<uint64_t>(n);
                     return k;
                 };
-                uint8_t* beh_class = named_class("beh", "");
-                // Registry: entry i belongs to owner i; even entries carry an AKR skin, odd ones a USP skin.
-                const int kEntries = 8;
-                uint8_t* items = static_cast<uint8_t*>(calloc(1, 0x20 + kEntries * 0x38));
-                *reinterpret_cast<uint64_t*>(items + 0x18) = kEntries;
+                uint8_t* beh_class = named_class("beh");
+                uint8_t* qjf_class = named_class("qjf");
+                const int kCapacity = 8;
+                uint8_t* items = static_cast<uint8_t*>(calloc(1, 0x20 + kCapacity * 0x38));
+                *reinterpret_cast<uint64_t*>(items + 0x18) = kCapacity;
                 auto skin_at = [&](int i) { return reinterpret_cast<int32_t*>(items + 0x20 + i * 0x38 + 4); };
-                for (int i = 0; i < kEntries; ++i) { items[0x20 + i * 0x38] = uint8_t(i); *skin_at(i) = i % 2 ? 31201 : 24401; }
-                *skin_at(5) = 0;  // the local player's AKR has no skin
+                *skin_at(1) = 240007; items[0x20 + 0x38] = 3;  // someone's skinned weapon
                 uint8_t* list = static_cast<uint8_t*>(calloc(1, 0x20));
                 *reinterpret_cast<uint64_t*>(list + 0x10) = reinterpret_cast<uint64_t>(items);
-                *reinterpret_cast<int32_t*>(list + 0x18) = kEntries;
+                *reinterpret_cast<int32_t*>(list + 0x18) = 3;
+                auto count = [&] { return *reinterpret_cast<int32_t*>(list + 0x18); };
                 uint8_t* yvh = static_cast<uint8_t*>(calloc(1, 0x20));
                 *reinterpret_cast<uint64_t*>(yvh + 0x10) = reinterpret_cast<uint64_t>(list);
-                auto make_player = [&](int weapon, int meta, uint8_t*& beh_out) {
-                    uint8_t* beh = static_cast<uint8_t*>(calloc(1, 0xC0));
-                    *reinterpret_cast<uint64_t*>(beh) = reinterpret_cast<uint64_t>(beh_class);
-                    beh[0x40] = uint8_t(weapon);
-                    *reinterpret_cast<uint16_t*>(beh + 0x42) = uint16_t(meta);
-                    *reinterpret_cast<uint64_t*>(beh + 0x80) = reinterpret_cast<uint64_t>(yvh);
-                    uint8_t* parts = static_cast<uint8_t*>(calloc(1, 0x30));
-                    *reinterpret_cast<uint64_t*>(parts + 0x18) = 2;
-                    *reinterpret_cast<uint64_t*>(parts + 0x20) = reinterpret_cast<uint64_t>(calloc(1, 0x40));  // some other part
-                    *reinterpret_cast<uint64_t*>(parts + 0x28) = reinterpret_cast<uint64_t>(beh);
-                    uint8_t* wmz = static_cast<uint8_t*>(calloc(1, 0x50));
-                    *reinterpret_cast<uint64_t*>(wmz + 0x18) = reinterpret_cast<uint64_t>(parts);
-                    uint8_t* player = static_cast<uint8_t*>(calloc(1, 0x100));
-                    *reinterpret_cast<uint64_t*>(player + v100::net_systems) = reinterpret_cast<uint64_t>(wmz);
-                    beh_out = beh;
-                    return reinterpret_cast<uint64_t>(player);
-                };
-                std::vector<uint64_t> players_s;
-                uint8_t* unused_beh = nullptr;
-                for (int k = 0; k < 4; ++k) players_s.push_back(make_player(k % 2 ? 12 : 44, k + 1, unused_beh));  // meta = index + 1
-                uint8_t* local_beh = nullptr;
-                const uint64_t local_s = make_player(44, 6, local_beh);
-                players_s.push_back(local_s);
+                uint8_t* item = static_cast<uint8_t*>(calloc(1, 0x80));
+                *reinterpret_cast<uint64_t*>(item) = reinterpret_cast<uint64_t>(qjf_class);
+                item[0x10] = 70;          // default knife
+                item[0x18] = 5;           // owner
+                *reinterpret_cast<int32_t*>(item + 0x20) = 9;  // charm
+                uint8_t* part = static_cast<uint8_t*>(calloc(1, 0x100));
+                *reinterpret_cast<uint64_t*>(part + 0x78) = reinterpret_cast<uint64_t>(item);
+                uint8_t* beh = static_cast<uint8_t*>(calloc(1, 0xC0));
+                *reinterpret_cast<uint64_t*>(beh) = reinterpret_cast<uint64_t>(beh_class);
+                beh[0x40] = 70;
+                *reinterpret_cast<uint64_t*>(beh + 0x58) = reinterpret_cast<uint64_t>(part);
+                *reinterpret_cast<uint64_t*>(beh + 0x80) = reinterpret_cast<uint64_t>(yvh);
+                uint8_t* parts = static_cast<uint8_t*>(calloc(1, 0x30));
+                *reinterpret_cast<uint64_t*>(parts + 0x18) = 1;
+                *reinterpret_cast<uint64_t*>(parts + 0x20) = reinterpret_cast<uint64_t>(beh);
+                uint8_t* wmz = static_cast<uint8_t*>(calloc(1, 0x50));
+                *reinterpret_cast<uint64_t*>(wmz + 0x10) = reinterpret_cast<uint64_t>(parts);
+                uint8_t* player = static_cast<uint8_t*>(calloc(1, 0x100));
+                *reinterpret_cast<uint64_t*>(player + v100::net_systems) = reinterpret_cast<uint64_t>(wmz);
+                const uint64_t local_s = reinterpret_cast<uint64_t>(player);
+                auto beh_meta = [&] { return *reinterpret_cast<uint16_t*>(beh + 0x42); };
+                auto item_skin = [&] { return *reinterpret_cast<int32_t*>(item + 0x1C); };
+                auto item_id = [&] { return *reinterpret_cast<uint16_t*>(item + 0x50); };
+                auto game_reloads = [&] { *reinterpret_cast<uint16_t*>(beh + 0x42) = item_id(); beh[0x40] = item[0x10]; *reinterpret_cast<int32_t*>(beh + 0x48) += 1; };
 
                 skins::g_pid = -1;
                 cfg::skins::enabled = true;
-                cfg::skins::chosen[44] = 47502;
-                skins::tick(local_s, players_s);
-                CHECK(skins::g_index_shift == 1, "meta index shift %d", skins::g_index_shift);
-                CHECK(*skin_at(5) == 47502 && *reinterpret_cast<uint16_t*>(local_beh + 0x42) == 0xFFFE,
-                      "held AKR gets skin 47502 and its view reloads (skin %d, cache %d)", *skin_at(5), *reinterpret_cast<uint16_t*>(local_beh + 0x42));
+                cfg::skins::chosen[70] = 47502;
+                skins::tick(local_s, {local_s});
+                CHECK(item[0x10] == 75 && item_skin() == 47502 && item_id() == 4 && count() == 5 && *skin_at(3) == 47502 && *skin_at(4) == 47502 &&
+                      items[0x20 + 4 * 0x38] == 5 && *reinterpret_cast<int32_t*>(items + 0x20 + 4 * 0x38 + 8) == 9 && beh_meta() == 0xFFFE,
+                      "knife -> Butterfly 47502 (weapon %d skin %d id %d count %d)", item[0x10], item_skin(), item_id(), count());
                 const skins::View v = skins::view();
-                CHECK(v.weapon == 44 && v.names.size() == 16 && v.names[1] == "Butterfly Gold" && v.ids[15] == 240369 && v.current == 1,
-                      "menu list: %zu names, current %d", v.names.size(), v.current);
-                // The game loads again: its cache is back and the op id moved.
-                *reinterpret_cast<uint16_t*>(local_beh + 0x42) = 6;
-                *reinterpret_cast<int32_t*>(local_beh + 0x48) += 1;
+                CHECK(v.weapon == 70 && v.names.size() == 16 && v.names[1] == "Butterfly Gold" && v.current == 1, "menu list: %zu, current %d", v.names.size(), v.current);
+                game_reloads();
                 skins::g_reload_at -= 1000;
-                skins::tick(local_s, players_s);
-                CHECK(*skin_at(5) == 47502 && skins::g_reload_at == 0, "skin kept, reload seen");
-                cfg::skins::chosen[44] = 0;
-                skins::tick(local_s, players_s);
-                CHECK(*skin_at(5) == 0, "original skin back when nothing is chosen (%d)", *skin_at(5));
-                // A reload that never comes: the cache is put back by itself.
-                CHECK(*reinterpret_cast<uint16_t*>(local_beh + 0x42) == 0xFFFE, "reload requested");
-                skins::g_reload_at -= 1000;
-                skins::tick(local_s, players_s);
-                CHECK(*reinterpret_cast<uint16_t*>(local_beh + 0x42) == 6, "cache restored without a reload");
-                cfg::skins::chosen[44] = 240007;
+                const int op = *reinterpret_cast<int32_t*>(beh + 0x48);
+                skins::tick(local_s, {local_s});
+                skins::tick(local_s, {local_s});
+                CHECK(count() == 5 && *reinterpret_cast<int32_t*>(beh + 0x48) == op && beh_meta() == 4, "kept in place after the reload");
+                cfg::skins::chosen[70] = 240369;  // another skin: fresh meta data
+                skins::tick(local_s, {local_s});
+                CHECK(item[0x10] == 75 && item_skin() == 240369 && item_id() == 4 && count() == 5 && *skin_at(4) == 240369,
+                      "skin changed in place of the old copies (id %d count %d)", item_id(), count());
+                game_reloads();
                 skins::g_reload_at = 0;
-                skins::tick(local_s, players_s);
-                CHECK(*skin_at(5) == 240007, "skin 240007");
-                *reinterpret_cast<uint16_t*>(local_beh + 0x42) = 6;
+                cfg::skins::chosen[70] = 0;
+                skins::tick(local_s, {local_s});
+                CHECK(item[0x10] == 70 && item_skin() == 0 && item_id() == 0 && count() == 3, "original knife back (count %d)", count());
+                // Registry without room: the meta copy alone, and no churn.
+                game_reloads();
+                skins::g_reload_at = 0;
+                *reinterpret_cast<uint64_t*>(items + 0x18) = 3;
+                cfg::skins::chosen[70] = 47503;
+                skins::tick(local_s, {local_s});
+                CHECK(item[0x10] == 75 && item_skin() == 47503 && item_id() == 0 && count() == 3, "registry full: meta copy only");
+                game_reloads();
+                skins::g_reload_at = 0;
+                const int op2 = *reinterpret_cast<int32_t*>(beh + 0x48);
+                skins::tick(local_s, {local_s});
+                CHECK(beh_meta() == 0 && *reinterpret_cast<int32_t*>(beh + 0x48) == op2, "no churn");
                 cfg::skins::enabled = false;
-                skins::g_reload_at = 0;
-                skins::tick(local_s, players_s);
-                CHECK(*skin_at(5) == 0 && *skin_at(4) == 24401 && *skin_at(6) == 24401, "disabled: original back, others untouched");
+                skins::tick(local_s, {local_s});
+                CHECK(item[0x10] == 70 && item_skin() == 0 && item_id() == 0 && count() == 3, "disabled: original back");
             }
         }
 

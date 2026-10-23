@@ -1,18 +1,20 @@
 #pragma once
-// Skin changer for the weapons in the local player's hands (only this client sees it).
+// Skin changer for the weapon in the local player's hands (only this client sees it).
 // From dump.cs:
 //   - beh (chx part of every player: the weapon in hands) caches what it loaded as
 //     acxp = (WeaponId @+0x40, WeaponMetaId @+0x42, view mode @+0x44); <opId> yppb @+0x48 grows
-//     with every load (SetWeaponContent). Its onk (+0x80) is the match's weapon meta registry yvh.
-//   - yvh.jmqq (+0x10) = List<WeaponMetaData>; WeaponMetaData (0x38 bytes: FixedList32Bytes is
-//     8-aligned) = OwnerId u8 @0, SkinId i32 @4, CharmId i32 @8, stickers @0x10, SkinPatternId @0x30.
-//     The content loader reads SkinId from there by the weapon's WeaponMetaId.
-// The entry of the weapon in hands gets the chosen SkinId, and acxp's meta id is spoiled so beh
-// sees a different weapon state and loads again. An entry may be shared by several weapons of
-// one owner (same meta data), so it always carries the skin of the weapon in hands; the game's
-// value is put back when nothing is chosen, or on disable.
-// Whether WeaponMetaId.Raw is the list index or index + 1 is calibrated in game from other
-// players' skins: skin ids below 200000 carry their weapon (47502 = set 4, weapon 75, skin 02).
+//     with every load (SetWeaponContent). Its onk (+0x80) is the match's weapon meta registry yvh,
+//     its nrk (+0x58) the weapon part, whose WeaponContext (+0x30) holds ActiveWeapon (+0x78).
+//   - ActiveWeapon is a qjf: WeaponId u8 @+0x10, its own WeaponMetaData copy @+0x18
+//     (OwnerId u8 @0, SkinId i32 @4, CharmId @8, stickers @0x10, SkinPatternId @0x30; 0x38 bytes),
+//     WeaponMetaId u16 @+0x50. beh computes the meta id of the state it loads from it.
+//   - yvh.jmqq (+0x10) = List<WeaponMetaData>, read by the loader by meta id.
+// On device a weapon without a skin has meta id 0, shared by every such weapon, so the registry
+// entry is not touched. The held qjf gets the chosen SkinId in its meta copy, and two copies of
+// that meta data are appended to the registry (Raw may be the index or index + 1; the second copy
+// is right either way), its meta id pointing there. A Butterfly skin on another knife also makes
+// it a Butterfly (WeaponId 75), so the model matches the skin. beh's cached meta id is spoiled so
+// it loads again. Everything goes back when nothing is chosen, or on disable.
 
 #include "CGameContext.hpp"
 #include "CClass.hpp"
@@ -25,9 +27,13 @@
 #include <vector>
 
 namespace skins {
-    inline constexpr uint64_t kBehState = 0x40, kBehMeta = 0x42, kBehOpId = 0x48, kBehRegistry = 0x80;
+    inline constexpr uint64_t kBehState = 0x40, kBehMeta = 0x42, kBehOpId = 0x48, kBehPart = 0x58, kBehRegistry = 0x80;
+    inline constexpr uint64_t kPartActiveWeapon = 0x78;
+    inline constexpr uint64_t kItemWeapon = 0x10, kItemMeta = 0x18, kItemMetaId = 0x50;
     inline constexpr uint64_t kRegistryList = 0x10;
-    inline constexpr uint64_t kEntryStride = 0x38, kEntryOwner = 0x0, kEntrySkin = 0x4;
+    inline constexpr uint64_t kEntryStride = 0x38, kEntryOwner = 0x0, kEntrySkin = 0x4, kEntryCharm = 0x8;
+    inline constexpr int kButterfly = 75;
+    inline constexpr int kFirstKnife = 70, kLastKnife = 99;   // knife WeaponIds (70: default knife on device)
 
     struct Skin { int id; const char* name; };
     // The skins offered in the menu.
@@ -40,7 +46,15 @@ namespace skins {
         {240319, "Butterfly WildWest"},     {240331, "Butterfly JadeStone"},   {240369, "Butterfly Twilight"},
     };
 
-    struct Patch { int original{}; int written{}; };
+    inline bool butterfly_skin(int id) {
+        for (const Skin& s : kSkins) if (s.id == id) return true;
+        return false;
+    }
+    inline bool knife(int weapon) { return weapon >= kFirstKnife && weapon <= kLastKnife; }
+
+    // What a weapon item holds; `orig` as the game set it, `written` as we left it.
+    struct Fields { int weapon{}; int skin{}; int meta_id{}; };
+    struct Item { Fields orig{}, written{}; uint64_t list{}; int appended_at = -1; };
     struct View { int weapon = -1; int current = 0; std::vector<int> ids; std::vector<std::string> names; std::string status; };
 
     inline int g_pid = -1;
@@ -48,11 +62,7 @@ namespace skins {
     inline std::string g_status = "waiting for a match";
 
     inline std::unordered_map<uint64_t, uint64_t> g_beh;  // player -> beh
-    inline int g_index_shift = -1;                   // list index = Raw - shift
-    inline int g_votes[2][2]{};                      // [shift][matches weapon]
-    inline std::unordered_map<uint64_t, bool> g_voted;  // (beh, meta) pairs counted once
-    inline uint64_t g_list = 0;                      // registry list the patches are in
-    inline std::unordered_map<int, Patch> g_patched; // entry index -> values
+    inline std::unordered_map<uint64_t, Item> g_items;    // qjf -> what we changed
     inline std::atomic<int> g_held_weapon{-1};
     inline constexpr int kSpoiled = 0xFFFE;
     inline uint64_t g_reload_beh = 0;
@@ -63,9 +73,6 @@ namespace skins {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (s != g_status) { g_status = s; diag::log("SKINS", "%s", s.c_str()); }
     }
-
-    // Weapon of a skin id in the old numbering (set * 10000 + weapon * 100 + n), or -1.
-    inline int weapon_of(int skin) { return skin >= 10000 && skin < 200000 ? (skin / 100) % 100 : -1; }
 
     // ---- match state ---------------------------------------------------------------------------
     inline uint64_t find_beh(uint64_t player) {
@@ -106,34 +113,60 @@ namespace skins {
         return index >= 0 && index < r.count ? r.data + uint64_t(index) * kEntryStride : 0;
     }
 
-    // One vote per (weapon view, meta id) with an old-numbered skin: which index shift puts a
-    // skin of that weapon in the entry.
-    inline void vote(const std::vector<uint64_t>& players) {
-        if (g_index_shift >= 0) return;
-        for (uint64_t p : players) {
-            const uint64_t b = find_beh(p);
-            Registry r;
-            if (!b || !registry_of(b, r)) continue;
-            const int weapon = rpm<uint8_t>(b + kBehState);
-            const int meta = rpm<uint16_t>(b + kBehMeta);
-            if (!weapon || meta == kSpoiled || !g_voted.emplace((b << 16) ^ uint64_t(meta) ^ (uint64_t(weapon) << 56), true).second) continue;
-            for (int shift = 0; shift < 2; ++shift) {
-                const uint64_t e = entry(r, meta - shift);
-                const int w = e ? weapon_of(rpm<int>(e + kEntrySkin)) : -1;
-                if (w >= 0) ++g_votes[shift][w == weapon ? 1 : 0];
+    inline uint64_t active_weapon(uint64_t beh) {
+        const uint64_t part = rpm<uint64_t>(beh + kBehPart);
+        const uint64_t item = plausible(part) ? rpm<uint64_t>(part + kPartActiveWeapon) : 0;
+        return plausible(item) && klass::is_named(item, "qjf") ? item : 0;
+    }
+
+    inline Fields read_fields(uint64_t item) {
+        return {int(rpm<uint8_t>(item + kItemWeapon)), rpm<int>(item + kItemMeta + kEntrySkin), int(rpm<uint16_t>(item + kItemMetaId))};
+    }
+
+    inline bool same(const Fields& a, const Fields& b) { return a.weapon == b.weapon && a.skin == b.skin && a.meta_id == b.meta_id; }
+
+    inline void write_fields(uint64_t item, const Fields& f) {
+        wpm<uint8_t>(item + kItemWeapon, uint8_t(f.weapon));
+        wpm<int>(item + kItemMeta + kEntrySkin, f.skin);
+        wpm<uint16_t>(item + kItemMetaId, uint16_t(f.meta_id));
+    }
+
+    // Two copies of the item's meta data (with `skin`) at the end of the registry list; the meta id
+    // that names the second one under either numbering, or -1 when the list has no room.
+    inline int append_meta(const Registry& r, uint64_t item, int skin, int& appended_at) {
+        const uint64_t items = rpm<uint64_t>(r.list + v100::list_items);
+        const uint64_t capacity = rpm<uint64_t>(items + v100::array_length);
+        if (uint64_t(r.count) + 2 > capacity || r.count + 1 >= kSpoiled) return -1;
+        uint8_t meta[kEntryStride];
+        if (!mem_read(item + kItemMeta, meta, sizeof(meta))) return -1;
+        std::memcpy(meta + kEntrySkin, &skin, 4);
+        for (int k = 0; k < 2; ++k)
+            for (size_t i = 0; i < kEntryStride; i += 8) {
+                uint64_t w;
+                std::memcpy(&w, meta + i, 8);
+                wpm<uint64_t>(r.data + uint64_t(r.count + k) * kEntryStride + i, w);
             }
-        }
-        for (int shift = 0; shift < 2; ++shift) {
-            const int good = g_votes[shift][1], other = g_votes[1 - shift][1];
-            if (good >= 3 && good > 2 * other) {
-                g_index_shift = shift;
-                diag::log("SKINS", "meta index = Raw - %d (votes: shift0 %d/%d, shift1 %d/%d)", shift, g_votes[0][1],
-                          g_votes[0][0], g_votes[1][1], g_votes[1][0]);
-            }
-        }
-        if (g_index_shift < 0 && diag::every(g_log, 5000))
-            diag::log("SKINS", "calibrating meta index: shift0 %d match/%d not, shift1 %d/%d", g_votes[0][1], g_votes[0][0],
-                      g_votes[1][1], g_votes[1][0]);
+        appended_at = r.count;
+        wpm<int>(r.list + v100::list_count, r.count + 2);
+        return r.count + 1;
+    }
+
+    // Our two copies are still the last entries of the list with that skin.
+    inline bool appended_valid(const Item& it, int skin) {
+        Registry r;
+        if (it.appended_at < 0 || !plausible(it.list)) return false;
+        const uint64_t items = rpm<uint64_t>(it.list + v100::list_items);
+        const int count = rpm<int>(it.list + v100::list_count);
+        if (!plausible(items) || count < it.appended_at + 2) return false;
+        for (int k = 0; k < 2; ++k)
+            if (rpm<int>(items + v100::array_data + uint64_t(it.appended_at + k) * kEntryStride + kEntrySkin) != skin) return false;
+        return true;
+    }
+
+    inline void put_back(uint64_t item, Item& it) {
+        if (klass::is_named(item, "qjf") && same(read_fields(item), it.written)) write_fields(item, it.orig);
+        if (it.appended_at >= 0 && plausible(it.list) && rpm<int>(it.list + v100::list_count) == it.appended_at + 2)
+            wpm<int>(it.list + v100::list_count, it.appended_at);
     }
 
     // Makes beh load its weapon again: the meta id it remembers no longer matches.
@@ -161,95 +194,97 @@ namespace skins {
     }
 
     inline void restore() {
-        if (g_patched.empty()) return;
-        const uint64_t items = plausible(g_list) ? rpm<uint64_t>(g_list + v100::list_items) : 0;
-        const int count = plausible(g_list) ? rpm<int>(g_list + v100::list_count) : 0;
-        if (plausible(items))
-            for (const auto& e : g_patched) {
-                if (e.first < 0 || e.first >= count) continue;
-                const uint64_t at = items + v100::array_data + uint64_t(e.first) * kEntryStride + kEntrySkin;
-                if (rpm<int>(at) == e.second.written) wpm<int>(at, e.second.original);
-            }
-        g_patched.clear();
+        if (g_items.empty()) return;
+        for (auto& e : g_items) put_back(e.first, e.second);
+        g_items.clear();
         if (g_reload_beh && klass::is_named(g_reload_beh, "beh")) {
             const int meta = rpm<uint16_t>(g_reload_beh + kBehMeta);
             if (meta != kSpoiled) { g_reload_at = 0; reload(g_reload_beh, meta); }
         }
-        diag::log("SKINS", "original skins back");
+        diag::log("SKINS", "original weapons back");
     }
 
     inline void reset_process() {
         g_pid = proc::pid;
         g_beh.clear();
-        g_index_shift = -1;
-        std::memset(g_votes, 0, sizeof(g_votes));
-        g_voted.clear();
-        g_list = 0;
-        g_patched.clear();
+        g_items.clear();
         g_reload_beh = 0;
         g_reload_at = 0;
     }
 
-    // Every 5 s until skins apply: the chain from the local player to the registry entry.
-    inline void report(uint64_t local, const std::vector<uint64_t>& players) {
-        static long long last = 0;
-        if (!diag::every(last, 5000)) return;
-        int views = 0;
-        for (uint64_t p : players) if (find_beh(p)) ++views;
-        const uint64_t b = find_beh(local);
+    // Every 5 s: the chain from the local player to the weapon item and the registry.
+    inline void report(uint64_t beh, uint64_t item) {
+        if (!diag::every(g_log, 5000)) return;
         Registry r;
-        if (!b) { diag::log("SKINS", "state: weapon view (beh) not found on the local player; %d of %zu players have one", views, players.size()); return; }
-        const bool reg = registry_of(b, r);
-        const int meta = rpm<uint16_t>(b + kBehMeta);
-        char entries[160] = "";
-        for (int shift = 0; shift < 2 && reg; ++shift)
-            if (const uint64_t e = entry(r, meta - shift)) {
-                const size_t n = std::strlen(entries);
-                std::snprintf(entries + n, sizeof(entries) - n, " [Raw-%d] owner %d skin %d pattern %d;", shift, int(rpm<uint8_t>(e + kEntryOwner)),
-                              rpm<int>(e + kEntrySkin), rpm<int>(e + 0x30));
-            }
-        diag::log("SKINS", "state: beh 0x%llx weapon %d meta %d view %d op %d; registry %s (%d entries)%s; views %d/%zu",
-                  (unsigned long long)b, int(rpm<uint8_t>(b + kBehState)), meta, int(rpm<uint8_t>(b + 0x44)), rpm<int>(b + kBehOpId),
-                  reg ? "ok" : "NOT found", reg ? r.count : 0, entries, views, players.size());
+        const bool reg = registry_of(beh, r);
+        const uint64_t items = reg ? rpm<uint64_t>(r.list + v100::list_items) : 0;
+        char entries[200] = "";
+        for (int i = 0; reg && i < r.count && i < 4; ++i) {
+            const uint64_t e = entry(r, i);
+            const size_t n = std::strlen(entries);
+            std::snprintf(entries + n, sizeof(entries) - n, " [%d] owner %d skin %d charm %d;", i, int(rpm<uint8_t>(e + kEntryOwner)),
+                          rpm<int>(e + kEntrySkin), rpm<int>(e + kEntryCharm));
+        }
+        const Fields f = item ? read_fields(item) : Fields{};
+        diag::log("SKINS", "state: beh weapon %d meta %d view %d op %d; item 0x%llx weapon %d skin %d meta id %d owner %d; registry %s %d/%llu:%s",
+                  int(rpm<uint8_t>(beh + kBehState)), int(rpm<uint16_t>(beh + kBehMeta)), int(rpm<uint8_t>(beh + 0x44)),
+                  rpm<int>(beh + kBehOpId), (unsigned long long)item, f.weapon, f.skin, f.meta_id,
+                  item ? int(rpm<uint8_t>(item + kItemMeta + kEntryOwner)) : -1, reg ? "ok" : "NOT found", reg ? r.count : 0,
+                  (unsigned long long)(items ? rpm<uint64_t>(items + v100::array_length) : 0), entries);
     }
 
     // Once per frame.
     inline void tick(uint64_t local, const std::vector<uint64_t>& players) {
+        (void)players;
         if (g_pid != proc::pid) reset_process();
         settle();
         if (!cfg::skins::enabled) { restore(); g_held_weapon = -1; return; }
         if (!local || proc::pid <= 0) return;
-        if (g_index_shift < 0) report(local, players);
-        vote(players);
 
         const uint64_t b = find_beh(local);
-        Registry r;
         if (!b) { set_status("weapon view not found"); return; }
+        const uint64_t item = active_weapon(b);
+        report(b, item);
+        if (!item) { set_status("weapon in hands not found"); return; }
+        if (rpm<uint16_t>(b + kBehMeta) == kSpoiled) return;  // our reload is pending
+        Registry r;
         if (!registry_of(b, r)) { set_status("weapon registry not found"); return; }
-        if (r.list != g_list) { g_list = r.list; g_patched.clear(); }  // new match
-        const int weapon = rpm<uint8_t>(b + kBehState);
-        const int meta = rpm<uint16_t>(b + kBehMeta);
-        if (meta == kSpoiled) return;  // our reload is pending
-        g_held_weapon = weapon;
-        if (g_index_shift < 0) { set_status("calibrating: look at players with skins"); return; }
 
-        const int index = meta - g_index_shift;
-        const uint64_t e = entry(r, index);
-        if (!e) { set_status("weapon in hands has no meta entry (" + std::to_string(meta) + ")"); return; }
-        const int current = rpm<int>(e + kEntrySkin);
-        auto it = g_patched.find(index);
-        if (it != g_patched.end() && current != it->second.written) { g_patched.erase(it); it = g_patched.end(); }  // the game set it again
-        const int original = it != g_patched.end() ? it->second.original : current;
+        const Fields now = read_fields(item);
+        auto found = g_items.find(item);
+        if (found != g_items.end() && !same(now, found->second.written)) {  // the game set it again
+            g_items.erase(found);
+            found = g_items.end();
+        }
+        Item it = found != g_items.end() ? found->second : Item{now, now, r.list, -1};
+        const int weapon = it.orig.weapon;
+        g_held_weapon = weapon;
         const int chosen = weapon < 256 ? cfg::skins::chosen[weapon] : 0;
-        const int want = chosen > 0 ? chosen : original;
         set_status("weapon " + std::to_string(weapon) + ": " + (chosen > 0 ? "skin " + std::to_string(chosen) : "original"));
-        if (current == want) return;
-        wpm<int>(e + kEntrySkin, want);
-        if (want == original) g_patched.erase(index);
-        else g_patched[index] = {original, want};
-        diag::log("SKINS", "weapon %d meta %d entry %d: skin %d -> %d (owner %d)", weapon, meta, index, current, want,
-                  int(rpm<uint8_t>(e + kEntryOwner)));
-        reload(b, meta);
+
+        if (chosen <= 0) {
+            if (found == g_items.end()) return;
+            put_back(item, it);
+            g_items.erase(item);
+            diag::log("SKINS", "weapon %d: original back (skin %d, meta id %d)", weapon, it.orig.skin, it.orig.meta_id);
+            reload(b, rpm<uint16_t>(b + kBehMeta));
+            return;
+        }
+        Fields want{knife(weapon) && butterfly_skin(chosen) ? kButterfly : weapon, chosen, it.written.meta_id};
+        if (found != g_items.end() && same(it.written, want) && (it.appended_at < 0 || appended_valid(it, chosen))) return;  // in place
+        // Fresh meta data for this skin.
+        if (found != g_items.end()) put_back(item, it);
+        it = Item{it.orig, {}, r.list, -1};
+        registry_of(b, r);
+        wpm<int>(item + kItemMeta + kEntrySkin, chosen);  // the copy the appended entries are made from
+        const int id = append_meta(r, item, chosen, it.appended_at);
+        want.meta_id = id >= 0 ? id : it.orig.meta_id;
+        write_fields(item, want);
+        it.written = want;
+        g_items[item] = it;
+        diag::log("SKINS", "weapon %d -> %d skin %d meta id %d -> %d (%s)", weapon, want.weapon, chosen, it.orig.meta_id, want.meta_id,
+                  id >= 0 ? "meta data appended" : "registry full: meta copy only");
+        reload(b, rpm<uint16_t>(b + kBehMeta));
     }
 
     // ---- menu -------------------------------------------------------------------------------------
