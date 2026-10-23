@@ -1107,6 +1107,21 @@ int main() {
                 skins::tick(local_s, players_s);  // starts the definition scan
                 while (skins::g_scanning.load()) usleep(1000);
                 CHECK(skins::g_scanned.load() && skins::g_def_by_id.size() == 5, "skin definitions found: %zu", skins::g_def_by_id.size());
+                // Without the TypeInfo globals: the classes by their name strings.
+                {
+                    *reinterpret_cast<uint64_t*>(unity + 0x780) = 0;
+                    *reinterpret_cast<uint64_t*>(unity + 0x788) = 0;
+                    char* meta_strings = static_cast<char*>(calloc(1, 64));
+                    std::memcpy(meta_strings, "\0SkinDefinition\0StatTrackSkinDefinition\0", 41);
+                    *reinterpret_cast<uint64_t*>(def_class + klass::g_name_offset) = reinterpret_cast<uint64_t>(meta_strings + 1);
+                    *reinterpret_cast<uint64_t*>(st_class + klass::g_name_offset) = reinterpret_cast<uint64_t>(meta_strings + 16);
+                    const auto by_string = skins::find_def_classes();
+                    // (our own buffers hold stale copies of the classes too; the game's memory does not)
+                    auto has = [&](const uint8_t* k, bool st) {
+                        return std::any_of(by_string.begin(), by_string.end(), [&](const auto& c) { return c.first == reinterpret_cast<uint64_t>(k) && c.second == st; });
+                    };
+                    CHECK(has(def_class, false) && has(st_class, true), "skin classes by name string: %zu", by_string.size());
+                }
                 skins::tick(local_s, players_s);
                 CHECK(skins::g_index_shift == 1, "meta index shift %d", skins::g_index_shift);
                 CHECK(*skin_at(5) == 102 && *reinterpret_cast<uint16_t*>(local_beh + 0x42) == 0xFFFE,

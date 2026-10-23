@@ -68,8 +68,18 @@ namespace skins {
     // ---- definitions --------------------------------------------------------------------------
     inline bool class_name(uint64_t k, char* out, size_t cap) { return klass::name_at(k, klass::g_name_offset, out, cap); }
 
+    inline bool def_class_name(uint64_t k, bool& stattrack) {
+        char name[32], space[48];
+        if (!class_name(k, name, sizeof(name))) return false;
+        const bool plain = !std::strcmp(name, "SkinDefinition");
+        stattrack = !std::strcmp(name, "StatTrackSkinDefinition");
+        return (plain || stattrack) &&
+               klass::read_name(rpm<uint64_t>(k + uint64_t(klass::g_name_offset) + 8), space, sizeof(space)) &&
+               std::strstr(space, "Inventory");
+    }
+
     // SkinDefinition and StatTrackSkinDefinition among libunity's TypeInfo globals.
-    inline std::vector<std::pair<uint64_t, bool>> find_def_classes() {
+    inline std::vector<std::pair<uint64_t, bool>> typeinfo_def_classes() {
         std::vector<std::pair<uint64_t, bool>> out;
         if (!klass::calibrate()) return out;
         std::unordered_map<uint64_t, bool> checked;
@@ -82,13 +92,8 @@ namespace skins {
                 words.assign(chunk / 8, 0);
                 if (mem_read(at, words.data(), chunk)) {
                     for (uint64_t v : words) {
-                        if (!plausible(v) || !checked.emplace(v, true).second) continue;
-                        char name[32], space[48];
-                        if (!class_name(v, name, sizeof(name))) continue;
-                        const bool plain = !std::strcmp(name, "SkinDefinition"), st = !std::strcmp(name, "StatTrackSkinDefinition");
-                        if (!plain && !st) continue;
-                        if (!klass::read_name(rpm<uint64_t>(v + uint64_t(klass::g_name_offset) + 8), space, sizeof(space)) ||
-                            !std::strstr(space, "Inventory")) continue;
+                        bool st = false;
+                        if (!plausible(v) || !checked.emplace(v, true).second || !def_class_name(v, st)) continue;
                         if (std::none_of(out.begin(), out.end(), [v](const auto& c) { return c.first == v; })) out.push_back({v, st});
                     }
                 }
@@ -114,6 +119,90 @@ namespace skins {
         }
         std::fclose(f);
         return maps;
+    }
+
+    // Readable non-code mappings that can hold il2cpp metadata (anonymous, or a file named like it).
+    inline std::vector<std::pair<uint64_t, uint64_t>> metadata_maps() {
+        std::vector<std::pair<uint64_t, uint64_t>> maps;
+        char path[64];
+        std::snprintf(path, sizeof(path), "/proc/%d/maps", proc::pid);
+        FILE* f = std::fopen(path, "r");
+        if (!f) return maps;
+        char line[1024];
+        while (std::fgets(line, sizeof(line), f)) {
+            unsigned long long b = 0, e = 0;
+            char perms[5]{};
+            if (std::sscanf(line, "%llx-%llx %4s", &b, &e, perms) != 3 || perms[0] != 'r' || perms[2] == 'x') continue;
+            if (e - b < 0x1000 || e - b > 1024ULL * 1024 * 1024 || std::strstr(line, "[stack")) continue;
+            if (std::strchr(line, '/') && !std::strstr(line, "metadata")) continue;
+            maps.push_back({b, e});
+        }
+        std::fclose(f);
+        return maps;
+    }
+
+    // The classes by their name strings: every place the metadata holds "\0SkinDefinition\0", then
+    // every word in the heap pointing at one of them sitting where Il2CppClass keeps its name.
+    // Slower than the TypeInfo globals (two passes over memory), for when those are not filled.
+    inline std::vector<std::pair<uint64_t, bool>> string_def_classes() {
+        std::vector<std::pair<uint64_t, bool>> out;
+        if (!klass::calibrate()) return out;
+        const std::string texts[2] = {std::string("\0SkinDefinition\0", 16), std::string("\0StatTrackSkinDefinition\0", 25)};
+        std::unordered_map<uint64_t, bool> strings;  // address of the text -> stattrack
+        std::vector<char> buf;
+        const size_t overlap = 32;
+        for (const auto& m : metadata_maps()) {
+            for (uint64_t at = m.first; at < m.second;) {
+                const size_t chunk = size_t(std::min<uint64_t>(m.second - at, 4 * 1024 * 1024));
+                buf.assign(chunk, 0);
+                if (mem_read(at, buf.data(), chunk)) {
+                    for (int t = 0; t < 2; ++t) {
+                        const char* from = buf.data();
+                        const char* end = buf.data() + chunk;
+                        while (const void* hit = memmem(from, size_t(end - from), texts[t].data(), texts[t].size())) {
+                            const char* h = static_cast<const char*>(hit);
+                            strings[at + uint64_t(h - buf.data()) + 1] = t == 1;
+                            from = h + 1;
+                        }
+                    }
+                }
+                if (at + chunk >= m.second) break;
+                at += chunk - overlap;
+            }
+        }
+        diag::log("SKINS", "class name strings in memory: %zu", strings.size());
+        if (strings.empty()) return out;
+        uint64_t lo = ~0ull, hi = 0;
+        for (const auto& e : strings) { lo = std::min(lo, e.first); hi = std::max(hi, e.first); }
+        std::vector<uint64_t> words;
+        for (const auto& m : heap_maps()) {
+            for (uint64_t at = m.first; at < m.second;) {
+                const size_t chunk = size_t(std::min<uint64_t>(m.second - at, 1024 * 1024)) & ~size_t(7);
+                if (chunk < 8) break;
+                words.assign(chunk / 8, 0);
+                if (mem_read(at, words.data(), chunk)) {
+                    for (size_t i = 0; i < words.size(); ++i) {
+                        if (words[i] < lo || words[i] > hi || !strings.count(words[i])) continue;
+                        const uint64_t k = at + i * 8 - uint64_t(klass::g_name_offset);
+                        bool st = false;
+                        if (!def_class_name(k, st)) continue;
+                        if (std::none_of(out.begin(), out.end(), [k](const auto& c) { return c.first == k; })) out.push_back({k, st});
+                    }
+                }
+                at += chunk;
+            }
+        }
+        return out;
+    }
+
+    inline std::vector<std::pair<uint64_t, bool>> find_def_classes() {
+        auto classes = typeinfo_def_classes();
+        const char* how = "TypeInfo globals";
+        if (classes.empty()) { classes = string_def_classes(); how = "name strings"; }
+        for (const auto& c : classes)
+            diag::log("SKINS", "class %s at 0x%llx (%s)", c.second ? "StatTrackSkinDefinition" : "SkinDefinition",
+                      (unsigned long long)c.first, how);
+        return classes;
     }
 
     // Printable name at `p`, or "".
@@ -355,15 +444,45 @@ namespace skins {
         std::thread([] { scan_definitions(); g_scanning = false; }).detach();
     }
 
+    // Every 5 s until skins apply: the chain from the local player to the registry entry.
+    inline void report(uint64_t local, const std::vector<uint64_t>& players) {
+        static long long last = 0;
+        if (!diag::every(last, 5000)) return;
+        int views = 0;
+        for (uint64_t p : players) if (find_beh(p)) ++views;
+        const uint64_t b = find_beh(local);
+        Registry r;
+        if (!b) { diag::log("SKINS", "state: weapon view (beh) not found on the local player; %d of %zu players have one", views, players.size()); return; }
+        const bool reg = registry_of(b, r);
+        const int meta = rpm<uint16_t>(b + kBehMeta);
+        char entries[160] = "";
+        for (int shift = 0; shift < 2 && reg; ++shift)
+            if (const uint64_t e = entry(r, meta - shift)) {
+                const size_t n = std::strlen(entries);
+                std::snprintf(entries + n, sizeof(entries) - n, " [Raw-%d] owner %d skin %d pattern %d;", shift, int(rpm<uint8_t>(e + kEntryOwner)),
+                              rpm<int>(e + kEntrySkin), rpm<int>(e + 0x30));
+            }
+        diag::log("SKINS", "state: beh 0x%llx weapon %d meta %d view %d op %d; registry %s (%d entries)%s; views %d/%zu",
+                  (unsigned long long)b, int(rpm<uint8_t>(b + kBehState)), meta, int(rpm<uint8_t>(b + 0x44)), rpm<int>(b + kBehOpId),
+                  reg ? "ok" : "NOT found", reg ? r.count : 0, entries, views, players.size());
+    }
+
     // Once per frame.
     inline void tick(uint64_t local, const std::vector<uint64_t>& players) {
         if (g_pid != proc::pid) { if (g_scanning.load()) return; reset_process(); }
         settle();
         if (!cfg::skins::enabled) { restore(); g_held_weapon = -1; return; }
         if (!local || proc::pid <= 0) return;
+        if (g_index_shift < 0) report(local, players);
         if (!g_scanned.load() && !g_scanning.load()) {
             static long long last_scan = 0;
-            if (diag::now_ms() - last_scan > 15000) { last_scan = diag::now_ms(); set_status("reading skin list..."); rescan(); }
+            static int attempts = 0;
+            if (!last_scan || diag::now_ms() - last_scan > (attempts ? 60000 : 15000)) {
+                last_scan = diag::now_ms();
+                ++attempts;
+                set_status("reading skin list...");
+                rescan();
+            }
             return;
         }
         if (!g_scanned.load()) return;
