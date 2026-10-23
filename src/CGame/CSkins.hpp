@@ -288,6 +288,8 @@ namespace skins {
                 from = "content of another player's weapon";
                 return false;
             });
+        // Animations stay the weapon's own unless asked: on device the Butterfly ones stuck to every weapon.
+        if (!cfg::skins::animations) values[1] = 0;
         if (!values[0]) { diag::log("SKINS", "skin %d: no mesh entry (mesh %d anim %d sound %d)", skin, !!values[0], !!values[1], !!values[2]); return false; }
         put_back(weapon);
         std::vector<Swap> swaps;
@@ -355,6 +357,26 @@ namespace skins {
         return items + v100::array_data + uint64_t(meta) * kMetaStride;
     }
 
+    // What the game built for a weapon: every cached content of it, with its params and packs.
+    inline void dump_contents(int weapon) {
+        if (!plausible(g_resolver)) return;
+        const auto v = g_values.find(weapon);
+        if (v != g_values.end())
+            diag::log("SKINS", "weapon %d own mesh/anim/sound 0x%llx 0x%llx 0x%llx, written 0x%llx 0x%llx 0x%llx", weapon,
+                      (unsigned long long)v->second.original[0], (unsigned long long)v->second.original[1], (unsigned long long)v->second.original[2],
+                      (unsigned long long)v->second.written[0], (unsigned long long)v->second.written[1], (unsigned long long)v->second.written[2]);
+        each_entry(rpm<uint64_t>(g_resolver + kResolverCache), [&](uint64_t e) {
+            if (rpm<uint8_t>(e + kEntryKey) != weapon) return true;
+            const uint64_t c = rpm<uint64_t>(e + kEntryValue);
+            const uint64_t packs = plausible(c) ? rpm<uint64_t>(c + 0x28) : 0;
+            diag::log("SKINS", "  built (%d, skin %d): mesh 0x%llx anim 0x%llx sound 0x%llx, packs %d, +0x30 %d +0x34 %d", weapon,
+                      rpm<int>(e + kEntryKey + 4), (unsigned long long)rpm<uint64_t>(c + 0x10), (unsigned long long)rpm<uint64_t>(c + 0x18),
+                      (unsigned long long)rpm<uint64_t>(c + 0x20), plausible(packs) ? rpm<int>(packs + v100::list_count) : -1,
+                      int(rpm<uint8_t>(c + 0x30)), rpm<int>(c + 0x34));
+            return true;
+        });
+    }
+
     // The entry gets its skin back once the weapon has loaded (300 ms after its op id moved), or
     // after 1.5 s without a load.
     inline void transient_tick(uint64_t beh) {
@@ -369,6 +391,7 @@ namespace skins {
             g_loaded_op = op;
             g_loaded_skin = g_pending_skin;
             diag::log("SKINS", "weapon in hands loaded with skin %d (op %d)", g_pending_skin, op);
+            dump_contents(rpm<uint8_t>(beh + kBehState));
         } else {
             g_retry_at = now + 2000;
             diag::log("SKINS", "no load within 1.5 s; trying again in 2 s");
@@ -429,6 +452,13 @@ namespace skins {
 
         // Every weapon with a chosen skin (they stay changed, so switching shows them at once).
         bool held_changed = false;
+        static bool animations = cfg::skins::animations;
+        if (animations != cfg::skins::animations) {  // animations switched: everything again
+            animations = cfg::skins::animations;
+            std::vector<int> weapons;
+            for (const auto& e : g_applied) weapons.push_back(e.first);
+            for (int w : weapons) { put_back(w); held_changed |= w == held; }
+        }
         for (int w = 1; w < 256; ++w) {
             const int chosen = cfg::skins::chosen[w];
             const auto it = g_applied.find(w);

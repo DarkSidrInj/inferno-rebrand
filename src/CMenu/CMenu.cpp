@@ -115,6 +115,7 @@ namespace ui::menu {
 
     static void skins_tab(float a) {
         checkbox("Skin changer", &cfg::skins::enabled, a);
+        checkbox("Skin animations (all weapons)", &cfg::skins::animations, a);
         separator(a);
         static skins::View view;
         static long long refreshed = 0;
