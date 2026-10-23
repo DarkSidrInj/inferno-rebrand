@@ -1,556 +1,919 @@
+// The menu, drawn like the Neverlose / HexSync one: a dark rounded shell, a sidebar with the sections, a
+// toolbar, cards of rows (toggle, select, slider, colour, button) and popups for selects and colours.
+// Everything is laid out in the design's own units (the shell is 748 x 576) and scaled to the screen.
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include "CMenu.hpp"
 #include "Widgets/CStatusBar.hpp"
 #include "../CConfigs/CConfig.hpp"
 #include "Theme/CTheme.hpp"
-#include "Widgets/CWidgets.hpp"
 #include "../CGame/CSkins.hpp"
 #include "../CGame/CFog.hpp"
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "Android_draw/draw.h"
 #include <cmath>
-#include <ctime>
+#include <cstdio>
 #include <cstdlib>
+#include <ctime>
+#include <functional>
+#include <string>
+#include <vector>
 
 namespace ui::menu {
-    using namespace style;
-    using namespace widgets;
+namespace {
+    constexpr ImVec2 kShell(748.f, 576.f);
+    constexpr float kBody = 15.f, kControl = 14.f, kSmall = 12.f, kCaption = 10.f, kTitle = 16.f, kIcon = 13.f;
+    constexpr float kRow = 37.f;
 
-    static float ma = 0.f;
-    static int tab = 0;
-    static int stab = 0;
-    static bool drag = false;
-    static ImVec2 doff = ImVec2(0, 0);
-    static float scr_tgt = 0.f;
-    static float scr_cur = 0.f;
-    static float ta = 1.f;
-    static bool tsw = false;
-    static int ttab = 0;
-    static int tstab = 0;
+    constexpr ImU32 C(int r, int g, int b, int a = 255) { return IM_COL32(r, g, b, a); }
 
-    static float mw = 1020.f;
-    static float mh = 660.f;
-    static float sw = 190.f;
-    static float hh = 52.f;
-    static float fh = 38.f;
-    static float sth = 50.f;
+    enum class Page { Players, World, Skins, Misc, Settings };
+    enum class K { Toggle, ToggleColor, Color, Select, Slider, Button, Info };
 
-    static const char* tabs[] = {"Visuals", "Settings"};
-    static constexpr int tc = sizeof(tabs) / sizeof(tabs[0]);
+    struct Row {
+        const char* label = "";
+        K kind = K::Toggle;
+        bool* b = nullptr;
+        ImVec4* c = nullptr;
+        float* f = nullptr;
+        float mn = 0.f, mx = 1.f;
+        const char* fmt = "%.1f";
+        const char* const* items = nullptr;      // static list of a select
+        int count = 0;
+        const std::vector<std::string>* dyn = nullptr;   // or a list that changes
+        int cur = 0;
+        std::function<void(int)> pick;
+        std::function<void()> act;
+        std::string text;                        // Info: the value
+    };
 
-    static const char* vstabs[] = {"ESP", "Skins", "World", "Misc"};
-    static constexpr int vstc = sizeof(vstabs) / sizeof(vstabs[0]);
+    struct Popup {
+        bool open = false;
+        int owner = -1;
+        ImVec2 anchor{};                 // screen
+        float width = 0.f;               // screen
+        std::vector<std::string> items;
+        int cur = 0;
+        std::function<void(int)> pick;
+        float scroll = 0.f;
+        int opened_frame = 0;
+    };
 
-    static float lrp(float a, float b, float t) { return a + (b - a) * t; }
+    struct ColorPopup {
+        bool open = false;
+        int owner = -1;
+        ImVec4* target = nullptr;
+        float h = 0.f, s = 0.f, v = 0.f;
+        ImVec2 anchor{};                 // screen: the swatch's right edge
+        int opened_frame = 0;
+    };
 
-    static void shadow(ImVec2 p, ImVec2 s, float a) {
-        if (a < 0.01f) return;
-        ImDrawList* bg = ImGui::GetBackgroundDrawList();
-        bg->AddRectFilled(ImVec2(p.x - 3.f, p.y - 3.f), ImVec2(p.x + s.x + 3.f, p.y + s.y + 3.f), IM_COL32(0, 0, 0, (int)(50 * a)), 8.f);
-        bg->AddRectFilled(ImVec2(p.x - 6.f, p.y - 6.f), ImVec2(p.x + s.x + 6.f, p.y + s.y + 6.f), IM_COL32(0, 0, 0, (int)(35 * a)), 10.f);
-        bg->AddRectFilled(ImVec2(p.x - 10.f, p.y - 10.f), ImVec2(p.x + s.x + 10.f, p.y + s.y + 10.f), IM_COL32(0, 0, 0, (int)(20 * a)), 12.f);
-        bg->AddRectFilled(ImVec2(p.x - 15.f, p.y - 15.f), ImVec2(p.x + s.x + 15.f, p.y + s.y + 15.f), IM_COL32(0, 0, 0, (int)(10 * a)), 15.f);
+    struct State {
+        Page page = Page::Players;
+        float page_mix = 1.f;
+        float scroll = 0.f, scroll_target = 0.f, content_h = 0.f;
+        bool scroll_drag = false;
+        float scroll_press_y = 0.f, scroll_press_value = 0.f;
+        Popup popup;
+        ColorPopup color;
+        ImVec2 pos{-1.f, -1.f};
+    } st;
+
+    // The frame's frame of reference.
+    struct Frame {
+        ImVec2 origin{};
+        float s = 1.f;
+        ImDrawList* d = nullptr;
+        bool input = true;       // false while a popup or the opening animation owns the input
+    } fr;
+
+    ImVec2 P(float x, float y) { return fr.origin + ImVec2(x, y) * fr.s; }
+    ImVec2 P(ImVec2 v) { return P(v.x, v.y); }
+    float Z(float v) { return v * fr.s; }
+    ImFont* text_font() { return nlText ? nlText : ImGui::GetFont(); }
+    ImFont* bold_font() { return nlBold ? nlBold : ImGui::GetFont(); }
+    ImFont* icon_font() { return nlIcons ? nlIcons : ImGui::GetFont(); }
+
+    ImU32 mix(ImU32 a, ImU32 b, float t) {
+        return ImGui::ColorConvertFloat4ToU32(ImLerp(ImGui::ColorConvertU32ToFloat4(a), ImGui::ColorConvertU32ToFloat4(b), ImSaturate(t)));
     }
 
-    static void esp_tab(float a) {
-        checkbox("Box", &cfg::esp::box, a);
-        separator(a);
-        checkbox("Name", &cfg::esp::name, a);
-        separator(a);
-        checkbox("Health bar", &cfg::esp::health, a);
-        separator(a);
-        checkbox("Armor bar", &cfg::esp::armor, a);
-        separator(a);
-        checkbox("Helmet mark", &cfg::esp::helmet, a);
-        separator(a);
-        checkbox("Distance", &cfg::esp::distance, a);
-        separator(a);
-        checkbox("Skeleton", &cfg::esp::skeleton, a);
-        separator(a);
-        checkbox("All bones", &cfg::esp::skeleton_all, a);
-        separator(a);
-        checkbox("Bones behind walls", &cfg::esp::skeleton_occlusion, a);
-        separator(a);
-        checkbox("Chams: material", &cfg::chams::enabled, a);
-        separator(a);
-        combo("Material", &cfg::chams::material, {"Flat", "Untouchable", "Outline"}, a);
-        separator(a);
-        checkbox("Chams enemies", &cfg::chams::enemies, a);
-        separator(a);
-        checkbox("Chams teammates", &cfg::chams::teammates, a);
-        separator(a);
-        checkbox("Chams local body", &cfg::chams::local_body, a);
-        separator(a);
-        checkbox("Chams arms", &cfg::chams::local_arms, a);
-        separator(a);
-        checkbox("Chams weapon", &cfg::chams::local_weapon, a);
-        separator(a);
-        checkbox("Chams: overlay (through walls)", &cfg::chams::overlay, a);
-        separator(a);
-        colorpick("Overlay color", &cfg::chams::overlay_col, a);
-        separator(a);
-        checkbox("Grenades", &cfg::esp::grenade, a);
-        separator(a);
-        checkbox("Dropped weapons", &cfg::esp::dropped, a);
-        separator(a);
-        combo("Box type", &cfg::esp::box_type, {"Full", "Corner"}, a);
-        separator(a);
-        slider("Box rounding", &cfg::esp::box_rounding, 0.f, 10.f, a, "%.0f");
-        slider("Fallback FOV", &cfg::esp::fallback_fov, 20.f, 120.f, a, "%.0f");
-        separator(a);
-        colorpick("Box color", &cfg::esp::box_col, a);
-        separator(a);
-        colorpick("Name color", &cfg::esp::name_col, a);
-        separator(a);
-        colorpick("Health color", &cfg::esp::health_col, a);
-        separator(a);
-        colorpick("Armor color", &cfg::esp::armor_col, a);
-        separator(a);
-        colorpick("Helmet color", &cfg::esp::helmet_col, a);
-        separator(a);
-        colorpick("Distance color", &cfg::esp::distance_col, a);
-        separator(a);
-        slider("Skeleton width", &cfg::esp::skeleton_thickness, 1.f, 4.f, a, "%.1f");
-        separator(a);
-        colorpick("Skeleton color", &cfg::esp::skeleton_col, a);
-        separator(a);
-        slider("World ESP range", &cfg::esp::world_distance, 10.f, 200.f, a, "%.0f m");
-        separator(a);
-        colorpick("Grenade color", &cfg::esp::grenade_col, a);
-        separator(a);
-        colorpick("Dropped color", &cfg::esp::dropped_col, a);
+    float motion(ImGuiID id, float target, float speed = 16.f, float initial = -1.f) {
+        float* value = ImGui::GetStateStorage()->GetFloatRef(id, initial < 0.f ? target : initial);
+        *value = ImLerp(*value, target, 1.f - std::exp(-speed * ImGui::GetIO().DeltaTime));
+        if (std::fabs(*value - target) < 0.0005f) *value = target;
+        return *value;
     }
 
-    static void skins_tab(float a) {
-        checkbox("Skin changer", &cfg::skins::enabled, a);
-        checkbox("Full model (patches game code, risky)", &cfg::skins::code_patch, a);
-        if (cfg::skins::code_patch) {
-            static std::vector<std::string> ids;
-            if (ids.empty()) for (int i = 70; i < 90; ++i) ids.push_back(std::to_string(i));
-            int idx = cfg::skins::model - 70;
-            if (idx < 0 || idx >= int(ids.size())) idx = 5;
-            if (stepper("Knife model id", &idx, ids, a)) cfg::skins::model = 70 + idx;
-            button("Find the Butterfly WeaponId (2 min, knife in hands)", a, [] { skins::probe_request(); });
+    void text(float x, float y, ImU32 color, const char* value, float size = kBody, ImFont* font = nullptr) {
+        fr.d->AddText(font ? font : text_font(), Z(size), P(x, y), color, value);
+    }
+
+    float text_width(const char* value, float size = kBody, ImFont* font = nullptr) {
+        return (font ? font : text_font())->CalcTextSizeA(Z(size), FLT_MAX, 0.f, value).x / fr.s;
+    }
+
+    // Vertically centred in a box of height h.
+    void text_mid(float x, float y, float h, ImU32 color, const char* value, float size = kBody, ImFont* font = nullptr) {
+        ImFont* f = font ? font : text_font();
+        const float th = f->CalcTextSizeA(Z(size), FLT_MAX, 0.f, value).y / fr.s;
+        text(x, y + std::floor((h - th) * 0.5f), color, value, size, f);
+    }
+
+    void rect(float x, float y, float w, float h, ImU32 color, float r = 0.f, ImDrawFlags flags = 0) {
+        fr.d->AddRectFilled(P(x, y), P(x + w, y + h), color, Z(r), flags);
+    }
+    void outline(float x, float y, float w, float h, ImU32 color, float r = 0.f, float t = 1.f) {
+        fr.d->AddRect(P(x, y), P(x + w, y + h), color, Z(r), 0, Z(t) < 1.f ? 1.f : Z(t));
+    }
+    void line(float x1, float y1, float x2, float y2, ImU32 color, float t = 1.f) {
+        fr.d->AddLine(P(x1, y1), P(x2, y2), color, Z(t) < 1.f ? 1.f : Z(t));
+    }
+
+    // An invisible button over a design-space rectangle; false (and not hovered) when the input is not ours.
+    bool hit(const char* id, float x, float y, float w, float h, bool* hovered = nullptr, bool* active = nullptr) {
+        if (hovered) *hovered = false;
+        if (active) *active = false;
+        if (!fr.input) return false;
+        ImGui::SetCursorScreenPos(P(x, y));
+        const bool clicked = ImGui::InvisibleButton(id, ImVec2(Z(w), Z(h)));
+        if (hovered) *hovered = ImGui::IsItemHovered();
+        if (active) *active = ImGui::IsItemActive();
+        return clicked;
+    }
+
+    void chevron(float x, float y, ImU32 color) {
+        line(x, y, x + 3, y + 3, color, 1.3f);
+        line(x + 3, y + 3, x, y + 6, color, 1.3f);
+    }
+
+    void chevron_down(float x, float y, ImU32 color) {
+        line(x, y, x + 4, y + 4, color, 1.f);
+        line(x + 4, y + 4, x + 8, y, color, 1.f);
+    }
+
+    void check(float x, float y, ImU32 color) {
+        line(x, y, x + 3, y + 3, color, 1.5f);
+        line(x + 3, y + 3, x + 8, y - 3, color, 1.5f);
+    }
+
+    // ---- controls ----------------------------------------------------------------------------------
+
+    void toggle(float x, float y, bool* value, bool enabled = true) {
+        bool hover = false;
+        if (enabled && hit("##toggle", x - 5, y - 6, 39, 30, &hover) && value) *value = !*value;
+        const ImGuiID iid = ImGui::GetID("##toggle");
+        const bool on_now = value && *value;
+        const float on = motion(iid ^ 0x55aa721u, on_now ? 1.f : 0.f, 19.f);
+        const float h = motion(iid ^ 0x118a0u, hover ? 1.f : 0.f, 20.f);
+        rect(x - 1 - h, y - 1 - h, 31 + 2 * h, 21 + 2 * h, C(75, 126, 255, int(45 * h)), 10);
+        rect(x, y, 29, 18, mix(C(29, 33, 43), C(75, 126, 255), on), 9);
+        fr.d->AddCircleFilled(P(x + ImLerp(9.f, 20.f, on), y + 9), Z(7), mix(C(133, 144, 156), C(248, 249, 252), on));
+    }
+
+    void open_popup(int owner, const Row& row, ImVec2 anchor, float width) {
+        const bool same = st.popup.open && st.popup.owner == owner;
+        st.popup.open = !same;
+        st.color.open = false;
+        st.popup.owner = owner;
+        st.popup.anchor = anchor;
+        st.popup.width = width;
+        st.popup.items.clear();
+        if (row.dyn) st.popup.items = *row.dyn;
+        else for (int i = 0; i < row.count; ++i) st.popup.items.push_back(row.items[i]);
+        st.popup.cur = row.cur;
+        st.popup.pick = row.pick;
+        st.popup.scroll = 0.f;
+        st.popup.opened_frame = ImGui::GetFrameCount();
+    }
+
+    void open_color(int owner, ImVec4* target, ImVec2 anchor) {
+        const bool same = st.color.open && st.color.owner == owner;
+        st.color.open = !same;
+        st.popup.open = false;
+        st.color.owner = owner;
+        st.color.target = target;
+        st.color.anchor = anchor;
+        st.color.opened_frame = ImGui::GetFrameCount();
+        if (target) ImGui::ColorConvertRGBtoHSV(target->x, target->y, target->z, st.color.h, st.color.s, st.color.v);
+    }
+
+    void swatch(float x, float y, float w, float h, const ImVec4& c, bool hot) {
+        const ImU32 col = ImGui::ColorConvertFloat4ToU32(ImVec4(c.x, c.y, c.z, 1.f));
+        rect(x, y, w, h, col, 5);
+        if (hot) outline(x - 1, y - 1, w + 2, h + 2, C(255, 255, 255, 70), 6);
+    }
+
+    void draw_row(float cx, float cw, float y, int index, Row& r, int id) {
+        if (index) line(cx + 12, y, cx + cw - 12, y, C(28, 31, 40));
+        text_mid(cx + 13, y, kRow, C(207, 209, 218), r.label, kBody);
+        ImGui::PushID(id);
+        switch (r.kind) {
+        case K::Toggle:
+            toggle(cx + cw - 43, y + 9, r.b);
+            break;
+        case K::ToggleColor:
+        case K::Color: {
+            const bool with_toggle = r.kind == K::ToggleColor;
+            const float sx = with_toggle ? cx + cw - 63 : cx + cw - 43;
+            const float sw = with_toggle ? 15.f : 29.f, sh = with_toggle ? 15.f : 18.f;
+            const float sy = with_toggle ? y + 11 : y + 9;
+            bool hover = false;
+            ImGui::PushID("##swatch");
+            const bool clicked = hit("##swatch", sx - 4, sy - 5, sw + 8, sh + 10, &hover);
+            ImGui::PopID();
+            const bool is_open = st.color.open && st.color.owner == id;
+            if (clicked && r.c) open_color(id, r.c, P(sx + sw + 8, sy + sh * 0.5f));
+            if (r.c) swatch(sx, sy, sw, sh, *r.c, hover || is_open);
+            if (with_toggle) toggle(cx + cw - 43, y + 9, r.b);
+            break;
         }
-        separator(a);
+        case K::Select: {
+            const float bw = ImMin(134.f, cw * 0.48f);
+            const float bx = cx + cw - bw - 13, by = y + 7;
+            bool hover = false;
+            const bool clicked = hit("##select", bx, by, bw, 23, &hover);
+            const float response = motion(ImGui::GetID("##select") ^ 0x6161u, hover || (st.popup.open && st.popup.owner == id) ? 1.f : 0.f);
+            if (clicked) open_popup(id, r, P(bx, by), Z(bw));
+            rect(bx, by, bw, 23, mix(C(25, 28, 38), C(31, 38, 54), response), 5);
+            outline(bx, by, bw, 23, mix(C(32, 35, 46), C(75, 126, 255), response), 5);
+            const char* shown = "Select";
+            if (r.dyn) { if (r.cur >= 0 && r.cur < int(r.dyn->size())) shown = (*r.dyn)[size_t(r.cur)].c_str(); }
+            else if (r.cur >= 0 && r.cur < r.count) shown = r.items[r.cur];
+            // clip the value to the box
+            const ImVec2 cmin = P(bx + 4, by), cmax = P(bx + bw - 18, by + 23);
+            fr.d->PushClipRect(cmin, cmax, true);
+            text_mid(bx + 7, by, 23, C(170, 173, 184), shown, kControl);
+            fr.d->PopClipRect();
+            chevron_down(bx + bw - 15, by + 9, C(139, 143, 154));
+            break;
+        }
+        case K::Slider: {
+            const float tw = 80.f;
+            const float start_x = cx + cw - 145, start_y = y + 18;
+            bool active = false;
+            hit("##slider", start_x - 8, start_y - 11, tw + 16, 24, nullptr, &active);
+            if (active && r.f) {
+                const float t = ImClamp((ImGui::GetIO().MousePos.x - P(start_x, 0).x) / Z(tw), 0.f, 1.f);
+                *r.f = r.mn + t * (r.mx - r.mn);
+            }
+            const float norm = r.f && r.mx > r.mn ? ImClamp((*r.f - r.mn) / (r.mx - r.mn), 0.f, 1.f) : 0.f;
+            const float shown = motion(ImGui::GetID("##slider") ^ 0xa8f1u, norm, 14.f, norm);
+            rect(start_x, start_y, tw, 3, C(34, 38, 48), 2);
+            rect(start_x, start_y, tw * shown, 3, C(75, 126, 255), 2);
+            fr.d->AddCircleFilled(P(start_x + tw * shown, start_y + 1.5f), Z(5.5f), C(247, 248, 252));
+            char buf[32] = "";
+            if (r.f) std::snprintf(buf, sizeof(buf), r.fmt, *r.f);
+            const float pw = 52.f;
+            const float px = cx + cw - 55 - (pw - 42);
+            rect(px, y + 8, pw, 21, C(25, 28, 38), 5);
+            float size = kControl;
+            while (size > 8.f && text_width(buf, size) > pw - 8.f) size -= 1.f;
+            const float tw_text = text_width(buf, size);
+            text_mid(px + (pw - tw_text) * 0.5f, y + 8, 21, C(166, 169, 179), buf, size);
+            break;
+        }
+        case K::Button: {
+            bool hover = false;
+            const bool clicked = hit("##button", cx + 6, y + 3, cw - 12, kRow - 6, &hover);
+            const float response = motion(ImGui::GetID("##button") ^ 0x4242u, hover ? 1.f : 0.f);
+            if (response > 0.001f) rect(cx + 6, y + 3, cw - 12, kRow - 6, C(75, 126, 255, int(26 * response)), 8);
+            chevron(cx + cw - 22, y + 15, mix(C(187, 190, 199), C(120, 160, 255), response));
+            if (clicked && r.act) r.act();
+            break;
+        }
+        case K::Info: {
+            const float w = text_width(r.text.c_str(), kControl);
+            text_mid(cx + cw - 14 - w, y, kRow, C(150, 154, 166), r.text.c_str(), kControl);
+            break;
+        }
+        }
+        ImGui::PopID();
+    }
+
+    struct Columns { float y[2] = {84.f, 84.f}; int id = 0; };
+    Columns cols;
+    const float kColX[2] = {167.f, 458.f};
+    const float kColW[2] = {281.f, 277.f};
+
+    void card(int col, const char* title, std::vector<Row> rows) {
+        const float x = kColX[col], w = kColW[col];
+        const float y = cols.y[col] - st.scroll;
+        const float h = float(rows.size()) * kRow;
+        text(x + 12, y - 18, C(89, 94, 106), title, kCaption);
+        rect(x, y, w, h, C(17, 19, 27, 224), 14);
+        outline(x, y, w, h, C(31, 34, 44), 14);
+        for (size_t i = 0; i < rows.size(); ++i) draw_row(x, w, y + float(i) * kRow, int(i), rows[i], cols.id++);
+        cols.y[col] += h + 36.f;
+    }
+
+    Row toggle_row(const char* label, bool* b) { Row r; r.label = label; r.kind = K::Toggle; r.b = b; return r; }
+    Row toggle_color(const char* label, bool* b, ImVec4* c) { Row r; r.label = label; r.kind = K::ToggleColor; r.b = b; r.c = c; return r; }
+    Row color_row(const char* label, ImVec4* c) { Row r; r.label = label; r.kind = K::Color; r.c = c; return r; }
+    Row slider_row(const char* label, float* f, float mn, float mx, const char* fmt) {
+        Row r; r.label = label; r.kind = K::Slider; r.f = f; r.mn = mn; r.mx = mx; r.fmt = fmt; return r;
+    }
+    Row select_row(const char* label, int* value, const char* const* items, int count) {
+        Row r; r.label = label; r.kind = K::Select; r.items = items; r.count = count; r.cur = *value;
+        r.pick = [value](int i) { *value = i; };
+        return r;
+    }
+    Row button_row(const char* label, std::function<void()> act) { Row r; r.label = label; r.kind = K::Button; r.act = std::move(act); return r; }
+    Row info_row(const char* label, std::string value) { Row r; r.label = label; r.kind = K::Info; r.text = std::move(value); return r; }
+
+    // ---- pages -------------------------------------------------------------------------------------
+
+    void players_page() {
+        static const char* const kBoxTypes[] = {"Full", "Corner"};
+        static const char* const kMaterials[] = {"Flat", "Untouchable", "Outline"};
+        card(0, "ENEMY", {
+            toggle_color("Box", &cfg::esp::box, &cfg::esp::box_col),
+            toggle_color("Name", &cfg::esp::name, &cfg::esp::name_col),
+            toggle_color("Health Bar", &cfg::esp::health, &cfg::esp::health_col),
+            toggle_color("Armor Bar", &cfg::esp::armor, &cfg::esp::armor_col),
+            toggle_color("Helmet Mark", &cfg::esp::helmet, &cfg::esp::helmet_col),
+            toggle_color("Distance", &cfg::esp::distance, &cfg::esp::distance_col),
+        });
+        card(0, "BOX", {
+            select_row("Box Type", &cfg::esp::box_type, kBoxTypes, 2),
+            slider_row("Box Rounding", &cfg::esp::box_rounding, 0.f, 10.f, "%.0f"),
+            slider_row("Fallback FOV", &cfg::esp::fallback_fov, 20.f, 120.f, "%.0f"),
+        });
+        card(1, "SKELETON", {
+            toggle_color("Skeleton", &cfg::esp::skeleton, &cfg::esp::skeleton_col),
+            toggle_row("All Bones", &cfg::esp::skeleton_all),
+            toggle_row("Bones Behind Walls", &cfg::esp::skeleton_occlusion),
+            slider_row("Skeleton Width", &cfg::esp::skeleton_thickness, 1.f, 4.f, "%.1f"),
+        });
+        card(1, "CHAMS", {
+            toggle_row("Material Chams", &cfg::chams::enabled),
+            select_row("Material", &cfg::chams::material, kMaterials, 3),
+            toggle_row("Enemies", &cfg::chams::enemies),
+            toggle_row("Teammates", &cfg::chams::teammates),
+            toggle_row("Local Body", &cfg::chams::local_body),
+            toggle_row("Arms", &cfg::chams::local_arms),
+            toggle_row("Weapon", &cfg::chams::local_weapon),
+            toggle_color("Overlay Through Walls", &cfg::chams::overlay, &cfg::chams::overlay_col),
+        });
+    }
+
+    void world_page() {
+        card(0, "NIGHT MODE", {
+            toggle_row("Night Mode", &cfg::night::enabled),
+            slider_row("Strength", &cfg::night::strength, 0.f, 1.f, "%.2f"),
+        });
+        card(0, "FOG", {
+            toggle_row("Fog", &cfg::fog::enabled),
+            toggle_row("Auto Color", &cfg::fog::auto_color),
+            slider_row("Min Distance", &cfg::fog::min_distance, 0.f, 200.f, "%.0f m"),
+            slider_row("Max Distance", &cfg::fog::max_distance, 10.f, 400.f, "%.0f m"),
+            color_row("Color", &cfg::fog::color),
+            button_row("Rescan World", [] { worldfog::rescan(); }),
+        });
+        card(1, "WORLD ESP", {
+            toggle_color("Grenades", &cfg::esp::grenade, &cfg::esp::grenade_col),
+            toggle_color("Dropped Weapons", &cfg::esp::dropped, &cfg::esp::dropped_col),
+            slider_row("Range", &cfg::esp::world_distance, 10.f, 200.f, "%.0f m"),
+        });
+    }
+
+    void skins_page() {
         static skins::View view;
         static long long refreshed = 0;
         const long long now = diag::now_ms();
         if (now - refreshed > 250) { refreshed = now; view = skins::view(); }
-        const std::string title = "Skin: " + view.status;
-        int pick = view.current;
-        if (stepper(title.c_str(), &pick, view.names, a) && view.weapon >= 0 && view.weapon < 256 && pick < (int)view.ids.size()) {
-            cfg::skins::chosen[view.weapon] = view.ids[pick];
-            view.current = pick;
-        }
-        separator(a);
-        button("Dump game code to /sdcard", a, [] { skins::dump_code(); });
-        button("Dump resolver code (skin_code2.bin)", a, [] { skins::dump_code(true); });
-        button("Reset all skins", a, [] { for (int& id : cfg::skins::chosen) id = 0; });
-    }
 
-    static void world_tab(float a) {
-        checkbox("Night mode", &cfg::night::enabled, a);
-        separator(a);
-        slider("Night strength", &cfg::night::strength, 0.f, 1.f, a, "%.2f");
-        separator(a);
-        checkbox("Fog", &cfg::fog::enabled, a);
-        separator(a);
-        checkbox("Auto fog color", &cfg::fog::auto_color, a);
-        separator(a);
-        slider("Fog min distance", &cfg::fog::min_distance, 0.f, 200.f, a, "%.0f m");
-        slider("Fog max distance", &cfg::fog::max_distance, 10.f, 400.f, a, "%.0f m");
-        separator(a);
-        colorpick("Fog color", &cfg::fog::color, a);
-        separator(a);
-        button("Rescan world", a, [] { worldfog::rescan(); });
-    }
-
-    static void misc_tab(float a) {
-        checkbox("Auto strafe", &cfg::strafe::enabled, a);
-        separator(a);
-        slider("Strafe turn per step", &cfg::strafe::turn, 0.5f, 15.f, a, "%.1f deg");
-        slider("Strafe extra speed", &cfg::strafe::gain, 0.f, 3.f, a, "%.1f %%");
-        slider("Strafe min speed", &cfg::strafe::min_speed, 0.f, 10.f, a, "%.1f m/s");
-        separator(a);
-        checkbox("Anti-aim", &cfg::antiaim::enabled, a);
-        separator(a);
-        combo("Yaw", &cfg::antiaim::yaw_mode, {"Legacy", "Spin", "Jitter", "Backwards", "None"}, a);
-        separator(a);
-        combo("Pitch", &cfg::antiaim::pitch_mode, {"None", "Down", "Up"}, a);
-        separator(a);
-        slider("Spin speed", &cfg::antiaim::spin_speed, 90.f, 2000.f, a, "%.0f deg/s");
-        slider("Jitter range", &cfg::antiaim::jitter, 10.f, 180.f, a, "%.0f deg");
-    }
-
-    static void visuals_tab(float a) {
-        switch (stab) {
-            case 0: esp_tab(a); break;
-            case 1: skins_tab(a); break;
-            case 2: world_tab(a); break;
-            case 3: misc_tab(a); break;
-        }
-    }
-
-    static void settings_tab(float a) {
-        ImGuiWindow* w = ImGui::GetCurrentWindow();
-        ImDrawList* dl = w->DrawList;
-        ImVec2 p = w->DC.CursorPos;
-        float ww = content_w > 0 ? content_w : ImGui::GetContentRegionAvail().x;
-
-        float pad = 8.f * S;
-        float h = 26.f * S;
-        float gap = 4.f * S;
-
-        dl->AddRectFilled(p, ImVec2(p.x + ww, p.y + h), col(clr::panel, a));
-        dl->AddRect(p, ImVec2(p.x + ww, p.y + h), col(clr::border, a));
-
-        ImGui::PushFont(fontMedium);
-        char buf[64];
-        snprintf(buf, sizeof(buf), "Screen: %.0f x %.0f", g_sw, g_sh);
-        float ty = p.y + (h - fontMedium->FontSize) * 0.5f;
-        dl->AddText(ImVec2(p.x + pad, ty), col(clr::text, a), buf);
-        ImGui::PopFont();
-
-        ImGui::Dummy(ImVec2(0, h + gap));
-
-        ImVec2 p2(p.x, p.y + h + gap);
-        dl->AddRectFilled(p2, ImVec2(p2.x + ww, p2.y + h), col(clr::panel, a));
-        dl->AddRect(p2, ImVec2(p2.x + ww, p2.y + h), col(clr::border, a));
-
-        ImGui::PushFont(fontMedium);
-        snprintf(buf, sizeof(buf), "FPS: %.0f", ImGui::GetIO().Framerate);
-        dl->AddText(ImVec2(p2.x + pad, p2.y + (h - fontMedium->FontSize) * 0.5f), col(clr::text, a), buf);
-        ImGui::PopFont();
-
-        ImGui::Dummy(ImVec2(0, h + gap));
-
-        separator(a);
-        button("Exit", a, []() { exit(0); });
-    }
-
-    static void subtabs(ImDrawList* dl, ImVec2 amin, ImVec2 amax, float a) {
-        if (tab != 0) return;
-
-        float pad = 8.f;
-        float tw = (amax.x - amin.x - pad * 2) / vstc;
-
-        for (int i = 0; i < vstc; i++) {
-            float tx = amin.x + pad + i * tw;
-            float ty = amin.y + 4.f;
-            float w = tw - 4.f;
-            float h = sth - 8.f;
-
-            ImVec2 tmin(tx, ty);
-            ImVec2 tmax(tx + w, ty + h);
-
-            bool sel = (stab == i);
-            bool hov = ImGui::IsMouseHoveringRect(tmin, tmax);
-
-            float sa = anim("st_" + std::to_string(i), sel ? 1.f : 0.f, 14.f);
-            float ha = anim("sth_" + std::to_string(i), hov && !sel ? 0.4f : 0.f, 14.f);
-
-            if (sa > 0.01f) {
-                dl->AddRectFilled(tmin, tmax, col(clr::widget, sa * a));
-                dl->AddRect(tmin, tmax, col(clr::border_light, sa * a));
-                dl->AddLine(ImVec2(tmin.x + w * 0.2f, tmax.y), ImVec2(tmax.x - w * 0.2f, tmax.y), col(clr::accent, sa * a), 2.f);
-            } else if (ha > 0.01f) {
-                dl->AddRectFilled(tmin, tmax, col(clr::panel, ha * a));
+        Row skin;
+        skin.label = "Knife Skin";
+        skin.kind = K::Select;
+        skin.dyn = &view.names;
+        skin.cur = view.current;
+        skin.pick = [](int i) {
+            if (view.weapon >= 0 && view.weapon < 256 && i >= 0 && i < int(view.ids.size())) {
+                cfg::skins::chosen[view.weapon] = view.ids[size_t(i)];
+                view.current = i;
             }
+        };
 
-            ImVec4 tc = anim_col("stt_" + std::to_string(i), sel ? clr::accent_light : clr::text_dim, 14.f);
+        static std::vector<std::string> model_ids;
+        if (model_ids.empty()) for (int i = 70; i < 90; ++i) model_ids.push_back(std::to_string(i));
+        Row model;
+        model.label = "Knife Model Id";
+        model.kind = K::Select;
+        model.dyn = &model_ids;
+        model.cur = ImClamp(cfg::skins::model - 70, 0, 19);
+        model.pick = [](int i) { cfg::skins::model = 70 + i; };
 
-            ImGui::PushFont(fontMedium);
-            ImVec2 tsz = ImGui::CalcTextSize(vstabs[i]);
-            float ttx = tx + (w - tsz.x) * 0.5f;
-            float tty = ty + (h - tsz.y) * 0.5f;
-            dl->AddText(ImVec2(ttx, tty), col(tc, a), vstabs[i]);
-            ImGui::PopFont();
-
-            if (hov && ImGui::IsMouseClicked(0) && !popup() && !tsw && stab != i) {
-                ttab = tab;
-                tstab = i;
-                tsw = true;
-            }
+        std::vector<Row> main = {toggle_row("Skin Changer", &cfg::skins::enabled), skin, toggle_row("Full Model (patches game code)", &cfg::skins::code_patch)};
+        if (cfg::skins::code_patch) {
+            main.push_back(model);
+            main.push_back(button_row("Find The Butterfly WeaponId", [] { skins::probe_request(); }));
         }
+        card(0, "SKINS", std::move(main));
+        card(1, "STATUS", {
+            info_row("State", view.status),
+            info_row("Weapon In Hands", view.weapon >= 0 ? std::to_string(view.weapon) : std::string("-")),
+        });
+        card(1, "TOOLS", {
+            button_row("Dump Game Code To /sdcard", [] { skins::dump_code(); }),
+            button_row("Dump Resolver Code", [] { skins::dump_code(true); }),
+            button_row("Reset All Skins", [] { for (int& id : cfg::skins::chosen) id = 0; }),
+        });
     }
 
-    void render() {
-        bar::render();
+    void misc_page() {
+        static const char* const kYaw[] = {"Legacy", "Spin", "Jitter", "Backwards", "None"};
+        static const char* const kPitch[] = {"None", "Down", "Up"};
+        card(0, "MOVEMENT", {
+            toggle_row("Auto Strafe", &cfg::strafe::enabled),
+            slider_row("Turn Per Step", &cfg::strafe::turn, 0.5f, 15.f, "%.1f"),
+            slider_row("Extra Speed", &cfg::strafe::gain, 0.f, 3.f, "%.1f %%"),
+            slider_row("Min Speed", &cfg::strafe::min_speed, 0.f, 10.f, "%.1f"),
+        });
+        card(1, "ANTI-AIM", {
+            toggle_row("Enabled", &cfg::antiaim::enabled),
+            select_row("Yaw", &cfg::antiaim::yaw_mode, kYaw, 5),
+            select_row("Pitch", &cfg::antiaim::pitch_mode, kPitch, 3),
+            slider_row("Spin Speed", &cfg::antiaim::spin_speed, 90.f, 2000.f, "%.0f"),
+            slider_row("Jitter Range", &cfg::antiaim::jitter, 10.f, 180.f, "%.0f"),
+        });
+    }
 
-        float dt = ImGui::GetIO().DeltaTime;
-        ma = lrp(ma, bar::g_open ? 1.f : 0.f, ImClamp(12.f * dt, 0.f, 1.f));
+    void settings_page() {
+        char screen[48];
+        std::snprintf(screen, sizeof(screen), "%.0f x %.0f", g_sw, g_sh);
+        static const char* const kSizes[] = {"60%", "80%", "100%", "120%", "140%"};
+        static const float kScales[] = {0.6f, 0.8f, 1.f, 1.2f, 1.4f};
+        int nearest = 0;
+        for (int i = 1; i < 5; ++i) if (std::fabs(kScales[i] - cfg::gui::scale) < std::fabs(kScales[nearest] - cfg::gui::scale)) nearest = i;
+        Row size;
+        size.label = "Menu Size";
+        size.kind = K::Select;
+        size.items = kSizes;
+        size.count = 5;
+        size.cur = nearest;
+        size.pick = [](int i) { cfg::gui::scale = kScales[i]; };
+        card(0, "INTERFACE", {size, info_row("Screen", screen)});
+    }
 
-        if (ma > 0.01f) {
-            ImDrawList* bg = ImGui::GetBackgroundDrawList();
-            int da = (int)(200 * ma * bar::game_alpha());
-            bg->AddRectFilled(ImVec2(0, 0), ImVec2(g_sw, g_sh), IM_COL32(0, 0, 0, da));
-        }
+    // ---- popups (windows of their own, above the menu) -----------------------------------------------
 
-        if (ma < 0.01f) return;
+    constexpr ImGuiWindowFlags kPopupFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar |
+        ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoFocusOnAppearing;
 
-        tick();
+    void select_popup(float alpha) {
+        Popup& p = st.popup;
+        if (!p.open) return;
+        const float s = fr.s;
+        const float row_h = 32.f * s;
+        const int visible = ImMin(int(p.items.size()), 8);
+        const ImVec2 size(p.width, visible * row_h + 8.f * s);
+        ImVec2 pos(p.anchor.x, p.anchor.y + (23.f * s - size.y) * 0.5f);
+        pos.x = ImClamp(pos.x, 10.f, g_sw - size.x - 10.f);
+        pos.y = ImClamp(pos.y, 10.f, g_sh - size.y - 10.f);
+        const float open = motion(ImGui::GetID("##nl_popup_open"), 1.f, 20.f, 0.f);
 
-        if (tsw) {
-            ta = lrp(ta, 0.f, ImClamp(18.f * dt, 0.f, 1.f));
-            if (ta < 0.05f) {
-                tab = ttab;
-                stab = tstab;
-                tsw = false;
-                scr_tgt = 0.f;
-                scr_cur = 0.f;
-            }
-        } else {
-            ta = lrp(ta, 1.f, ImClamp(14.f * dt, 0.f, 1.f));
-        }
-
-        float ca = ma * ta;
-        content_alpha = 1.f;
-
-        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ma);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.f);
+        ImGui::SetNextWindowPos(pos);
+        ImGui::SetNextWindowSize(size);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
-        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
+        if (!ImGui::Begin("##nl_select", nullptr, kPopupFlags)) { ImGui::End(); ImGui::PopStyleVar(2); return; }
+        ImDrawList* d = ImGui::GetWindowDrawList();
+        const int first = d->VtxBuffer.Size;
+        d->AddRectFilled(pos - ImVec2(5, 2) * s, pos + size + ImVec2(5, 8) * s, C(0, 0, 0, 55), 18.f * s);
+        d->AddRectFilled(pos, pos + size, C(20, 20, 29, 250), 16.f * s);
+        d->AddRect(pos, pos + size, C(57, 61, 76, 205), 16.f * s);
+        d->AddLine(pos + ImVec2(16, 1) * s, pos + ImVec2(size.x - 16 * s, 1), C(255, 255, 255, 22));
 
-        ImVec2 wsz(mw, mh);
-        ImGui::SetNextWindowSize(wsz, ImGuiCond_Always);
-        ImGui::SetNextWindowPos(ImVec2((g_sw - mw) * 0.5f, (g_sh - mh) * 0.5f), ImGuiCond_Once);
+        // Scroll the list by dragging inside it, or with the wheel.
+        const float max_scroll = ImMax(0.f, float(p.items.size()) * row_h - visible * row_h);
+        ImGuiIO& io = ImGui::GetIO();
+        const bool inside = io.MousePos.x >= pos.x && io.MousePos.x <= pos.x + size.x && io.MousePos.y >= pos.y && io.MousePos.y <= pos.y + size.y;
+        if (inside && io.MouseWheel != 0.f) p.scroll -= io.MouseWheel * row_h;
+        p.scroll = ImClamp(p.scroll, 0.f, max_scroll);
 
-        ImGuiWindowFlags wf = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove;
-
-        if (ImGui::Begin("##m", nullptr, wf)) {
-            ImVec2 wp = ImGui::GetWindowPos();
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            ImGuiIO& io = ImGui::GetIO();
-            ImVec2 mp = io.MousePos;
-
-            shadow(wp, wsz, ma);
-
-            dl->AddRectFilled(wp, ImVec2(wp.x + wsz.x, wp.y + wsz.y), col(clr::bg, ma));
-            dl->AddRect(wp, ImVec2(wp.x + wsz.x, wp.y + wsz.y), col(clr::border_dark, ma));
-            dl->AddRect(ImVec2(wp.x + 1, wp.y + 1), ImVec2(wp.x + wsz.x - 1, wp.y + wsz.y - 1), col(clr::border, ma));
-
-            dl->AddRectFilledMultiColor(ImVec2(wp.x + 2, wp.y + 2), ImVec2(wp.x + wsz.x - 2, wp.y + hh), col(clr::sidebar, ma), col(clr::sidebar, ma), col(clr::bg, ma), col(clr::bg, ma));
-            dl->AddLine(ImVec2(wp.x, wp.y + hh), ImVec2(wp.x + wsz.x, wp.y + hh), col(clr::border_dark, ma));
-            dl->AddLine(ImVec2(wp.x, wp.y + hh + 1), ImVec2(wp.x + wsz.x, wp.y + hh + 1), col(clr::border, ma));
-
-            ImGui::PushFont(fontBold);
-            dl->AddText(ImVec2(wp.x + 12, wp.y + hh * 0.5f - fontBold->FontSize * 0.5f), col(clr::accent_light, ma), "morskie svinki");
-            ImGui::PopFont();
-
-            dl->AddLine(ImVec2(wp.x, wp.y + wsz.y - fh), ImVec2(wp.x + wsz.x, wp.y + wsz.y - fh), col(clr::border, ma));
-            dl->AddLine(ImVec2(wp.x, wp.y + wsz.y - fh - 1), ImVec2(wp.x + wsz.x, wp.y + wsz.y - fh - 1), col(clr::border_dark, ma));
-
-            ImGui::PushFont(fontDesc);
-            time_t now = time(0);
-            tm* ltm = localtime(&now);
-            char tb[32];
-            snprintf(tb, sizeof(tb), "%02d:%02d:%02d", ltm->tm_hour, ltm->tm_min, ltm->tm_sec);
-            dl->AddText(ImVec2(wp.x + 10, wp.y + wsz.y - fh + (fh - fontDesc->FontSize) * 0.5f), col(clr::text_dim, ma), "Time");
-            ImVec2 lsz = ImGui::CalcTextSize("Time ");
-            dl->AddText(ImVec2(wp.x + 10 + lsz.x, wp.y + wsz.y - fh + (fh - fontDesc->FontSize) * 0.5f), col(clr::accent, ma), tb);
-            ImGui::PopFont();
-
-            ImVec2 smin(wp.x + 2, wp.y + hh + 2);
-            ImVec2 smax(wp.x + sw, wp.y + wsz.y - fh);
-
-            dl->AddRectFilled(smin, smax, col(clr::sidebar, ma));
-            dl->AddLine(ImVec2(smax.x, smin.y), ImVec2(smax.x, smax.y), col(clr::border, ma));
-
-            float tsy = smin.y + 16;
-            float th = 50.f;
-            float tg = 6.f;
-            float tp = 16.f;
-
-            for (int i = 0; i < tc; i++) {
-                float ty = tsy + i * (th + tg);
-                float tx = smin.x + 6;
-                float tw = sw - 14;
-
-                ImVec2 tmin(tx, ty);
-                ImVec2 tmax(tx + tw, ty + th);
-
-                bool sel = (tab == i);
-                bool hov = ImGui::IsMouseHoveringRect(tmin, tmax);
-
-                float sa = anim("t_" + std::to_string(i), sel ? 1.f : 0.f, 14.f);
-                float ha = anim("th_" + std::to_string(i), hov && !sel ? 0.4f : 0.f, 14.f);
-
-                if (sa > 0.01f) {
-                    dl->AddRectFilled(tmin, tmax, col(clr::widget, sa * ma));
-                    dl->AddRect(tmin, tmax, col(clr::border_light, sa * ma * 0.5f));
-                    dl->AddRectFilledMultiColor(tmin, ImVec2(tmin.x + 3, tmax.y), col(clr::accent, sa * ma), col(clr::accent, 0.f), col(clr::accent, 0.f), col(clr::accent, sa * ma));
-                } else if (ha > 0.01f) {
-                    dl->AddRectFilled(tmin, tmax, col(clr::panel, ha * ma));
-                }
-
-                ImVec4 ttc = anim_col("tt_" + std::to_string(i), sel ? clr::accent_light : clr::text_dim, 14.f);
-
-                ImGui::PushFont(fontMedium);
-                float ny = ty + (th - fontMedium->FontSize) * 0.5f;
-                dl->AddText(ImVec2(tx + tp, ny), col(ttc, ma), tabs[i]);
-                ImGui::PopFont();
-
-                if (hov && ImGui::IsMouseClicked(0) && ma > 0.5f && !tsw) {
-                    if (!popup() && tab != i) {
-                        ttab = i;
-                        tstab = 0;
-                        tsw = true;
-                    }
-                    close();
-                }
+        ImGui::PushClipRect(pos + ImVec2(0, 4 * s), pos + size - ImVec2(0, 4 * s), true);
+        const bool accepts = ImGui::GetFrameCount() > p.opened_frame;
+        bool dragging = false;
+        for (int i = 0; i < int(p.items.size()); ++i) {
+            const ImVec2 rp = pos + ImVec2(4 * s, 4 * s + i * row_h - p.scroll);
+            if (rp.y + row_h < pos.y || rp.y > pos.y + size.y) continue;
+            ImGui::SetCursorScreenPos(rp);
+            ImGui::PushID(7000 + i);
+            const bool clicked = ImGui::InvisibleButton("##row", ImVec2(size.x - 8 * s, row_h));
+            const bool hovered = ImGui::IsItemHovered();
+            const bool active = ImGui::IsItemActive();
+            const ImGuiID row_id = ImGui::GetID("##row_motion");
+            ImGui::PopID();
+            if (active && std::fabs(io.MouseDelta.y) > 0.f && max_scroll > 0.f) { p.scroll = ImClamp(p.scroll - io.MouseDelta.y, 0.f, max_scroll); dragging = true; }
+            const float hover = motion(row_id ^ 0x9921u, hovered ? 1.f : 0.f, 22.f);
+            if (hover > 0.001f) d->AddRectFilled(rp, rp + ImVec2(size.x - 8 * s, row_h), C(75, 126, 255, int(25 * hover)), 10.f * s);
+            const bool selected = p.cur == i;
+            if (selected) {
+                const ImVec2 c = rp + ImVec2(14, 16) * s;
+                d->AddLine(c, c + ImVec2(3, 3) * s, C(230, 233, 241), 1.5f * s);
+                d->AddLine(c + ImVec2(3, 3) * s, c + ImVec2(8, -3) * s, C(230, 233, 241), 1.5f * s);
             }
-
-            float csx = wp.x + sw + 1;
-            float cex = wp.x + wsz.x - 2;
-
-            float hst = (tab == 0) ? 1.f : 0.f;
-            float sah = sth * hst;
-
-            ImVec2 stmin(csx, wp.y + hh + 2);
-            ImVec2 stmax(cex, stmin.y + sah);
-
-            if (tab == 0) {
-                dl->AddRectFilled(stmin, stmax, col(clr::subtab_bg, ma));
-                dl->AddLine(ImVec2(stmin.x, stmax.y), ImVec2(stmax.x, stmax.y), col(clr::border, ma));
-                subtabs(dl, stmin, stmax, ma);
+            const ImVec2 ts = text_font()->CalcTextSizeA(kControl * s, FLT_MAX, 0.f, p.items[size_t(i)].c_str());
+            d->AddText(text_font(), kControl * s, rp + ImVec2(35 * s, (row_h - ts.y) * 0.5f), selected ? C(224, 229, 243) : C(182, 185, 196), p.items[size_t(i)].c_str());
+            if (accepts && clicked && !dragging && ImGui::GetIO().MouseDragMaxDistanceSqr[0] < 36.f) {
+                if (p.pick) p.pick(i);
+                p.open = false;
             }
-
-            float cp = 14.f;
-            float sbw = 20.f;
-            float sbg = 10.f;
-
-            content_w = cex - csx - cp * 2 - sbg - sbw;
-
-            float cw = content_w;
-            float csy = stmax.y + cp;
-            float ch = (wp.y + wsz.y - fh) - csy - cp;
-
-            ImVec2 cpos = ImVec2(csx + cp, csy);
-            ImVec2 cmax = ImVec2(cpos.x + cw, cpos.y + ch);
-
-            ImGui::SetCursorScreenPos(cpos);
-
-            ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ca);
-            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
-
-            ImGui::PushClipRect(cpos, cmax, true);
-
-            content_alpha = ta;
-
-            ImGui::BeginChild("##c", ImVec2(cw, ch), false, ImGuiWindowFlags_NoScrollbar);
-
-            float sm = ImGui::GetScrollMaxY();
-
-            bool chov = ImGui::IsMouseHoveringRect(cpos, cmax);
-            if (chov && !popup()) {
-                float wh = io.MouseWheel;
-                if (wh != 0.f) scr_tgt -= wh * 60.f;
-            }
-            scr_tgt = ImClamp(scr_tgt, 0.f, ImMax(sm, 0.f));
-
-            scr_cur = lrp(scr_cur, scr_tgt, ImClamp(16.f * dt, 0.f, 1.f));
-            if (fabsf(scr_cur - scr_tgt) < 0.5f) scr_cur = scr_tgt;
-
-            ImGui::SetScrollY(scr_cur);
-
-            switch (tab) {
-                case 0: visuals_tab(ma); break;
-                case 1: settings_tab(ma); break;
-            }
-
-            sm = ImGui::GetScrollMaxY();
-            scr_tgt = ImClamp(scr_tgt, 0.f, ImMax(sm, 0.f));
-
-            ImGui::EndChild();
-            ImGui::PopClipRect();
-
-            ImGui::PopStyleColor(1);
-            ImGui::PopStyleVar(2);
-
-            float sbx = cmax.x + sbg;
-            float sby = cpos.y;
-            float sbh = ch;
-
-            if (sm > 0.f) {
-                dl->AddRectFilledMultiColor(ImVec2(sbx + 2, sby + 2), ImVec2(sbx + sbw - 2, sby + sbh - 2), col(clr::bg_two, ma), col(clr::bg_two, ma), col(clr::bg, ma), col(clr::bg, ma));
-                dl->AddRect(ImVec2(sbx, sby), ImVec2(sbx + sbw, sby + sbh), col(clr::border, ma));
-                dl->AddRect(ImVec2(sbx + 1, sby + 1), ImVec2(sbx + sbw - 1, sby + sbh - 1), col(clr::border_dark, ma));
-
-                float sr = ch / (ch + sm);
-                float gh = sbh * sr;
-                gh = ImMax(gh, 40.f);
-
-                float sn = scr_tgt / sm;
-                float gy = sby + (sbh - gh) * sn;
-
-                dl->AddRectFilledMultiColor(ImVec2(sbx + 2, gy + 2), ImVec2(sbx + sbw - 2, gy + gh - 2), col(clr::accent, ma), col(clr::accent, ma), col(clr::accent_dark, ma), col(clr::accent_dark, ma));
-
-                float sb_hitbox_pad = 30.f;
-                ImRect sbr(ImVec2(sbx - sb_hitbox_pad, sby), ImVec2(sbx + sbw + 10.f, sby + sbh));
-                bool sbhov = ImGui::IsMouseHoveringRect(sbr.Min, sbr.Max);
-                static bool sbd = false;
-                static float sbds = 0.f;
-
-                if (sbhov && ImGui::IsMouseClicked(0) && !popup()) {
-                    sbd = true;
-                    sbds = mp.y - gy;
-                }
-                if (!ImGui::IsMouseDown(0)) sbd = false;
-
-                if (sbd && sm > 0.f) {
-                    float ngy = mp.y - sbds;
-                    float nn = (ngy - sby) / (sbh - gh);
-                    nn = ImClamp(nn, 0.f, 1.f);
-                    scr_tgt = nn * sm;
-                    scr_cur = scr_tgt;
-                }
-            }
-
-            bool inm = (mp.x >= wp.x && mp.x <= wp.x + wsz.x && mp.y >= wp.y && mp.y <= wp.y + wsz.y);
-
-            if (inm && !popup() && ImGui::IsMouseClicked(0)) {
-                bool ont = false;
-                for (int i = 0; i < tc; i++) {
-                    float ty = tsy + i * (th + tg);
-                    float tx = smin.x + 6;
-                    float tw = sw - 14;
-                    if (mp.x >= tx && mp.x <= tx + tw && mp.y >= ty && mp.y <= ty + th) {
-                        ont = true;
-                        break;
-                    }
-                }
-
-                bool inst = (tab == 0 && mp.y >= stmin.y && mp.y <= stmax.y && mp.x >= stmin.x);
-                bool inca = (mp.x >= cpos.x && mp.x <= cmax.x && mp.y >= cpos.y && mp.y <= cmax.y);
-                bool insb = (mp.x >= sbx - 30.f && mp.x <= sbx + sbw + 10.f && mp.y >= sby && mp.y <= sby + sbh);
-
-                if (!ont && !inca && !insb && !inst) {
-                    drag = true;
-                    doff = ImVec2(mp.x - wp.x, mp.y - wp.y);
-                }
-            }
-
-            if (drag) {
-                if (ImGui::IsMouseDown(0)) {
-                    ImVec2 np = ImVec2(mp.x - doff.x, mp.y - doff.y);
-                    np.x = ImClamp(np.x, 0.f, g_sw - wsz.x);
-                    np.y = ImClamp(np.y, 0.f, g_sh - wsz.y);
-                    ImGui::SetWindowPos("##m", np);
-                } else {
-                    drag = false;
-                }
-            }
-
-            if (popup()) drag = false;
+        }
+        ImGui::PopClipRect();
+        if (p.items.size() > size_t(visible)) {   // a thin scroll mark
+            const float track = size.y - 16 * s;
+            const float thumb = track * visible / float(p.items.size());
+            const float ty = pos.y + 8 * s + (track - thumb) * (max_scroll > 0 ? p.scroll / max_scroll : 0.f);
+            d->AddRectFilled(ImVec2(pos.x + size.x - 5 * s, ty), ImVec2(pos.x + size.x - 3 * s, ty + thumb), C(120, 130, 160, 120), s);
+        }
+        if (accepts && ImGui::IsMouseClicked(0) && !inside) p.open = false;
+        const float eased = 1.f - std::pow(1.f - open, 3.f);
+        const ImVec2 pivot = pos + size * 0.5f;
+        for (int i = first; i < d->VtxBuffer.Size; ++i) {
+            ImDrawVert& v = d->VtxBuffer[i];
+            v.pos = pivot + (v.pos - pivot) * ImLerp(0.96f, 1.f, eased) + ImVec2(4.f * (1.f - eased) * s, 0);
+            const ImU32 a = (v.col >> IM_COL32_A_SHIFT) & 255u;
+            v.col = (v.col & 0x00ffffffu) | ((ImU32)(a * eased * alpha) << IM_COL32_A_SHIFT);
         }
         ImGui::End();
-        ImGui::PopStyleColor(1);
-        ImGui::PopStyleVar(4);
+        ImGui::PopStyleVar(2);
+    }
 
-        popups();
+    void checker(ImDrawList* d, ImVec2 a, ImVec2 b, float cell) {
+        d->AddRectFilled(a, b, C(60, 62, 70));
+        bool flip = false;
+        for (float x = a.x; x < b.x; x += cell, flip = !flip) {
+            bool on = flip;
+            for (float y = a.y; y < b.y; y += cell, on = !on)
+                if (on) d->AddRectFilled(ImVec2(x, y), ImVec2(ImMin(x + cell, b.x), ImMin(y + cell, b.y)), C(95, 98, 108));
+        }
+    }
+
+    void color_popup(float alpha) {
+        ColorPopup& cp = st.color;
+        if (!cp.open || !cp.target) return;
+        const float s = fr.s;
+        const ImVec2 size(312.f * s, 372.f * s);
+        ImVec2 pos(cp.anchor.x, cp.anchor.y - 30.f * s);
+        if (pos.x + size.x > g_sw - 10.f) pos.x = cp.anchor.x - size.x - 40.f * s;   // no room on the right: on the left
+        pos.x = ImClamp(pos.x, 10.f, g_sw - size.x - 10.f);
+        pos.y = ImClamp(pos.y, 10.f, g_sh - size.y - 10.f);
+        const float open = motion(ImGui::GetID("##nl_color_open"), 1.f, 20.f, 0.f);
+
+        ImGui::SetNextWindowPos(pos);
+        ImGui::SetNextWindowSize(size);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+        if (!ImGui::Begin("##nl_color", nullptr, kPopupFlags)) { ImGui::End(); ImGui::PopStyleVar(2); return; }
+        ImDrawList* d = ImGui::GetWindowDrawList();
+        const int first = d->VtxBuffer.Size;
+        const ImU32 bg = C(21, 23, 32, 252);
+        d->AddRectFilled(pos - ImVec2(4, 2) * s, pos + size + ImVec2(4, 7) * s, C(0, 0, 0, 40), 20.f * s);
+        d->AddRectFilled(pos, pos + size, bg, 18.f * s);
+        d->AddRect(pos, pos + size, C(48, 52, 66), 18.f * s);
+
+        ImGuiIO& io = ImGui::GetIO();
+        ImVec4& target = *cp.target;
+        const float alpha_value = target.w;
+        bool changed = false;
+
+        // header chip: the colour and its name
+        const ImVec2 chip = pos + ImVec2(104, 14) * s;
+        d->AddRectFilled(chip, chip + ImVec2(104, 36) * s, C(31, 34, 47), 10.f * s);
+        d->AddCircleFilled(chip + ImVec2(20, 18) * s, 9.f * s, ImGui::ColorConvertFloat4ToU32(ImVec4(target.x, target.y, target.z, 1.f)));
+        {
+            const char* name = "Primary";
+            const ImVec2 ts = text_font()->CalcTextSizeA(kBody * s, FLT_MAX, 0.f, name);
+            d->AddText(text_font(), kBody * s, chip + ImVec2(38 * s, (36 * s - ts.y) * 0.5f), C(224, 228, 240), name);
+        }
+
+        // saturation / value square
+        const ImVec2 sv_min = pos + ImVec2(16, 64) * s, sv_max = pos + ImVec2(296, 238) * s;
+        float rr, gg, bb;
+        ImGui::ColorConvertHSVtoRGB(cp.h, 1.f, 1.f, rr, gg, bb);
+        const ImU32 hue_col = ImGui::ColorConvertFloat4ToU32(ImVec4(rr, gg, bb, 1.f));
+        d->AddRectFilledMultiColor(sv_min, sv_max, C(255, 255, 255), hue_col, hue_col, C(255, 255, 255));
+        d->AddRectFilledMultiColor(sv_min, sv_max, C(0, 0, 0, 0), C(0, 0, 0, 0), C(0, 0, 0, 255), C(0, 0, 0, 255));
+        d->AddRect(sv_min, sv_max, bg, 10.f * s, 0, 6.f * s);          // rounds the corners of the gradient
+        ImGui::SetCursorScreenPos(sv_min);
+        ImGui::InvisibleButton("##sv", sv_max - sv_min);
+        if (ImGui::IsItemActive()) {
+            cp.s = ImClamp((io.MousePos.x - sv_min.x) / (sv_max.x - sv_min.x), 0.f, 1.f);
+            cp.v = 1.f - ImClamp((io.MousePos.y - sv_min.y) / (sv_max.y - sv_min.y), 0.f, 1.f);
+            changed = true;
+        }
+        const ImVec2 handle(sv_min.x + (sv_max.x - sv_min.x) * cp.s, sv_min.y + (sv_max.y - sv_min.y) * (1.f - cp.v));
+        d->AddCircleFilled(handle, 8.f * s, C(0, 0, 0, 90));
+        d->AddCircle(handle, 7.f * s, C(255, 255, 255), 0, 2.f * s);
+        d->AddCircleFilled(handle, 5.f * s, ImGui::ColorConvertFloat4ToU32(ImVec4(target.x, target.y, target.z, 1.f)));
+
+        // hue bar
+        const ImVec2 hue_min = pos + ImVec2(16, 258) * s, hue_max = pos + ImVec2(296, 270) * s;
+        {
+            static const ImU32 stops[7] = {C(255, 0, 0), C(255, 255, 0), C(0, 255, 0), C(0, 255, 255), C(0, 0, 255), C(255, 0, 255), C(255, 0, 0)};
+            const float w = (hue_max.x - hue_min.x) / 6.f;
+            for (int i = 0; i < 6; ++i)
+                d->AddRectFilledMultiColor(ImVec2(hue_min.x + w * i, hue_min.y), ImVec2(hue_min.x + w * (i + 1), hue_max.y), stops[i], stops[i + 1], stops[i + 1], stops[i]);
+            d->AddRect(hue_min, hue_max, bg, 6.f * s, 0, 4.f * s);
+        }
+        ImGui::SetCursorScreenPos(ImVec2(hue_min.x, hue_min.y - 8 * s));
+        ImGui::InvisibleButton("##hue", ImVec2(hue_max.x - hue_min.x, hue_max.y - hue_min.y + 16 * s));
+        if (ImGui::IsItemActive()) {
+            cp.h = ImClamp((io.MousePos.x - hue_min.x) / (hue_max.x - hue_min.x), 0.f, 0.9999f);
+            changed = true;
+        }
+        const float hx = hue_min.x + (hue_max.x - hue_min.x) * cp.h;
+        d->AddCircleFilled(ImVec2(hx, (hue_min.y + hue_max.y) * 0.5f), 7.f * s, C(0, 0, 0, 90));
+        d->AddCircleFilled(ImVec2(hx, (hue_min.y + hue_max.y) * 0.5f), 6.f * s, C(255, 255, 255));
+        d->AddCircleFilled(ImVec2(hx, (hue_min.y + hue_max.y) * 0.5f), 4.f * s, hue_col);
+
+        // alpha bar
+        const ImVec2 a_min = pos + ImVec2(16, 286) * s, a_max = pos + ImVec2(296, 298) * s;
+        {
+            ImGui::PushClipRect(a_min, a_max, true);
+            checker(d, a_min, a_max, 6.f * s);
+            ImGui::PopClipRect();
+            const ImU32 solid = ImGui::ColorConvertFloat4ToU32(ImVec4(target.x, target.y, target.z, 1.f));
+            d->AddRectFilledMultiColor(a_min, a_max, solid & 0x00ffffffu, solid, solid, solid & 0x00ffffffu);
+            d->AddRect(a_min, a_max, bg, 6.f * s, 0, 4.f * s);
+        }
+        ImGui::SetCursorScreenPos(ImVec2(a_min.x, a_min.y - 8 * s));
+        ImGui::InvisibleButton("##alpha", ImVec2(a_max.x - a_min.x, a_max.y - a_min.y + 16 * s));
+        float new_alpha = alpha_value;
+        if (ImGui::IsItemActive()) {
+            new_alpha = ImClamp((io.MousePos.x - a_min.x) / (a_max.x - a_min.x), 0.f, 1.f);
+            changed = true;
+        }
+        const float ax = a_min.x + (a_max.x - a_min.x) * new_alpha;
+        d->AddCircleFilled(ImVec2(ax, (a_min.y + a_max.y) * 0.5f), 7.f * s, C(0, 0, 0, 90));
+        d->AddCircleFilled(ImVec2(ax, (a_min.y + a_max.y) * 0.5f), 6.f * s, C(255, 255, 255));
+        d->AddCircleFilled(ImVec2(ax, (a_min.y + a_max.y) * 0.5f), 4.f * s, ImGui::ColorConvertFloat4ToU32(ImVec4(target.x, target.y, target.z, new_alpha)));
+
+        if (changed) {
+            ImGui::ColorConvertHSVtoRGB(cp.h, cp.s, cp.v, target.x, target.y, target.z);
+            target.w = new_alpha;
+        }
+
+        // hex
+        d->AddLine(pos + ImVec2(16, 318) * s, pos + ImVec2(296, 318) * s, C(34, 37, 49));
+        {
+            const char* label = "HEX";
+            const ImVec2 ls = text_font()->CalcTextSizeA(kControl * s, FLT_MAX, 0.f, label);
+            d->AddText(text_font(), kControl * s, pos + ImVec2(22 * s, 340 * s - ls.y * 0.5f), C(160, 164, 178), label);
+            const ImVec2 field = pos + ImVec2(104, 326) * s;
+            d->AddRectFilled(field, field + ImVec2(190, 28) * s, C(29, 32, 44), 8.f * s);
+            d->AddCircleFilled(field + ImVec2(18, 14) * s, 7.f * s, ImGui::ColorConvertFloat4ToU32(ImVec4(target.x, target.y, target.z, 1.f)));
+            char hex[16];
+            std::snprintf(hex, sizeof(hex), "#%02X%02X%02X%02X", int(ImSaturate(target.x) * 255.f + .5f), int(ImSaturate(target.y) * 255.f + .5f),
+                          int(ImSaturate(target.z) * 255.f + .5f), int(ImSaturate(target.w) * 255.f + .5f));
+            const ImVec2 hs = text_font()->CalcTextSizeA(kControl * s, FLT_MAX, 0.f, hex);
+            d->AddText(text_font(), kControl * s, field + ImVec2(36 * s, (28 * s - hs.y) * 0.5f), C(200, 204, 218), hex);
+        }
+
+        const bool inside = io.MousePos.x >= pos.x && io.MousePos.x <= pos.x + size.x && io.MousePos.y >= pos.y && io.MousePos.y <= pos.y + size.y;
+        if (ImGui::GetFrameCount() > cp.opened_frame && ImGui::IsMouseClicked(0) && !inside) cp.open = false;
+
+        const float eased = 1.f - std::pow(1.f - open, 3.f);
+        const ImVec2 pivot = pos + size * 0.5f;
+        for (int i = first; i < d->VtxBuffer.Size; ++i) {
+            ImDrawVert& v = d->VtxBuffer[i];
+            v.pos = pivot + (v.pos - pivot) * ImLerp(0.96f, 1.f, eased);
+            const ImU32 a = (v.col >> IM_COL32_A_SHIFT) & 255u;
+            v.col = (v.col & 0x00ffffffu) | ((ImU32)(a * eased * alpha) << IM_COL32_A_SHIFT);
+        }
+        ImGui::End();
+        ImGui::PopStyleVar(2);
+    }
+
+    // ---- shell ---------------------------------------------------------------------------------------
+
+    void change_page(Page next) {
+        if (st.page == next) return;
+        st.page = next;
+        st.page_mix = 0.f;
+        st.scroll = st.scroll_target = 0.f;
+        st.popup.open = false;
+        st.color.open = false;
+    }
+
+    void sidebar() {
+        const bool visuals = st.page == Page::Players || st.page == Page::World;
+        rect(0, 0, 158, kShell.y, C(18, 21, 30, 231), 14, ImDrawFlags_RoundCornersLeft);
+        rect(145, 0, 13, kShell.y, C(18, 21, 30, 231));
+        line(158, 0, 158, kShell.y, C(30, 33, 43));
+        rect(15, 11, 30, 32, C(8, 27, 48), 7);
+        text(20, 17, C(94, 185, 255), "MS", kTitle, bold_font());
+        text(53, 13, C(228, 230, 236), "morskie svinki", 13.f, bold_font());
+        text(53, 33, C(91, 96, 108), "Standoff 2", 8.f);
+        line(10, 56, 147, 56, C(28, 31, 41));
+        text(16, 67, C(91, 96, 108), "COMMON", kCaption);
+
+        auto nav = [&](int id, const char* icon, const char* label, float y, Page target, bool selected, float indent = 0.f) {
+            const float x = 7 + indent, w = 140 - indent;
+            ImGui::PushID(id);
+            bool hover = false;
+            const bool clicked = hit("##nav", x, y, w, 30, &hover);
+            const float r = motion(ImGui::GetID("##nav") ^ 0x7771u, selected ? 1.f : hover ? 0.48f : 0.f);
+            ImGui::PopID();
+            if (clicked) change_page(target);
+            if (r > 0.001f) rect(x, y, w, 30, mix(C(18, 21, 30, 0), C(39, 43, 54), r), 6);
+            text_mid(x + 10, y, 30, mix(C(137, 142, 153), C(82, 141, 255), r), icon, kIcon, icon_font());
+            text_mid(x + 31, y, 30, mix(C(145, 149, 159), C(226, 228, 235), r), label, kBody);
+        };
+
+        nav(0, u8"", "Visuals", 84, Page::Players, visuals);
+        const float expand = motion(ImGui::GetID("##visual_expand"), visuals ? 1.f : 0.f, 18.f);
+        if (expand > 0.02f) {
+            const int first = fr.d->VtxBuffer.Size;
+            nav(1, u8"", "Players", 120, Page::Players, st.page == Page::Players, 14);
+            nav(2, u8"", "World", 156, Page::World, st.page == Page::World, 14);
+            for (int i = first; i < fr.d->VtxBuffer.Size; ++i) {
+                ImDrawVert& v = fr.d->VtxBuffer[i];
+                const ImU32 a = (v.col >> IM_COL32_A_SHIFT) & 255u;
+                v.col = (v.col & 0xffffffu) | ((ImU32)(a * expand) << IM_COL32_A_SHIFT);
+            }
+        }
+        const float shift = 72.f * expand;
+        nav(3, u8"", "Skins", 120 + shift, Page::Skins, st.page == Page::Skins);
+        nav(4, u8"", "Miscellaneous", 156 + shift, Page::Misc, st.page == Page::Misc);
+        nav(5, u8"", "Settings", 192 + shift, Page::Settings, st.page == Page::Settings);
+
+        // the clock where the account sits in the original
+        time_t now = time(nullptr);
+        tm* local = localtime(&now);
+        char clock[16];
+        std::snprintf(clock, sizeof(clock), "%02d:%02d:%02d", local->tm_hour, local->tm_min, local->tm_sec);
+        rect(7, 531, 140, 38, C(39, 43, 54, 150), 6);
+        fr.d->AddCircleFilled(P(28, 550), Z(14), C(24, 36, 64));
+        text_mid(22, 531, 38, C(94, 185, 255), "M", kBody, bold_font());
+        text(43, 535, C(225, 227, 233), "Local time", kControl);
+        text(43, 551, C(111, 116, 128), clock, kSmall);
+    }
+
+    const char* page_title() {
+        switch (st.page) {
+            case Page::Players: return "Players";
+            case Page::World: return "World";
+            case Page::Skins: return "Skins";
+            case Page::Misc: return "Miscellaneous";
+            case Page::Settings: return "Settings";
+        }
+        return "";
+    }
+
+    const char* page_icon() {
+        switch (st.page) {
+            case Page::Players: return u8"";
+            case Page::World: return u8"";
+            case Page::Skins: return u8"";
+            case Page::Misc: return u8"";
+            case Page::Settings: return u8"";
+        }
+        return "";
+    }
+
+    void toolbar() {
+        rect(158, 0, 590, 56, C(11, 13, 20, 225), 14, ImDrawFlags_RoundCornersTopRight);
+        line(158, 56, 748, 56, C(27, 30, 39));
+        rect(169, 14, 166, 30, C(17, 19, 27), 6);
+        outline(169, 14, 166, 30, C(28, 31, 41), 6);
+        text_mid(181, 14, 30, C(194, 197, 206), page_icon(), kIcon, icon_font());
+        text_mid(217, 14, 30, C(184, 187, 197), page_title(), kControl);
+        chevron(317, 25, C(130, 135, 146));
+        // the search glass of the original, here the status of the bar toggle
+        fr.d->AddCircle(P(719, 28), Z(5), C(180, 184, 194), 0, Z(2));
+        line(723, 32, 727, 36, C(180, 184, 194), 2.f);
+    }
+
+    void page_content() {
+        cols = Columns{};
+        ImGui::PushID(int(st.page));
+        switch (st.page) {
+            case Page::Players: players_page(); break;
+            case Page::World: world_page(); break;
+            case Page::Skins: skins_page(); break;
+            case Page::Misc: misc_page(); break;
+            case Page::Settings: settings_page(); break;
+        }
+        ImGui::PopID();
+        st.content_h = ImMax(cols.y[0], cols.y[1]) + 12.f;   // design units, scroll excluded
     }
 }
+
+void render() {
+    bar::render();
+
+    static float ma = 0.f;
+    ImGuiIO& io = ImGui::GetIO();
+    const float dt = io.DeltaTime;
+    ma += ((bar::g_open ? 1.f : 0.f) - ma) * ImClamp(12.f * dt, 0.f, 1.f);
+    if (ma < 0.01f) { st.popup.open = false; st.color.open = false; return; }
+    const float game = bar::game_alpha();
+    const float alpha = ma * game;
+
+    // The dim behind the menu.
+    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), ImVec2(g_sw, g_sh), IM_COL32(0, 0, 0, int(130 * alpha)));
+
+    fr.s = ImClamp(ImMin(g_sw * 0.62f / kShell.x, g_sh * 0.86f / kShell.y) * cfg::gui::scale, 0.6f, 3.f);
+    const ImVec2 size = kShell * fr.s;
+    if (st.pos.x < 0.f) st.pos = ImVec2((g_sw - size.x) * 0.5f, (g_sh - size.y) * 0.5f);
+    st.pos.x = ImClamp(st.pos.x, 40.f - size.x, g_sw - 40.f);
+    st.pos.y = ImClamp(st.pos.y, 0.f, g_sh - 40.f);
+
+    ImGui::SetNextWindowPos(st.pos, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
+    if (ImGui::Begin("##nl_menu", nullptr, flags)) {
+        fr.origin = ImGui::GetWindowPos();
+        fr.d = ImGui::GetWindowDrawList();
+        const bool animating = ma < 0.98f;
+        fr.input = !animating && !st.popup.open && !st.color.open;
+        const int shell_first = fr.d->VtxBuffer.Size;
+
+        // soft shadow, then the shell
+        for (int i = 4; i >= 1; --i)
+            fr.d->AddRectFilled(P(0, 0) - ImVec2(float(i * 4), float(i * 3)) * fr.s * 0.5f, P(kShell) + ImVec2(float(i * 4), float(i * 5)) * fr.s * 0.5f,
+                                C(0, 0, 0, 14), Z(14 + i * 3));
+        rect(0, 0, kShell.x, kShell.y, C(13, 15, 22, 232), 14);
+        outline(0, 0, kShell.x, kShell.y, C(31, 34, 44), 14);
+
+        // dragging by the toolbar
+        {
+            bool active = false;
+            hit("##drag", 160, 2, 588, 54, nullptr, &active);
+            if (active) st.pos += io.MouseDelta;
+        }
+
+        sidebar();
+        toolbar();
+
+        // the page, scrolled and clipped to the content area
+        const int content_first = fr.d->VtxBuffer.Size;
+        const ImVec2 cmin = P(159, 57), cmax = P(747, 575);
+        ImGui::PushClipRect(cmin, cmax, true);
+        page_content();
+        ImGui::PopClipRect();
+
+        // scrolling: the wheel, or a drag that starts on empty ground (not on a control)
+        const float view_h = 519.f;
+        const float max_scroll = ImMax(0.f, st.content_h - view_h - 10.f);
+        const bool in_content = io.MousePos.x >= cmin.x && io.MousePos.x <= cmax.x && io.MousePos.y >= cmin.y && io.MousePos.y <= cmax.y;
+        if (fr.input && in_content && io.MouseWheel != 0.f) st.scroll_target -= io.MouseWheel * 60.f;
+        if (fr.input && in_content && ImGui::IsMouseClicked(0) && !ImGui::IsAnyItemHovered() && !ImGui::IsAnyItemActive()) {
+            st.scroll_drag = true;
+            st.scroll_press_y = io.MousePos.y;
+            st.scroll_press_value = st.scroll_target;
+        }
+        if (!ImGui::IsMouseDown(0)) st.scroll_drag = false;
+        if (st.scroll_drag) {
+            st.scroll_target = st.scroll_press_value - (io.MousePos.y - st.scroll_press_y) / fr.s;
+            st.scroll = st.scroll_target;   // follows the finger
+        }
+        st.scroll_target = ImClamp(st.scroll_target, 0.f, max_scroll);
+        st.scroll = ImLerp(st.scroll, st.scroll_target, st.scroll_drag ? 1.f : ImClamp(16.f * dt, 0.f, 1.f));
+        if (std::fabs(st.scroll - st.scroll_target) < 0.2f) st.scroll = st.scroll_target;
+        if (max_scroll > 0.f) {   // a thin mark on the right edge
+            const float track = view_h - 16.f;
+            const float thumb = ImMax(30.f, track * view_h / (view_h + max_scroll));
+            const float ty = 65.f + (track - thumb) * (st.scroll / max_scroll);
+            rect(742.f, ty, 2.f, thumb, C(110, 120, 150, 110), 1);
+        }
+
+        // the page changing: slides in and fades in
+        st.page_mix = ImLerp(st.page_mix, 1.f, 1.f - std::exp(-15.f * dt));
+        const float pe = 1.f - std::pow(1.f - st.page_mix, 3.f);
+        for (int i = content_first; i < fr.d->VtxBuffer.Size; ++i) {
+            ImDrawVert& v = fr.d->VtxBuffer[i];
+            v.pos += ImVec2(9.f * (1.f - pe) * fr.s, 0.f);
+            const ImU32 a = (v.col >> IM_COL32_A_SHIFT) & 255u;
+            v.col = (v.col & 0xffffffu) | ((ImU32)(a * pe) << IM_COL32_A_SHIFT);
+        }
+
+        // opening: the shell grows from 92 % and fades in
+        const float eased = 1.f - std::pow(1.f - ma, 4.f);
+        const ImVec2 pivot = fr.origin + size * 0.5f;
+        const float grow = ImLerp(0.92f, 1.f, eased);
+        for (int i = shell_first; i < fr.d->VtxBuffer.Size; ++i) {
+            ImDrawVert& v = fr.d->VtxBuffer[i];
+            if (animating) v.pos = pivot + (v.pos - pivot) * grow + ImVec2(0.f, (1.f - eased) * 16.f);
+            const ImU32 a = (v.col >> IM_COL32_A_SHIFT) & 255u;
+            v.col = (v.col & 0xffffffu) | ((ImU32)(a * ma * game) << IM_COL32_A_SHIFT);
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(3);
+
+    select_popup(alpha);
+    color_popup(alpha);
+}
+
+}  // namespace ui::menu

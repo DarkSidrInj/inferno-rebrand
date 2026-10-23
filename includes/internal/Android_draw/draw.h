@@ -38,6 +38,9 @@ extern ImFont* fontBold;
 extern ImFont* fontMedium;
 extern ImFont* fontDesc;
 extern ImFont* espFont;
+extern ImFont* nlText;    // Neverlose-style menu: text, bold text, icons
+extern ImFont* nlBold;
+extern ImFont* nlIcons;
 extern int native_window_screen_x, native_window_screen_y;
 
 bool init_egl(uint32_t _screen_x, uint32_t _screen_y, bool log = false);

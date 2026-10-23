@@ -67,3 +67,13 @@ SKELETON enemies=.. cached=.. live=..
 ```
 g++ -std=c++17 -Iincludes/internal/ImGui -Iincludes/internal -Iincludes -Isrc tests/selftest_port.cpp -o selftest && ./selftest
 ```
+
+`tests/menu_preview.cpp` renders the real menu (`src/CMenu/CMenu.cpp`) on the host with Dear ImGui into a software
+framebuffer, to look at it without a phone (pages 0..4: Players, World, Skins, Miscellaneous, Settings; the optional
+second argument opens the colour picker, a select popup or a scrolled page):
+
+```
+g++ -std=c++17 -O1 -w -Itests/stubs -Iincludes -Iincludes/fonts -Iincludes/internal -Iincludes/internal/ImGui -Iincludes/draw/ImGui -Isrc \
+    tests/menu_preview.cpp includes/draw/ImGui/imgui.cpp includes/draw/ImGui/imgui_draw.cpp includes/draw/ImGui/imgui_tables.cpp \
+    includes/draw/ImGui/imgui_widgets.cpp -o menu_preview && ./menu_preview 0 "" out.ppm
+```

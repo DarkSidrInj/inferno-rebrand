@@ -1,6 +1,7 @@
 #include "Android_draw/draw.h"
 #include "fonts/menu/pixeloperator.h"
 #include "fonts/esp/esp.h"
+#include "fonts/menu/neverlose_fonts.h"
 
 EGLDisplay display = EGL_NO_DISPLAY;
 EGLConfig config;
@@ -12,6 +13,9 @@ ImFont* fontBold;
 ImFont* fontMedium;
 ImFont* fontDesc;
 ImFont* espFont;
+ImFont* nlText;
+ImFont* nlBold;
+ImFont* nlIcons;
 
 int native_window_screen_x = 0;
 int native_window_screen_y = 0;
@@ -113,6 +117,17 @@ bool ImGui_init() {
     io.FontDefault = fontMedium;
 
     espFont = io.Fonts->AddFontFromMemoryTTF(esp, sizeof(esp), 18, nullptr, io.Fonts->GetGlyphRangesCyrillic());
+
+    // The Neverlose-style menu: text (Medium, Bold) and the icon font. The data is static, the atlas must not free it.
+    {
+        static const ImWchar text_ranges[] = {0x0020, 0x00FF, 0x0400, 0x04FF, 0x2013, 0x2014, 0x2022, 0x2022, 0x2026, 0x2026, 0};
+        static const ImWchar icon_ranges[] = {0xF000, 0xF8FF, 0};
+        ImFontConfig config;
+        config.FontDataOwnedByAtlas = false;
+        nlText = io.Fonts->AddFontFromMemoryTTF(nl_font_medium, sizeof(nl_font_medium), 30, &config, text_ranges);
+        nlBold = io.Fonts->AddFontFromMemoryTTF(nl_font_bold, sizeof(nl_font_bold), 34, &config, text_ranges);
+        nlIcons = io.Fonts->AddFontFromMemoryTTF(nl_font_icons, sizeof(nl_font_icons), 28, &config, icon_ranges);
+    }
 
     ImGui::GetStyle().ScaleAllSizes(3.0f);
     ::g_Initialized = true;

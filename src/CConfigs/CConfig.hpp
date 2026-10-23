@@ -93,6 +93,10 @@ namespace fog {
 }
 
 
+namespace gui {
+    inline float scale = 1.f;       // menu size on top of the automatic fit to the screen
+}
+
 namespace night {
     inline bool enabled = false;
     inline float strength = 0.8f;   // 0 = the map's own light, 1 = darkest
