@@ -83,6 +83,9 @@ namespace skins {
     inline int g_loaded_op = -1, g_loaded_skin = 0, g_pending_skin = 0;
     inline long long g_retry_at = 0;
     inline constexpr long long kHoldMs = 3000;
+    // The skins in the menu are knife skins: knife WeaponIds (70 default knife on device, 75 Butterfly
+    // by its skin ids; grenades start at 90).
+    inline bool knife(int weapon) { return weapon >= 70 && weapon < 90; }
 
     inline void set_status(const std::string& s) {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -461,7 +464,13 @@ namespace skins {
             for (const auto& e : g_applied) weapons.push_back(e.first);
             for (int w : weapons) { put_back(w); held_changed |= w == held; }
         }
+        static bool mode_logged = false;
+        if (!mode_logged) {
+            mode_logged = true;
+            diag::log("SKINS", "mode: knives only, skin id held %lld ms, force model %s", (long long)kHoldMs, force_model ? "ON" : "off");
+        }
         for (int w = 1; w < 256; ++w) {
+            if (!knife(w) && cfg::skins::chosen[w]) cfg::skins::chosen[w] = 0;  // a knife skin on a gun
             const int chosen = cfg::skins::chosen[w];
             const auto it = g_applied.find(w);
             const int now = it == g_applied.end() ? 0 : it->second;
@@ -508,6 +517,10 @@ namespace skins {
         }
         v.ids.push_back(0);
         v.names.push_back("Original");
+        if (!knife(v.weapon)) {
+            v.status = "take the knife";
+            return v;
+        }
         for (const Skin& s : kSkins) { v.ids.push_back(s.id); v.names.push_back(s.name); }
         const int chosen = v.weapon >= 0 && v.weapon < 256 ? cfg::skins::chosen[v.weapon] : 0;
         for (size_t i = 0; i < v.ids.size(); ++i) if (v.ids[i] == chosen) v.current = int(i);
