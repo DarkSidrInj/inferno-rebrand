@@ -56,8 +56,12 @@ namespace {
         dl->AddCircleFilled(c.b, rb, color, 20);
     }
 
+    ImVec4 darker(const ImVec4& c, float k) { return ImVec4(c.x * k, c.y * k, c.z * k, c.w); }
+    ImVec4 lighter(const ImVec4& c, float t) { return ImVec4(c.x + (1.f - c.x) * t, c.y + (1.f - c.y) * t, c.z + (1.f - c.z) * t, c.w); }
+
     void draw_overlay(ImDrawList* dl, const Pose& pose, const matrix& view, const matrix& projection,
                       const ImVec4& fill_col, const ImVec4& outline_col, float outline_px) {
+        const bool shaded = cfg::chams::overlay_shaded;
         const float alpha = pose_alpha(pose);
         if (alpha <= 0.f) return;
         const float* m = reinterpret_cast<const float*>(&view);
@@ -124,7 +128,7 @@ namespace {
         };
         const float edge = std::max(1.5f, outline_px);
         const ImU32 outline = tint(outline_col, alpha);
-        const ImU32 fill = tint(fill_col, alpha);
+        const ImU32 fill = tint(shaded ? darker(fill_col, .8f) : fill_col, alpha);
         for (int pass = 0; pass < 2; ++pass) {
             const float grow = pass == 0 ? edge : 0.f;
             const ImU32 color = pass == 0 ? outline : fill;
@@ -136,6 +140,27 @@ namespace {
             }
             for (const Capsule& c : parts) fill_capsule(dl, c, grow, color);
             if (head_ok) fill_capsule(dl, head, grow, color);
+        }
+        if (shaded) {
+            // A lit inner tube per part, offset towards the light: reads as a rounded body instead of a flat cut-out.
+            const ImU32 light = tint(lighter(fill_col, .2f), alpha);
+            auto highlight = [&](const Capsule& c) {
+                Capsule h = c;
+                h.a = ImVec2(c.a.x - .22f * c.ra, c.a.y - .22f * c.ra);
+                h.b = ImVec2(c.b.x - .22f * c.rb, c.b.y - .22f * c.rb);
+                h.ra = c.ra * .6f;
+                h.rb = c.rb * .6f;
+                fill_capsule(dl, h, 0.f, light);
+            };
+            if (torso_ok) {
+                const float side = .09f * (px[LUpperArm] + px[RUpperLeg]) * .5f;
+                const std::vector<ImVec2> inner = grown_torso(-side * .55f);
+                std::vector<ImVec2> lit;
+                for (const ImVec2& p : inner) lit.push_back(ImVec2(p.x - side * .25f, p.y - side * .25f));
+                dl->AddConvexPolyFilled(lit.data(), int(lit.size()), light);
+            }
+            for (const Capsule& c : parts) highlight(c);
+            if (head_ok) highlight(head);
         }
     }
 

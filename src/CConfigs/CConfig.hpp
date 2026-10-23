@@ -40,6 +40,7 @@ namespace chams {
     inline bool through_walls = true; // enemies / teammates get a material drawn without depth test
     inline bool overlay = false;      // filled limbs drawn on screen along the skeleton (through walls, any material)
     inline ImVec4 overlay_col = ImVec4(1.f, .25f, .35f, 1.f);
+    inline bool overlay_shaded = true;    // darker base with a lit inner tube per part
     inline float overlay_outline = 1.5f;  // pixels, 0 = none
     inline ImVec4 overlay_outline_col = ImVec4(0.f, 0.f, 0.f, 1.f);
     inline bool no_occlusion = true;  // camera occlusion culling off while through walls is on
@@ -54,7 +55,7 @@ namespace thirdperson {
     inline float side = 0.f;        // meters to the right (negative: left shoulder)
     inline bool show_body = true;   // draw the own body, hide first-person arms, gloves and weapon
     inline bool try_enable_body = false;  // replay the game's set_enabled on the body renderer once (fails on device)
-    inline bool real_model = true;     // hand the arms' scene node to the body renderer (the game's own mesh and skin)
+    inline bool real_model = false;     // hand the arms' scene node to the body renderer (the game's own mesh and skin)
     inline bool flat_body = false;     // flat white body material instead of the real skin
     inline bool model_overlay = true;  // draw the own character from its bones (its real renderer is not in the scene)
     inline ImVec4 model_col = ImVec4(.86f, .91f, 1.f, 1.f);

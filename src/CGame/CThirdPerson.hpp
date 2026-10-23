@@ -244,6 +244,13 @@ namespace thirdperson {
         g_have_written = false;
     }
 
+    // A frame that lost the local player or its transform for a moment must not give the camera back:
+    // the matrix stays where the game can read it, the caller keeps drawing the model with the last view.
+    inline long long g_last_active = 0;
+    inline bool holding() {
+        return g_camera && cfg::thirdperson::enabled && !g_failed && diag::now_ms() - g_last_active < 1500;
+    }
+
     inline void reset_process() {
         g_pid = proc::pid;
         g_flag_offset = g_matrix_offset = g_mask_offset = -1;
@@ -315,6 +322,7 @@ namespace thirdperson {
         g_have_written = true;
 
         out = view;
+        g_last_active = diag::now_ms();
         return true;
     }
 

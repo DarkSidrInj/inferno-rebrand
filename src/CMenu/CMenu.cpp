@@ -91,6 +91,8 @@ namespace ui::menu {
         separator(a);
         checkbox("Overlay chams", &cfg::chams::overlay, a);
         separator(a);
+        checkbox("Overlay shading", &cfg::chams::overlay_shaded, a);
+        separator(a);
         colorpick("Overlay color", &cfg::chams::overlay_col, a);
         separator(a);
         slider("Overlay outline", &cfg::chams::overlay_outline, 0.f, 4.f, a, "%.1f px");
