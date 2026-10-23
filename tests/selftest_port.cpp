@@ -552,7 +552,8 @@ int main() {
             std::memcpy(ui_material + v100::native_instance_id, &ui_id, 4);
             *reinterpret_cast<uint64_t*>(ui_material) = reinterpret_cast<uint64_t>(ui_material) + 0x20;  // a vtable pointer
             *at(fx::g_default_ui_material) = reinterpret_cast<uint64_t>(ui_material);
-            cfg::chams::enabled = true; cfg::chams::team_check = true; cfg::chams::material = 0; cfg::chams::through_walls = false;
+            cfg::chams::enabled = true; cfg::chams::enemies = true; cfg::chams::teammates = false; cfg::chams::local_body = false;
+            cfg::chams::local_arms = false; cfg::chams::local_weapon = false; cfg::chams::material = 0; cfg::chams::through_walls = false;
             chams::g_pid = -1;
             chams::tick(players, local, 2);   // starts resolution
             chams::wait();
@@ -572,10 +573,62 @@ int main() {
             // The game's own x-ray (outline) material wins over the UI fallback.
             CHECK(enemy_ids[0] == -9000 && enemy_ids[1] == -9000, "through-walls uses the outline material (%d %d)", enemy_ids[0], enemy_ids[1]);
             cfg::chams::through_walls = false;
-            cfg::chams::team_check = false;
+            cfg::chams::teammates = true;
             chams::g_last_apply = 0;
             chams::tick(players, local, 2);
-            CHECK(mate_ids[0] == -9000 && local_ids[0] == -7000, "teammates too without team check, never the local player");
+            CHECK(mate_ids[0] == -9000 && local_ids[0] == -7000, "teammates on, the local player still untouched");
+
+            // Local body, first-person arms and gloves, and the local weapon found by its owner.
+            uint8_t* local_net = reinterpret_cast<uint8_t*>(local);
+            const uint64_t local_bindings = chams::bindings_of(local);
+            CHECK(local_bindings != 0, "local bindings");
+            int32_t arms_ids[1] = {-7100}, gloves_ids[1] = {-7200}, weapon_ids[2] = {-7300, -7301};
+            auto make_renderer = [&](int32_t* ids, int count) {
+                uint8_t* r = static_cast<uint8_t*>(calloc(1, 0x200));
+                *reinterpret_cast<uint64_t*>(r + 0x118) = reinterpret_cast<uint64_t>(ids);
+                *reinterpret_cast<uint64_t*>(r + 0x128) = uint64_t(count);
+                uint8_t* managed = static_cast<uint8_t*>(calloc(1, 0x40));
+                *reinterpret_cast<uint64_t*>(managed + v100::unity_cached_ptr) = reinterpret_cast<uint64_t>(r);
+                return reinterpret_cast<uint64_t>(managed);
+            };
+            *reinterpret_cast<uint64_t*>(local_bindings + v100::bindings_arms_renderer) = make_renderer(arms_ids, 1);
+            *reinterpret_cast<uint64_t*>(local_bindings + v100::bindings_gloves_renderer) = make_renderer(gloves_ids, 1);
+            // gby: class named "gby", List<MeshRenderer> at +0x30, owner bindings at +0x48; it lives in
+            // its own mapping so the search can be limited to it.
+            uint8_t* heap = static_cast<uint8_t*>(mmap(nullptr, 0x10000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+            uint8_t* gby_class = static_cast<uint8_t*>(calloc(1, 0x300));
+            char* gby_name = static_cast<char*>(calloc(1, 16));
+            std::strcpy(gby_name, "gby");
+            *reinterpret_cast<uint64_t*>(gby_class + klass::g_name_offset) = reinterpret_cast<uint64_t>(gby_name);
+            uint8_t* gby = heap + 0x4000;
+            *reinterpret_cast<uint64_t*>(gby) = reinterpret_cast<uint64_t>(gby_class);
+            uint8_t* items = static_cast<uint8_t*>(calloc(1, 0x40));
+            *reinterpret_cast<uint64_t*>(items + v100::array_data) = make_renderer(weapon_ids, 2);
+            uint8_t* list = static_cast<uint8_t*>(calloc(1, 0x40));
+            *reinterpret_cast<uint64_t*>(list + v100::list_items) = reinterpret_cast<uint64_t>(items);
+            *reinterpret_cast<int*>(list + v100::list_count) = 1;
+            *reinterpret_cast<uint64_t*>(gby + 0x30) = reinterpret_cast<uint64_t>(list);
+            *reinterpret_cast<uint64_t*>(gby + 0x48) = local_bindings;
+            uint8_t* decoy = heap + 0x8000;  // same owner pointer, wrong class
+            *reinterpret_cast<uint64_t*>(decoy + 0x48) = local_bindings;
+            g_scan_maps = {remote_map{reinterpret_cast<uint64_t>(heap), reinterpret_cast<uint64_t>(heap) + 0x10000, true}};
+            cfg::chams::local_body = true; cfg::chams::local_arms = true; cfg::chams::local_weapon = true;
+            chams::g_last_apply = 0;
+            chams::tick(players, local, 2);   // starts the weapon search
+            chams::wait();
+            CHECK(chams::g_weapon_objects.size() == 1 && chams::g_weapon_objects[0] == reinterpret_cast<uint64_t>(gby),
+                  "weapon content found: %zu", chams::g_weapon_objects.size());
+            chams::g_last_apply = 0;
+            chams::tick(players, local, 2);
+            CHECK(local_ids[0] == -9000, "local body (%d)", local_ids[0]);
+            CHECK(arms_ids[0] == -9000 && gloves_ids[0] == -9000, "arms and gloves (%d %d)", arms_ids[0], gloves_ids[0]);
+            CHECK(weapon_ids[0] == -9000 && weapon_ids[1] == -9000, "weapon (%d %d)", weapon_ids[0], weapon_ids[1]);
+            (void)local_net;
+            cfg::chams::local_body = false; cfg::chams::local_arms = false; cfg::chams::local_weapon = false;
+            chams::g_last_apply = 0;
+            chams::tick(players, local, 2);
+            CHECK(local_ids[0] == -7000 && arms_ids[0] == -7100 && gloves_ids[0] == -7200 && weapon_ids[0] == -7300 && weapon_ids[1] == -7301,
+                  "local targets restored when switched off");
             cfg::chams::enabled = false;
             chams::tick(players, local, 2);
             CHECK(enemy_ids[0] == -5000 && enemy_ids[1] == -5002 && mate_ids[0] == -6000, "materials restored (%d %d %d)",

@@ -69,7 +69,15 @@ namespace ui::menu {
         separator(a);
         checkbox("Chams", &cfg::chams::enabled, a);
         separator(a);
-        checkbox("Chams enemies only", &cfg::chams::team_check, a);
+        checkbox("Chams enemies", &cfg::chams::enemies, a);
+        separator(a);
+        checkbox("Chams teammates", &cfg::chams::teammates, a);
+        separator(a);
+        checkbox("Chams local body", &cfg::chams::local_body, a);
+        separator(a);
+        checkbox("Chams arms", &cfg::chams::local_arms, a);
+        separator(a);
+        checkbox("Chams weapon", &cfg::chams::local_weapon, a);
         separator(a);
         combo("Chams material", &cfg::chams::material, {"Flat", "Untouchable", "Outline"}, a);
         separator(a);

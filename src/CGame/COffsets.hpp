@@ -82,6 +82,8 @@ namespace v100 {
 
     // --- Chams: CharacterBindings renderers/materials, Renderer material count (dump.cs) ----------
     inline constexpr uint64_t bindings_character_renderer = 0x38;            // CharacterBindings.<CharacterRenderer> : SkinnedMeshRenderer
+    inline constexpr uint64_t bindings_arms_renderer = 0x40;                 // CharacterBindings.<ArmsRenderer> (first-person arms)
+    inline constexpr uint64_t bindings_gloves_renderer = 0x48;               // CharacterBindings.<GlovesRenderer>
     inline constexpr uint64_t bindings_untouchable_material = 0x50;          // CharacterBindings.<UntouchableMaterial>
     inline constexpr uint64_t bindings_outline_material = 0x58;              // CharacterBindings.<OutlineMaterial>
     inline constexpr uint64_t native_instance_id = 0x08;                     // native Object.m_InstanceID (device: -132432 style ids)

@@ -31,7 +31,11 @@ namespace esp {
 
 namespace chams {
     inline bool enabled = false;
-    inline bool team_check = true;   // enemies only
+    inline bool enemies = true;
+    inline bool teammates = false;
+    inline bool local_body = false;
+    inline bool local_arms = false;
+    inline bool local_weapon = false;
     inline int material = 0;         // 0 flat (material id 0, as the legacy chams), 1 untouchable, 2 outline
     inline bool through_walls = true; // Unity's default UI material: ZWrite Off, no depth test
 }
