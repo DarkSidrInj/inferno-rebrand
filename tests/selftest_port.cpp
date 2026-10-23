@@ -1195,18 +1195,18 @@ int main() {
                             skins::tick(local_s, {local_s});
                             CHECK(bl_target(site1) == cave && bl_target(site2) == cave + skins::kCaveEntryB, "both sites call the cave");
                             CHECK(std::memcmp(reinterpret_cast<void*>(cave), skins::kCave, sizeof(skins::kCave)) == 0, "cave written");
-                            CHECK(data().beh == reinterpret_cast<uint64_t>(beh) && data().weapon == 75 && data().skin == 47502 &&
-                                  count() == count_before, "knives load as 75 with skin 47502 (data %u/%u, count %d)",
+                            CHECK(data().beh == reinterpret_cast<uint64_t>(beh) && data().weapon == 74 && data().skin == 47502 &&
+                                  count() == count_before, "knives load as 74 with skin 47502 (data %u/%u, count %d)",
                                   data().weapon, data().skin, count());
                             CHECK(entry0() == 0 && beh_meta() == 0xFFFE, "the blank entry is left alone, the knife reloads (entry0 %d)", entry0());
                             game_loads();
-                            beh[0x40] = 75;   // the game now caches the knife as the Butterfly: still the knife for the choices
+                            beh[0x40] = 74;   // the game now caches the knife as the Butterfly: still the knife for the choices
                             skins::g_reload_at = 0;
                             skins::tick(local_s, {local_s});
-                            CHECK(skins::view().weapon == 70 && cfg::skins::chosen[75] == 0 && beh_meta() == 0, "loaded as 75: still the knife for the menu (weapon %d)", skins::view().weapon);
+                            CHECK(skins::view().weapon == 70 && cfg::skins::chosen[74] == 0 && beh_meta() == 0, "loaded as 74: still the knife for the menu (weapon %d)", skins::view().weapon);
                             cfg::skins::chosen[70] = 240007;   // another skin: new data, and the knife loads again
                             skins::tick(local_s, {local_s});
-                            CHECK(data().skin == 240007 && data().weapon == 75 && count() == count_before && beh_meta() == 0xFFFE, "another skin id in the cave");
+                            CHECK(data().skin == 240007 && data().weapon == 74 && count() == count_before && beh_meta() == 0xFFFE, "another skin id in the cave");
                             game_loads();
                             cfg::skins::chosen[70] = 0;
                             skins::tick(local_s, {local_s});

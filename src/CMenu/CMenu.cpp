@@ -116,6 +116,13 @@ namespace ui::menu {
     static void skins_tab(float a) {
         checkbox("Skin changer", &cfg::skins::enabled, a);
         checkbox("Full model (patches game code, risky)", &cfg::skins::code_patch, a);
+        if (cfg::skins::code_patch) {
+            static std::vector<std::string> ids;
+            if (ids.empty()) for (int i = 70; i < 90; ++i) ids.push_back(std::to_string(i));
+            int idx = cfg::skins::model - 70;
+            if (idx < 0 || idx >= int(ids.size())) idx = 4;
+            if (stepper("Knife model id", &idx, ids, a)) cfg::skins::model = 70 + idx;
+        }
         separator(a);
         static skins::View view;
         static long long refreshed = 0;

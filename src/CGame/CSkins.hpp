@@ -220,7 +220,7 @@ namespace skins {
             for (uint64_t off = 0x10; off <= 0x80; off += 8) {
                 const uint64_t d = rpm<uint64_t>(iwf + off);
                 if (class_of(d).rfind("Dictionary", 0) != 0) continue;
-                diag::log("SKINS", "%s +0x%llx: %d entries:%s", kParamNames[k], (unsigned long long)off, count(d), keys(d, 6).c_str());
+                diag::log("SKINS", "%s +0x%llx: %d entries:%s", kParamNames[k], (unsigned long long)off, count(d), keys(d, 64).c_str());
             }
             diag::log("SKINS", "%s: by weapon %s, by skin id %s, by name %s", kParamNames[k], g_params[k].by_weapon ? "yes" : "no",
                       g_params[k].by_skin ? "yes" : "no", g_params[k].by_name ? "yes" : "no");
@@ -353,13 +353,19 @@ namespace skins {
 
     // 600 ms after a reload: did beh load again (its op id moved)? If not, its cache is put back
     // and the skin shows from the next weapon switch.
+    inline void after_reload();
     inline void settle() {
         if (!g_reload_at || diag::now_ms() - g_reload_at < 600) return;
         g_reload_at = 0;
         if (!klass::is_named(g_reload_beh, "beh")) return;
         const int op = rpm<int>(g_reload_beh + kBehOpId);
         const int cached = rpm<uint16_t>(g_reload_beh + kBehMeta);
-        if (op != g_reload_op) { diag::log("SKINS", "weapon reloaded (op %d -> %d)", g_reload_op, op); return; }
+        if (op != g_reload_op) {
+            const int weapon = rpm<uint8_t>(g_reload_beh + kBehState);
+            diag::log("SKINS", "weapon reloaded (op %d -> %d), now caches weapon %d", g_reload_op, op, weapon);
+            after_reload();
+            return;
+        }
         if (cached == kSpoiled) wpm<uint16_t>(g_reload_beh + kBehMeta, uint16_t(g_reload_meta));
         diag::log("SKINS", "no reload after the state change: the skin shows from the next weapon switch");
     }
@@ -435,6 +441,10 @@ namespace skins {
     struct CaveData { uint64_t beh{}; uint32_t weapon{}, skin{}; };
     struct CodePatch { uint64_t site1{}, site2{}, cave{}; CaveData now{}; };
     inline CodePatch g_patch;
+
+    inline void after_reload() {
+        if (g_patch.now.weapon) { dump_contents(int(g_patch.now.weapon)); dump_contents(70); }
+    }
     inline uint64_t g_cave_override = 0;                      // tests
 
     inline uint64_t exec_mapping_end(uint64_t address) {
@@ -635,7 +645,7 @@ namespace skins {
         if (patched) {
             const int skin = cfg::skins::chosen[70];
             int model = 0;
-            if (skin > 0) for (const Skin& k : kSkins) if (k.id == skin) model = k.weapon;
+            if (skin > 0) for (const Skin& k : kSkins) if (k.id == skin) model = cfg::skins::model;
             patch_changed = patch_set(b, model, skin > 0 ? skin : 0);
             if (patch_changed) diag::log("SKINS", "knives load as weapon %d, skin %d", model ? model : 70, skin > 0 ? skin : 0);
         }
