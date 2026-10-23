@@ -30,20 +30,20 @@ namespace esp {
 }
 
 namespace chams {
-    inline bool enabled = false;
+    inline bool enabled = false;      // chams kind 1: the game's renderer gets a flat / untouchable / outline material
     inline bool enemies = true;
     inline bool teammates = false;
     inline bool local_body = false;
     inline bool local_arms = false;
     inline bool local_weapon = false;
     inline int material = 0;         // 0 flat (material id 0, as the legacy chams), 1 untouchable, 2 outline
-    inline bool through_walls = true; // enemies / teammates get a material drawn without depth test
-    inline bool overlay = false;      // filled limbs drawn on screen along the skeleton (through walls, any material)
+    inline bool through_walls = false; // experimental (no menu): a material drawn without depth test; does not work on this build
+    inline bool overlay = false;      // chams kind 2: filled limbs drawn on screen along the skeleton, through walls
     inline ImVec4 overlay_col = ImVec4(1.f, .25f, .35f, 1.f);
     inline bool overlay_shaded = true;    // darker base with a lit inner tube per part
     inline float overlay_outline = 1.5f;  // pixels, 0 = none
     inline ImVec4 overlay_outline_col = ImVec4(0.f, 0.f, 0.f, 1.f);
-    inline bool no_occlusion = true;  // camera occlusion culling off while through walls is on
+    inline bool no_occlusion = false; // experimental (no menu): camera occlusion culling off while through walls is on
     inline bool layer_pass = false;   // experimental: enemy bodies move to layer 30, drawn by the first-person camera (depth cleared)
     inline int wall_material = 2;     // 0 / 1 the game's outline mask materials (rdj +0x38 / +0x40), 2 Unity default UI, 3 untouchable, 4 own outline
 }

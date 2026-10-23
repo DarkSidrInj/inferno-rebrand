@@ -26,7 +26,7 @@ static void esp_wait(const char* stage) {
 void visuals::draw() {
     bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health || cfg::esp::distance ||
                cfg::esp::skeleton || cfg::esp::grenade || cfg::esp::dropped || cfg::chams::enabled ||
-               cfg::thirdperson::enabled || cfg::antiaim::enabled;
+               cfg::chams::overlay || cfg::thirdperson::enabled || cfg::antiaim::enabled;
     if (!any) {
         chams::tick({}, 0, 0);
         chams::occlusion_tick(0);
@@ -303,9 +303,10 @@ void visuals::draw() {
     for (const auto& Enemy : frame_enemies) enemy_objects.push_back(Enemy.object);
     // Animators kept running while culled: enemies for the skeleton behind walls, the own body
     // in third person (it is never on screen in first person, so the game stops animating it).
-    const bool posed = cfg::esp::skeleton || (cfg::chams::enabled && cfg::chams::overlay);
+    const bool posed = cfg::esp::skeleton || cfg::chams::overlay;
     std::vector<uint64_t> animate;
-    if (posed && cfg::esp::skeleton_occlusion) animate = enemy_objects;
+    // Bones keep updating behind walls for the skeleton (its own option) and always for the overlay.
+    if ((cfg::esp::skeleton && cfg::esp::skeleton_occlusion) || cfg::chams::overlay) animate = enemy_objects;
     if (tp_guard.active) animate.push_back(LocalPlayer);
     animcull::tick(animate, !animate.empty());
     if (posed) draw_skeletons(ViewMatrix, ProjectionMatrix, enemy_objects);

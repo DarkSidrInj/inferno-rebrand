@@ -253,7 +253,7 @@ void visuals::draw_skeletons(const matrix& view, const matrix& projection, const
         const Vector3 feet = player::position(enemy);
         Pose pose;
         if (!skeleton::get(enemy, feet, pose)) continue;
-        if (cfg::chams::enabled && cfg::chams::overlay)
+        if (cfg::chams::overlay)
             draw_overlay(dl, pose, view, projection, cfg::chams::overlay_col, cfg::chams::overlay_outline_col, cfg::chams::overlay_outline);
         if (cfg::esp::skeleton) draw_pose(dl, pose, view, projection);
     }
