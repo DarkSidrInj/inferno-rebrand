@@ -863,7 +863,13 @@ namespace a64 {
                     if (s.profile) ++s.fork_sites[pc];
                     // Keep both sides only while this branch and the whole search are under
                     // budget; past that, follow the fall-through alone.
-                    if (++site_forks[pc] <= s.max_site_forks && ++forks <= s.max_forks) {
+                    if (++site_forks[pc] > s.max_site_forks) {
+                        // The same branch keeps splitting on values nobody knows: a loop over
+                        // unknown data (error formatting, string scans). Not a path worth taking.
+                        last_failure = "loop on unknown values";
+                        break;
+                    }
+                    if (++forks <= s.max_forks) {
                         pending.push_back(std::move(other));
                         pending.push_back(std::move(m));
                         break;

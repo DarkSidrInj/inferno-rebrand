@@ -550,6 +550,7 @@ int main() {
             uint8_t* ui_material = static_cast<uint8_t*>(calloc(1, 0x40));
             const int32_t ui_id = -11000;
             std::memcpy(ui_material + v100::native_instance_id, &ui_id, 4);
+            *reinterpret_cast<uint64_t*>(ui_material) = reinterpret_cast<uint64_t>(ui_material) + 0x20;  // a vtable pointer
             *at(fx::g_default_ui_material) = reinterpret_cast<uint64_t>(ui_material);
             cfg::chams::enabled = true; cfg::chams::team_check = true; cfg::chams::material = 0; cfg::chams::through_walls = false;
             chams::g_pid = -1;
@@ -568,7 +569,8 @@ int main() {
             cfg::chams::through_walls = true;
             chams::g_last_apply = 0;
             chams::tick(players, local, 2);
-            CHECK(enemy_ids[0] == ui_id && enemy_ids[1] == ui_id, "through-walls material (%d %d)", enemy_ids[0], enemy_ids[1]);
+            // The game's own x-ray (outline) material wins over the UI fallback.
+            CHECK(enemy_ids[0] == -9000 && enemy_ids[1] == -9000, "through-walls uses the outline material (%d %d)", enemy_ids[0], enemy_ids[1]);
             cfg::chams::through_walls = false;
             cfg::chams::team_check = false;
             chams::g_last_apply = 0;

@@ -15,7 +15,11 @@
 // slot of every patched renderer is remembered and put back when chams are switched off.
 //
 // Through walls: internal chams swap in a shader with ZTest Always / ZWrite Off. From outside
-// no shader can be compiled, but Unity ships one: the default UI material (UI/Default). It has
+// no shader can be compiled, so an existing material that draws through walls is used:
+//   1. the game's own CharacterBindings.OutlineMaterial: the teammate silhouette, made to be
+//      seen through walls. Taken from any player whose bindings carry one, so enemies whose own
+//      bindings leave it empty get it too.
+//   2. Unity's default UI material (UI/Default) as the fallback. It has
 // ZWrite Off, sits in the Transparent queue (drawn after the opaque walls) and takes its depth
 // test from unity_GUIZTestMode, which nothing sets on the shared asset, so it reads 0 =
 // CompareFunction.Disabled: no depth test. On an enemy renderer it draws flat white over the
@@ -44,9 +48,7 @@ namespace chams {
     inline std::atomic<int> g_data_offset{-1};  // m_Materials data pointer inside the native renderer
     inline std::atomic<int> g_size_offset{-1};  // m_Materials size, -1 = unknown (one slot is patched)
     inline long long g_last_resolve = 0, g_last_apply = 0;
-    inline bool g_logged_material = false;
     inline std::atomic<int32_t> g_ui_material{0};  // instance id of Unity's default UI material, 0 = unknown
-
     struct Patched {
         uint64_t array{};                // material id array the originals were read from
         std::vector<int32_t> original;   // per slot
@@ -65,6 +67,31 @@ namespace chams {
         if (!plausible(managed)) return 0;
         const uint64_t native = rpm<uint64_t>(managed + v100::unity_cached_ptr);
         return plausible(native) ? native : 0;
+    }
+
+    inline int32_t g_shared_ids[3]{};               // material id per mode found on any player (index 1, 2)
+    inline int g_logged_source = -1;
+
+    inline int32_t material_id(uint64_t bindings, uint64_t field) {
+        if (!bindings) return 0;
+        const uint64_t native = native_of(rpm<uint64_t>(bindings + field));
+        return native ? rpm<int32_t>(native + v100::native_instance_id) : 0;
+    }
+
+    // The game's own materials, from whichever player carries them (teammates usually do).
+    inline void collect_shared(const std::vector<uint64_t>& players) {
+        for (int mode : {1, 2}) {
+            if (g_shared_ids[mode]) continue;
+            const uint64_t field = mode == 1 ? v100::bindings_untouchable_material : v100::bindings_outline_material;
+            for (uint64_t p : players) {
+                const int32_t id = material_id(bindings_of(p), field);
+                if (!id) continue;
+                g_shared_ids[mode] = id;
+                diag::log("CHAMS", "%s material id %d (from player 0x%llx)", mode == 1 ? "untouchable" : "outline", id,
+                          (unsigned long long)p);
+                break;
+            }
+        }
     }
 
     inline uint64_t renderer_of(uint64_t player) {
@@ -110,7 +137,11 @@ namespace chams {
         a64::Machine start;
         start.pc = entry;
         start.x[0] = {0, true, 0, 0};
-        auto goal = [](const a64::Machine& m) { return m.returned && m.x[0].known && plausible(m.x[0].value); };
+        // A native Unity object: a vtable pointer first and a non-zero instance id at +8.
+        auto goal = [](const a64::Machine& m) {
+            if (!m.returned || !m.x[0].known || !plausible(m.x[0].value)) return false;
+            return plausible(rpm<uint64_t>(m.x[0].value)) && rpm<int32_t>(m.x[0].value + v100::native_instance_id) != 0;
+        };
         a64::Machine found;
         if (a64::explore(session, start, goal, found)) return found.x[0].value;
         why = session.why;
@@ -132,7 +163,8 @@ namespace chams {
                       (unsigned long long)material, id, e.second);
             return;
         }
-        diag::log("WARN", "CHAMS default UI material not found (%s); through walls unavailable", why.c_str());
+        diag::log("WARN", "CHAMS default UI material not found (%s, %zu accessors)", why.empty() ? "no object returned" : why.c_str(),
+                  entries.size());
     }
 
     inline void resolve(uint64_t native) {
@@ -182,14 +214,23 @@ namespace chams {
     }
 
     inline int32_t desired_id(uint64_t bindings) {
-        if (cfg::chams::through_walls && g_ui_material.load()) return g_ui_material.load();
-        if (cfg::chams::material == 0 || !bindings) return 0;
-        const uint64_t field = cfg::chams::material == 1 ? v100::bindings_untouchable_material : v100::bindings_outline_material;
-        const uint64_t native = native_of(rpm<uint64_t>(bindings + field));
-        const int32_t id = native ? rpm<int32_t>(native + v100::native_instance_id) : 0;
-        if (!g_logged_material) {
-            g_logged_material = true;
-            diag::log("CHAMS", "material %d -> instance id %d%s", cfg::chams::material, id, id ? "" : " (missing, flat used)");
+        int source = 0;
+        int32_t id = 0;
+        if (cfg::chams::through_walls) {
+            if ((id = g_shared_ids[2])) source = 2;                   // the game's x-ray (outline) material
+            else if ((id = g_ui_material.load())) source = 3;         // Unity's default UI material
+        }
+        if (!id && cfg::chams::material != 0) {
+            const int mode = cfg::chams::material;
+            id = material_id(bindings, mode == 1 ? v100::bindings_untouchable_material : v100::bindings_outline_material);
+            if (!id) id = g_shared_ids[mode];
+            source = id ? mode : 0;
+        }
+        if (source != g_logged_source) {
+            g_logged_source = source;
+            static const char* names[] = {"flat (id 0)", "untouchable", "outline", "Unity default UI"};
+            diag::log("CHAMS", "material: %s, id %d%s", names[source], id,
+                      cfg::chams::through_walls && source < 2 ? " (no through-walls material found)" : "");
         }
         return id;
     }
@@ -218,9 +259,10 @@ namespace chams {
             g_data_offset = -1;
             g_size_offset = -1;
             g_ui_material = 0;
+            g_shared_ids[1] = g_shared_ids[2] = 0;
+            g_logged_source = -1;
             g_patched.clear();
             g_last_resolve = 0;
-            g_logged_material = false;
         }
         if (!cfg::chams::enabled) { if (!g_patched.empty()) restore_all(); return; }
         if (g_resolving.load()) return;
@@ -239,6 +281,7 @@ namespace chams {
 
         if (now - g_last_apply < 200) return;
         g_last_apply = now;
+        collect_shared(players);
         const int data_off = g_data_offset.load(), size_off = g_size_offset.load();
         std::unordered_map<uint64_t, bool> seen;
         for (uint64_t p : players) {
