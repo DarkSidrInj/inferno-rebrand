@@ -1192,9 +1192,15 @@ int main() {
                             CHECK(std::memcmp(reinterpret_cast<void*>(cave), skins::kCave, sizeof(skins::kCave)) == 0 &&
                                   *reinterpret_cast<uint32_t*>(cave + skins::kCaveData) == 75 && beh_meta() == 0xFFFE, "cave written, knives load as 75");
                             game_loads();
+                            beh[0x40] = 75;   // the game now caches the knife as the Butterfly: still the knife for the choices
+                            skins::g_reload_at = 0;
+                            skins::tick(local_s, {local_s});
+                            CHECK(entry0() == 47502 && beh_meta() == 0 && skins::view().weapon == 70 && cfg::skins::chosen[75] == 0,
+                                  "loaded as 75: the skin id stays held (entry %d), menu weapon %d", entry0(), skins::view().weapon);
                             cfg::skins::chosen[70] = 0;
                             skins::tick(local_s, {local_s});
                             CHECK(*reinterpret_cast<uint32_t*>(cave + skins::kCaveData) == 0 && beh_meta() == 0xFFFE, "no skin: knives load as themselves again");
+                            beh[0x40] = 70;
                             game_loads();
                             cfg::skins::chosen[70] = 47502;
                             skins::tick(local_s, {local_s});

@@ -534,7 +534,10 @@ namespace skins {
         if (!b) { set_status("weapon view not found"); return; }
         const int cached = rpm<uint16_t>(b + kBehMeta);
         if (cached == kSpoiled) return;  // our reload is pending
-        const int held = rpm<uint8_t>(b + kBehState);
+        // With the code patch the knife in hands loads (and beh caches it) as the skin's weapon: it is still
+        // the knife the choices are made for.
+        int held = rpm<uint8_t>(b + kBehState);
+        if (g_patch.target && held == g_patch.target) held = 70;
         g_held_weapon = held;
         if (!resolve(b)) { set_status("weapon content not found"); return; }
 
