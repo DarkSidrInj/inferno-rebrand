@@ -71,6 +71,16 @@ namespace ui::menu {
         separator(a);
         combo("Material", &cfg::chams::material, {"Flat", "Untouchable", "Outline"}, a);
         separator(a);
+        checkbox("Chams enemies", &cfg::chams::enemies, a);
+        separator(a);
+        checkbox("Chams teammates", &cfg::chams::teammates, a);
+        separator(a);
+        checkbox("Chams local body", &cfg::chams::local_body, a);
+        separator(a);
+        checkbox("Chams arms", &cfg::chams::local_arms, a);
+        separator(a);
+        checkbox("Chams weapon", &cfg::chams::local_weapon, a);
+        separator(a);
         checkbox("Chams: overlay (through walls)", &cfg::chams::overlay, a);
         separator(a);
         colorpick("Overlay color", &cfg::chams::overlay_col, a);
