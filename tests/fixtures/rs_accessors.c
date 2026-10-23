@@ -138,3 +138,13 @@ int UnityEngine_Animator__get_cullingMode_Injected(void* self, const void* metho
 void UnityEngine_Animator__set_cullingMode_Injected(void* self, int mode, const void* method) {
     RESOLVE(slot_set_culling, f_set_cull, "UnityEngine.Animator::set_cullingMode_Injected(System.IntPtr,UnityEngine.AnimatorCullingMode)"); f(self, mode);
 }
+
+// Renderer (Unity 6 binding style): m_Materials is a dynamic_array of material instance ids.
+typedef struct DynArray { int* data; long label; unsigned long size; unsigned long capacity; } DynArray;
+typedef struct Renderer { void* vtable; char pad[0x110]; DynArray materials; /* data 0x118, size 0x128 */ } Renderer;
+int Renderer_GetMaterialCount_Injected(void* self) { CHECK_THREAD("GetMaterialCount"); return (int)((Renderer*)self)->materials.size; }
+typedef int (*f_count)(void*);
+f_count slot_get_material_count;
+int UnityEngine_Renderer__GetMaterialCount_Injected(void* self, const void* method) {
+    RESOLVE(slot_get_material_count, f_count, "UnityEngine.Renderer::GetMaterialCount_Injected(System.IntPtr)"); return f(self);
+}

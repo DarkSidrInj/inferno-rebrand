@@ -29,6 +29,12 @@ namespace esp {
     inline float world_distance = 60.f;  // meters, grenades and dropped weapons
 }
 
+namespace chams {
+    inline bool enabled = false;
+    inline bool team_check = true;   // enemies only
+    inline int material = 0;         // 0 flat (material id 0, as the legacy chams), 1 untouchable, 2 outline
+}
+
 namespace fog {
     inline bool enabled = false;
     inline bool auto_color = true;       // estimate the color from the scene's ambient light

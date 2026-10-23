@@ -67,6 +67,12 @@ namespace ui::menu {
         separator(a);
         checkbox("Bones behind walls", &cfg::esp::skeleton_occlusion, a);
         separator(a);
+        checkbox("Chams", &cfg::chams::enabled, a);
+        separator(a);
+        checkbox("Chams enemies only", &cfg::chams::team_check, a);
+        separator(a);
+        combo("Chams material", &cfg::chams::material, {"Flat", "Untouchable", "Outline"}, a);
+        separator(a);
         checkbox("Grenades", &cfg::esp::grenade, a);
         separator(a);
         checkbox("Dropped weapons", &cfg::esp::dropped, a);

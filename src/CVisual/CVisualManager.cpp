@@ -4,6 +4,7 @@
 #include "../CGame/CPlayer.hpp"
 #include "../CGame/CCamera.hpp"
 #include "../CGame/CAnimCull.hpp"
+#include "../CGame/CChams.hpp"
 #include "../CMenu/Theme/CTheme.hpp"
 #include "../CConfigs/CConfig.hpp"
 #include "../CProtection/COxorany.hpp"
@@ -21,8 +22,8 @@ static void esp_wait(const char* stage) {
 
 void visuals::draw() {
     bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health || cfg::esp::distance ||
-               cfg::esp::skeleton || cfg::esp::grenade || cfg::esp::dropped;
-    if (!any) { esp_wait("all ESP options disabled"); return; }
+               cfg::esp::skeleton || cfg::esp::grenade || cfg::esp::dropped || cfg::chams::enabled;
+    if (!any) { chams::tick({}, 0, 0); esp_wait("all ESP options disabled"); return; }
 
     std::vector<uint64_t> Players = players();
     if (Players.empty()) { esp_wait("player discovery / registry scan"); return; }
@@ -61,6 +62,7 @@ void visuals::draw() {
     Vector3 LocalPosition = player::position(LocalPlayer);
     int LocalTeam = player::team(LocalPlayer);
     if (LocalTeam != 1 && LocalTeam != 2) { esp_wait("local team validation"); return; }
+    chams::tick(Players, LocalPlayer, LocalTeam);
     if (!std::isfinite(LocalPosition.x) ||
         (LocalPosition.x == 0.f && LocalPosition.y == 0.f && LocalPosition.z == 0.f)) {
         esp_wait("local transform hierarchy"); return;

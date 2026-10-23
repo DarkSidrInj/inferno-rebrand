@@ -8,6 +8,7 @@
 #include "CGame/CSkeleton.hpp"
 #include "CGame/CFog.hpp"
 #include "CGame/CAnimCull.hpp"
+#include "CGame/CChams.hpp"
 #include "fixtures/rs_accessors.h"
 #include "CConfigs/CConfig.hpp"
 #include <sys/mman.h>
@@ -494,6 +495,77 @@ int main() {
             std::memcpy(&m1, a1 + 0x58, 4); std::memcpy(&m2, a2 + 0x58, 4);
             CHECK(m1 == 1 && m2 == 2, "culling restored (%d %d)", m1, m2);
             CHECK(*bookkeeping == 0, "restore replayed through the setter: %d", *bookkeeping);
+        }
+
+        // Chams: the material array is located by tracing Renderer.GetMaterialCount on a live
+        // renderer; enemies get the chosen material in every slot, teammates are left alone, and
+        // switching off restores each slot.
+        {
+            route(v100::renderer_material_count_injected, base + fx::UnityEngine_Renderer__GetMaterialCount_Injected);
+            *at(fx::slot_get_material_count) = base + fx::Renderer_GetMaterialCount_Injected;
+            const uint64_t jgi_class = rpm<uint64_t>(proc::lib + v100::model_typeinfo);
+            const uint64_t stats_class = rpm<uint64_t>(proc::lib + v100::stats_typeinfo);
+            auto make_player = [&](int team, bool local, int32_t* ids, int count, uint8_t*& renderer_out, int32_t outline_id) {
+                uint8_t* renderer = static_cast<uint8_t*>(calloc(1, 0x200));
+                *reinterpret_cast<uint64_t*>(renderer + 0x118) = reinterpret_cast<uint64_t>(ids);
+                *reinterpret_cast<uint64_t*>(renderer + 0x128) = uint64_t(count);
+                *reinterpret_cast<uint64_t*>(renderer + 0x130) = uint64_t(count);
+                uint8_t* managed_renderer = static_cast<uint8_t*>(calloc(1, 0x40));
+                *reinterpret_cast<uint64_t*>(managed_renderer + v100::unity_cached_ptr) = reinterpret_cast<uint64_t>(renderer);
+                uint8_t* material = static_cast<uint8_t*>(calloc(1, 0x40));
+                std::memcpy(material + v100::native_instance_id, &outline_id, 4);
+                uint8_t* managed_material = static_cast<uint8_t*>(calloc(1, 0x40));
+                *reinterpret_cast<uint64_t*>(managed_material + v100::unity_cached_ptr) = reinterpret_cast<uint64_t>(material);
+                uint8_t* bindings = static_cast<uint8_t*>(calloc(1, 0x80));
+                *reinterpret_cast<uint64_t*>(bindings + v100::bindings_character_renderer) = reinterpret_cast<uint64_t>(managed_renderer);
+                *reinterpret_cast<uint64_t*>(bindings + v100::bindings_outline_material) = reinterpret_cast<uint64_t>(managed_material);
+                uint8_t* model = static_cast<uint8_t*>(calloc(1, 0x80));
+                *reinterpret_cast<uint64_t*>(model) = jgi_class;
+                *reinterpret_cast<uint64_t*>(model + v100::model_bindings) = reinterpret_cast<uint64_t>(bindings);
+                uint8_t* array = static_cast<uint8_t*>(calloc(1, 0x30));
+                *reinterpret_cast<uint64_t*>(array + v100::array_length) = 1;
+                *reinterpret_cast<uint64_t*>(array + v100::array_data) = reinterpret_cast<uint64_t>(model);
+                uint8_t* wmz = static_cast<uint8_t*>(calloc(1, 0x100));
+                *reinterpret_cast<uint64_t*>(wmz + v100::wmz_first_array) = reinterpret_cast<uint64_t>(array);
+                uint8_t* stats = static_cast<uint8_t*>(calloc(1, 0x40));
+                *reinterpret_cast<uint64_t*>(stats) = stats_class;
+                *reinterpret_cast<uint16_t*>(stats + v100::stats_hp) = 100;
+                *reinterpret_cast<uint16_t*>(stats + v100::stats_max_hp) = 100;
+                uint8_t* net = static_cast<uint8_t*>(calloc(1, 0x200));
+                *reinterpret_cast<uint64_t*>(net + v100::net_systems) = reinterpret_cast<uint64_t>(wmz);
+                *reinterpret_cast<uint64_t*>(net + v100::player_stats) = reinterpret_cast<uint64_t>(stats);
+                net[v100::player_team] = uint8_t(team);
+                net[v100::player_local] = local ? 1 : 0;
+                renderer_out = renderer;
+                return reinterpret_cast<uint64_t>(net);
+            };
+            int32_t enemy_ids[2] = {-5000, -5002}, mate_ids[1] = {-6000}, local_ids[1] = {-7000};
+            uint8_t *enemy_r = nullptr, *mate_r = nullptr, *local_r = nullptr;
+            const uint64_t local = make_player(2, true, local_ids, 1, local_r, -9000);
+            const uint64_t mate = make_player(2, false, mate_ids, 1, mate_r, -9000);
+            const uint64_t enemy = make_player(1, false, enemy_ids, 2, enemy_r, -9000);
+            const std::vector<uint64_t> players{local, mate, enemy};
+            cfg::chams::enabled = true; cfg::chams::team_check = true; cfg::chams::material = 0;
+            chams::g_pid = -1;
+            chams::tick(players, local, 2);   // starts resolution
+            chams::wait();
+            CHECK(chams::g_data_offset.load() == 0x118 && chams::g_size_offset.load() == 0x128,
+                  "material array +0x%x size +0x%x", chams::g_data_offset.load(), chams::g_size_offset.load());
+            chams::tick(players, local, 2);   // applies
+            CHECK(enemy_ids[0] == 0 && enemy_ids[1] == 0, "flat chams on the enemy (%d %d)", enemy_ids[0], enemy_ids[1]);
+            CHECK(mate_ids[0] == -6000 && local_ids[0] == -7000, "teammate and local untouched");
+            cfg::chams::material = 2;
+            chams::g_last_apply = 0;
+            chams::tick(players, local, 2);
+            CHECK(enemy_ids[0] == -9000 && enemy_ids[1] == -9000, "outline material id (%d %d)", enemy_ids[0], enemy_ids[1]);
+            cfg::chams::team_check = false;
+            chams::g_last_apply = 0;
+            chams::tick(players, local, 2);
+            CHECK(mate_ids[0] == -9000 && local_ids[0] == -7000, "teammates too without team check, never the local player");
+            cfg::chams::enabled = false;
+            chams::tick(players, local, 2);
+            CHECK(enemy_ids[0] == -5000 && enemy_ids[1] == -5002 && mate_ids[0] == -6000, "materials restored (%d %d %d)",
+                  enemy_ids[0], enemy_ids[1], mate_ids[0]);
         }
 
         // Every slot empty: no trace may invent an address, and the code dump must run.

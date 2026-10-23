@@ -80,6 +80,14 @@ namespace v100 {
     inline constexpr uint64_t animator_get_culling = 0x88342A0;               // instance get_cullingMode()
     inline constexpr uint64_t animator_set_culling = 0x882E200;               // instance set_cullingMode(mode)
 
+    // --- Chams: CharacterBindings renderers/materials, Renderer material count (dump.cs) ----------
+    inline constexpr uint64_t bindings_character_renderer = 0x38;            // CharacterBindings.<CharacterRenderer> : SkinnedMeshRenderer
+    inline constexpr uint64_t bindings_untouchable_material = 0x50;          // CharacterBindings.<UntouchableMaterial>
+    inline constexpr uint64_t bindings_outline_material = 0x58;              // CharacterBindings.<OutlineMaterial>
+    inline constexpr uint64_t native_instance_id = 0x08;                     // native Object.m_InstanceID (device: -132432 style ids)
+    inline constexpr uint64_t renderer_material_count_injected = 0x75EF534;  // static GetMaterialCount_Injected(IntPtr)
+    inline constexpr uint64_t legacy_renderer_materials = 0x140;             // pre-Unity-6 m_Materials data (legacy chams)
+
     // --- Optional TypeInfo RVAs (ARM64 libunity). 0 = unknown, class name is used. ---
     // FILL (optional): script.json -> cim_TypeInfo / qak_TypeInfo / njg_TypeInfo / xmt_TypeInfo
     inline constexpr uint64_t grenade_typeinfo = 0;
