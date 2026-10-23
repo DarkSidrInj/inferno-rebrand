@@ -16,12 +16,18 @@
 #include "fixtures/rs_accessors.h"
 #include "CConfigs/CConfig.hpp"
 #include <sys/mman.h>
+#include <sys/prctl.h>
+#include <sys/wait.h>
+#include <ctime>
 #include <fcntl.h>
 #include <string>
 #include <unistd.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+static volatile uint64_t g_remote_flag = 0;
+extern "C" __attribute__((noinline)) uint64_t remote_target(volatile uint64_t* p, uint64_t v) { *p = v; return v + 1; }
 
 static int failures = 0;
 #define CHECK(c, ...) do { if (!(c)) { ++failures; std::printf("FAIL %s:%d ", __FILE__, __LINE__); std::printf(__VA_ARGS__); std::printf("\n"); } } while (0)
@@ -1045,6 +1051,35 @@ int main() {
         CHECK(!worldfog::g_ready && !worldfog::g_fields[worldfog::Start].address, "nothing resolved without slots");
         CHECK(worldfog::g_dumped, "wrapper code dumped");
         cfg::fog::enabled = false;
+    }
+
+    // Remote call: a child whose main thread naps in nanosleep (a restartable system call) under the
+    // game's thread name; the call runs on it, and it goes on napping afterwards.
+    {
+        const pid_t child = fork();
+        if (child == 0) {
+            prctl(PR_SET_NAME, "UnityMain");
+            const timespec nap{0, 2000000};
+            for (int i = 0; i < 5000 && g_remote_flag != 2; ++i) nanosleep(&nap, nullptr);
+            _exit(g_remote_flag == 2 ? 7 : 1);
+        }
+        usleep(50000);
+        uint64_t ret = 0;
+        std::string why;
+        const uint64_t fn = reinterpret_cast<uint64_t>(&remote_target), flag = reinterpret_cast<uint64_t>(&g_remote_flag);
+        const bool first = remote::call_on(child, "UnityMain", fn, {flag, 1}, ret, why);
+        uint64_t seen = 0;
+        char path[64];
+        std::snprintf(path, sizeof(path), "/proc/%d/mem", child);
+        const int fd = open(path, O_RDONLY);
+        if (fd >= 0) { pread(fd, &seen, sizeof(seen), off_t(flag)); close(fd); }
+        CHECK(first && ret == 2 && seen == 1, "remote call ran on the child: %s ret=%llu flag=%llu", first ? "ok" : why.c_str(),
+              (unsigned long long)ret, (unsigned long long)seen);
+        const bool second = remote::call_on(child, "UnityMain", fn, {flag, 2}, ret, why);
+        int status = 0;
+        waitpid(child, &status, 0);
+        CHECK(second && WIFEXITED(status) && WEXITSTATUS(status) == 7, "child went on after the calls: %s status=0x%x",
+              second ? "ok" : why.c_str(), status);
     }
 
     std::printf(failures ? "SELFTEST FAILED (%d)\n" : "SELFTEST OK\n", failures);

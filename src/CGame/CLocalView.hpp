@@ -10,6 +10,9 @@
 //     on with its set_enabled, replayed (CUtils/CArm64.hpp) only along a path that stays inside
 //     libunity and steps over no call, so nothing is half-applied. Switched off again after.
 //   - the body gets the flat material (id 0), as other cheats draw it, unless chams draws it.
+//   - the replay cannot register the body in the render scene (the game's allocator is in the way),
+//     so with "Real model" the game runs its own set_enabled(body, 1) on its main thread
+//     (CUtils/CRemoteCall.hpp) and set_enabled(body, 0) after.
 // Work runs on a worker thread; the frame only starts it.
 
 #include "CGameContext.hpp"
@@ -20,6 +23,7 @@
 #include "CThirdPerson.hpp"
 #include "CPlayer.hpp"
 #include "../CUtils/CArm64.hpp"
+#include "../CUtils/CRemoteCall.hpp"
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -48,6 +52,12 @@ namespace localview {
     inline uint64_t g_checked_body = 0;
     inline uint64_t g_enabled_getter = 0, g_enabled_setter = 0;
     inline bool g_accessors_resolved = false;
+
+    // Body switched on by the game itself (remote call).
+    inline uint64_t g_remote_body = 0, g_remote_vtable = 0;
+    inline int g_remote_calls = 0;
+    inline bool g_remote_failed = false;
+    inline std::atomic<bool> g_real_body_shown{false};
 
     // Material swap, same bookkeeping as chams::Patched.
     inline std::unordered_map<uint64_t, chams::Patched> g_materials;
@@ -238,6 +248,63 @@ namespace localview {
         diag::log("TP", "Renderer.enabled: getter %s, setter %s; body enabled=%d arms enabled=%d",
                   g_enabled_getter ? "found" : "NOT found", g_enabled_setter ? "found" : "NOT found",
                   is_enabled(body), is_enabled(arms));
+    }
+
+    // ---- the game's own set_enabled, on its main thread ---------------------------------------
+    // Address to call: the setter the replay settled on, else the il2cpp wrapper of this build (it
+    // checks the main thread and forwards to the icall), else a single icall candidate.
+    inline uint64_t remote_setter() {
+        if (g_enabled_setter) return g_enabled_setter;
+        const uint64_t wrapper = proc::lib + v100::renderer_set_enabled_injected;
+        if (proc::lib && !icalls::slot_empty(wrapper)) return wrapper;
+        const auto c = icalls::candidates("UnityEngine.Renderer::set_enabled_Injected");
+        return c.size() == 1 ? c[0].fn : 0;
+    }
+
+    inline bool remote_set_enabled(uint64_t r, bool value, std::string& why) {
+        const uint64_t fn = remote_setter();
+        if (!fn) { why = "set_enabled not found"; return false; }
+        uint64_t ret = 0;
+        const long long t0 = diag::now_ms();
+        const bool ok = remote::call_on(proc::pid, "UnityMain", fn, {r, uint64_t(value ? 1 : 0)}, ret, why);
+        diag::log("TP", "remote set_enabled(%d) on 0x%llx via 0x%llx: %s (%lld ms)", value ? 1 : 0, (unsigned long long)r,
+                  (unsigned long long)fn, ok ? "returned" : why.c_str(), diag::now_ms() - t0);
+        return ok;
+    }
+
+    // Keeps the real body on: once per body, again when the game turns it off (a few times at most).
+    inline void real_body_tick(uint64_t body) {
+        if (body != g_remote_body) { g_remote_body = body; g_remote_calls = 0; }
+        const int on = is_enabled(body);
+        if (on == 1) { g_real_body_shown = true; return; }
+        g_real_body_shown = false;
+        if (on != 0 || g_remote_failed) return;
+        if (g_remote_calls >= 4) {
+            if (g_remote_calls++ == 4) diag::log("WARN", "TP the game keeps switching the body off; drawn as an overlay");
+            return;
+        }
+        ++g_remote_calls;
+        std::string why;
+        if (!remote_set_enabled(body, true, why)) {
+            if (why.find("PTRACE_SEIZE") != std::string::npos || why.find("faulted") != std::string::npos ||
+                why.find("not found") != std::string::npos) g_remote_failed = true;  // no point trying again
+            return;
+        }
+        g_remote_vtable = rpm<uint64_t>(body);
+        const int now = is_enabled(body);
+        g_real_body_shown = now == 1;
+        diag::log("TP", "real body: enabled=%d", now);
+    }
+
+    inline void real_body_off() {
+        g_real_body_shown = false;
+        const uint64_t body = g_remote_body;
+        const bool ours = g_remote_calls > 0;
+        g_remote_body = 0;
+        g_remote_calls = 0;
+        if (!ours || !body || !g_remote_vtable || rpm<uint64_t>(body) != g_remote_vtable || is_enabled(body) != 1) return;
+        std::string why;
+        remote_set_enabled(body, false, why);
     }
 
     // ---- second camera ----------------------------------------------------------------------------
@@ -610,6 +677,7 @@ namespace localview {
     // ---- frame --------------------------------------------------------------------------------
     inline void restore_all() {
         restore_materials();
+        real_body_off();
         g_hide_first_person = false;
         apply_masks(g_main_for);
         if (g_enabled_body && plausible(g_enabled_vtable) && rpm<uint64_t>(g_enabled_body) == g_enabled_vtable) {
@@ -637,6 +705,8 @@ namespace localview {
 
         // Body renderer on.
         if (body && arms && !g_accessors_resolved) resolve_accessors(body, arms);
+        if (body && cfg::thirdperson::real_body) real_body_tick(body);
+        else if (g_remote_body) real_body_off();
         if (body && g_checked_body != body) {
             g_checked_body = body;
             const int on = is_enabled(body);
@@ -696,6 +766,10 @@ namespace localview {
             g_flag_bit = -1;
             g_enabled_getter = g_enabled_setter = 0;
             g_accessors_resolved = false;
+            g_remote_body = g_remote_vtable = 0;
+            g_remote_calls = 0;
+            g_remote_failed = false;
+            g_real_body_shown = false;
             g_materials.clear();
             g_logged_material = false;
         }

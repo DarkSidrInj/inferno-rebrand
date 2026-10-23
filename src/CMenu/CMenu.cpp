@@ -128,6 +128,7 @@ namespace ui::menu {
 
     static void misc_tab(float a) {
         checkbox("Third person", &cfg::thirdperson::enabled, a);
+        checkbox("Real model (ptrace)", &cfg::thirdperson::real_body, a);
         separator(a);
         slider("Camera distance", &cfg::thirdperson::distance, 0.5f, 10.f, a, "%.1f m");
         slider("Camera height", &cfg::thirdperson::height, -1.f, 2.f, a, "%.1f m");

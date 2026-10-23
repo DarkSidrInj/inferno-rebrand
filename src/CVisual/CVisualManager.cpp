@@ -51,7 +51,8 @@ void visuals::draw() {
             // Up to 1.5 s without the local player (a respawn, a bad frame): keep the camera as it is and keep
             // drawing the own model with the view of the last good frame, so it does not blink.
             if (thirdperson::holding()) {
-                if (last_local && cfg::thirdperson::show_body && cfg::thirdperson::model_overlay && !localview::g_transplant.active)
+                if (last_local && cfg::thirdperson::show_body && cfg::thirdperson::model_overlay && !localview::g_transplant.active &&
+                    !localview::g_real_body_shown.load())
                     draw_local_model(last_view, last_projection, last_local);
                 return;
             }
@@ -310,7 +311,8 @@ void visuals::draw() {
     if (tp_guard.active) animate.push_back(LocalPlayer);
     animcull::tick(animate, !animate.empty());
     if (posed) draw_skeletons(ViewMatrix, ProjectionMatrix, enemy_objects);
-    if (tp_guard.active && cfg::thirdperson::show_body && cfg::thirdperson::model_overlay && !localview::g_transplant.active)
+    if (tp_guard.active && cfg::thirdperson::show_body && cfg::thirdperson::model_overlay && !localview::g_transplant.active &&
+        !localview::g_real_body_shown.load())
         draw_local_model(ViewMatrix, ProjectionMatrix, LocalPlayer);
     if (tp_guard.active) { last_view = ViewMatrix; last_projection = ProjectionMatrix; last_local = LocalPlayer; }
     draw_world_items(ViewMatrix, ProjectionMatrix, LocalPosition);
