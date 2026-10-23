@@ -36,6 +36,7 @@
 #include <cstring>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace worldfog {
@@ -262,6 +263,9 @@ namespace worldfog {
             if (trace_setter(c.fn, spec.kind, why) == want) { g_setter[f] = c.fn; return; }
     }
 
+    inline void read_original();
+    inline void scan_params();
+
     inline void resolve_all() {
         g_ready = false;
         g_applied = false;
@@ -301,6 +305,13 @@ namespace worldfog {
                   g_setter[FogColor] ? "yes" : "no");
 
         g_ready = g_fields[Fog].address && g_fields[Start].address && g_fields[End].address;
+        if (g_ready) {
+            read_original();
+            diag::log("FOG", "map fog: on=%d mode=%d density=%.4f start=%.1f end=%.1f color=(%.2f %.2f %.2f)", g_original.fog,
+                      g_original.mode, g_original.density, g_original.start, g_original.end, g_original.color[0],
+                      g_original.color[1], g_original.color[2]);
+            scan_params();
+        }
         if (!g_ready) {
             diag::log("WARN", "FOG not usable: fog, start and end are all needed");
             if (!g_dumped) {
@@ -321,6 +332,39 @@ namespace worldfog {
         g_original.start = rpm<float>(g_fields[Start].address);
         g_original.end = rpm<float>(g_fields[End].address);
         if (g_fields[FogColor].address) mem_read(g_fields[FogColor].address, g_original.color, sizeof(g_original.color));
+    }
+
+    // Where a failed replay spent its steps: the setter's code, the hottest instructions with the
+    // code around them, the branches that split paths and the most called functions. Enough to
+    // disassemble the engine path offline.
+    inline void dump_words(const char* what, uint64_t at, int count) {
+        std::vector<uint32_t> words(size_t(count), 0);
+        if (!mem_read(at, words.data(), words.size() * 4)) { diag::log("FOG", "  %s 0x%llx unreadable", what, (unsigned long long)at); return; }
+        std::string text;
+        char hex[10];
+        for (uint32_t w : words) { std::snprintf(hex, sizeof(hex), "%08x ", w); text += hex; }
+        diag::log("FOG", "  %s 0x%llx: %s", what, (unsigned long long)at, text.c_str());
+    }
+
+    inline void report_replay(const char* name, uint64_t fn, const a64::Session& s) {
+        auto top = [](const std::unordered_map<uint64_t, uint32_t>& counts, size_t n) {
+            std::vector<std::pair<uint64_t, uint32_t>> v(counts.begin(), counts.end());
+            std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+            if (v.size() > n) v.resize(n);
+            return v;
+        };
+        diag::log("FOG", "%s setter 0x%llx replay profile: %zu distinct pcs, %zu fork sites, %zu callees", name,
+                  (unsigned long long)fn, s.hot.size(), s.fork_sites.size(), s.call_targets.size());
+        dump_words("entry", fn, 48);
+        for (const auto& h : top(s.hot, 3)) {
+            diag::log("FOG", "  hot pc 0x%llx x%u", (unsigned long long)h.first, h.second);
+            dump_words("around", h.first - 32, 24);
+        }
+        for (const auto& f : top(s.fork_sites, 4)) diag::log("FOG", "  fork pc 0x%llx x%u", (unsigned long long)f.first, f.second);
+        for (const auto& c : top(s.call_targets, 6)) {
+            diag::log("FOG", "  callee 0x%llx x%u", (unsigned long long)c.first, c.second);
+            dump_words("callee", c.first, 24);
+        }
     }
 
     // Runs the field's setter with `value` and writes what it stores. False when there is no
@@ -357,8 +401,21 @@ namespace worldfog {
         std::vector<a64::Store> stores;
         std::string why;
         const uint64_t field = g_fields[f].address;
-        if (!a64::replay(m, field, stores, why)) {
-            if (!g_setter_logged[f]) { g_setter_logged[f] = true; diag::log("FOG", "%s setter not replayable (%s), writing the field", spec.name, why.c_str()); }
+        // Engine setters are long (thread checks, ApplyFog, dirty tracking): replays run on a
+        // worker thread with a budget far above what a trace needs.
+        a64::Session session;
+        session.max_steps = 400000;
+        session.max_total = 3000000;
+        session.max_forks = 512;
+        session.max_site_forks = 3;
+        session.max_depth = 12;
+        session.profile = !g_setter_logged[f];
+        if (!a64::replay(m, field, stores, why, &session)) {
+            if (!g_setter_logged[f]) {
+                g_setter_logged[f] = true;
+                diag::log("FOG", "%s setter not replayable (%s, %ld steps), writing the field", spec.name, why.c_str(), session.total_steps);
+                report_replay(spec.name, fn, session);
+            }
             return false;
         }
         // The setter must store exactly the requested value into the field.
@@ -406,6 +463,114 @@ namespace worldfog {
         diag::log("FOG", "restored game fog fog=%d start=%.1f end=%.1f", g_original.fog, g_original.start, g_original.end);
     }
 
+    // ---- renderer fog parameters --------------------------------------------------------------
+    // What the shaders read is not RenderSettings but unity_FogParams =
+    //   (density / sqrt(ln 2), density / ln 2, -1 / (end - start), end / (end - start))
+    // and unity_FogColor, which Unity recomputes only inside its fog setters. They are found by
+    // value (computed from the map's own fog) and rewritten directly, so fog changes even when
+    // a setter cannot be replayed. The map's fog mode decides what is written: linear uses
+    // start/end, exponential modes get a density that fades out at the max distance.
+    struct ParamsCopy { uint64_t address; float original[4]; };
+    struct ColorCopy { uint64_t address; float original[4]; bool linear; };
+    inline std::vector<ParamsCopy> g_params;
+    inline std::vector<ColorCopy> g_colors;
+    inline bool g_params_logged = false;
+
+    inline void params_for(float density, float start, float end, float out[4]) {
+        out[0] = density * 1.2011224087f;
+        out[1] = density * 1.4426950408f;
+        const float diff = end - start;
+        const float inv = std::fabs(diff) > 0.0001f ? 1.0f / diff : 0.0f;
+        out[2] = -inv;
+        out[3] = end * inv;
+    }
+
+    inline bool close(float a, float b, float rel = 1e-4f, float abs_eps = 1e-6f) {
+        return std::isfinite(a) && std::fabs(a - b) <= abs_eps + rel * std::fabs(b);
+    }
+
+    inline float to_linear(float c) { return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f); }
+
+    inline void scan_params() {
+        g_params.clear();
+        g_colors.clear();
+        float want[4];
+        params_for(g_original.density, g_original.start, g_original.end, want);
+        if (want[2] == 0.f && want[3] == 0.f) { diag::log("FOG", "renderer params: map has no linear fog range to search for"); return; }
+        std::vector<std::pair<uint64_t, uint64_t>> ranges;
+        if (g_scan_maps.empty()) refresh_scan_maps();
+        for (const auto& m : g_scan_maps) ranges.push_back({m.begin, m.end});
+        for (const auto& seg : icalls::unity_segments()) if (!seg.exec) ranges.push_back({seg.begin, seg.end});
+        std::vector<uint8_t> buffer;
+        uint64_t scanned = 0;
+        for (const auto& range : ranges) {
+            for (uint64_t at = range.first; at < range.second && g_params.size() < 16;) {
+                const size_t chunk = size_t(std::min<uint64_t>(range.second - at, 1024 * 1024));
+                buffer.assign(chunk, 0);
+                if (mem_read(at, buffer.data(), chunk)) {
+                    for (size_t i = 0; i + 16 <= chunk; i += 4) {
+                        float v[4];
+                        std::memcpy(v, buffer.data() + i, 16);
+                        if (!close(v[2], want[2]) || !close(v[3], want[3]) || !close(v[0], want[0]) || !close(v[1], want[1])) continue;
+                        ParamsCopy copy{at + i, {}};
+                        std::memcpy(copy.original, v, 16);
+                        g_params.push_back(copy);
+                        // unity_FogColor sits near unity_FogParams in the built-in parameter block
+                        for (int64_t d = -0x200; d <= 0x200; d += 4) {
+                            float c[4];
+                            if (!mem_read(at + i + uint64_t(d), c, 16)) continue;
+                            bool gamma = true, lin = true;
+                            for (int k = 0; k < 3; ++k) {
+                                gamma &= close(c[k], g_original.color[k], 0.f, 2e-3f);
+                                lin &= close(c[k], to_linear(g_original.color[k]), 0.f, 3e-3f);
+                            }
+                            if (!(gamma || lin) || (g_original.color[0] == 0.f && g_original.color[1] == 0.f && g_original.color[2] == 0.f)) continue;
+                            ColorCopy cc{at + i + uint64_t(d), {}, !gamma && lin};
+                            std::memcpy(cc.original, c, 16);
+                            g_colors.push_back(cc);
+                            break;
+                        }
+                    }
+                }
+                scanned += chunk;
+                at += chunk;
+            }
+        }
+        diag::log("FOG", "renderer params: %zu copies of unity_FogParams (%.4f %.4f %.6f %.4f), %zu fog colors, %.0f MiB searched",
+                  g_params.size(), want[0], want[1], want[2], want[3], g_colors.size(), double(scanned) / 1048576.0);
+        for (const auto& p : g_params) diag::log("FOG", "  params at 0x%llx", (unsigned long long)p.address);
+        for (const auto& c : g_colors) diag::log("FOG", "  color at 0x%llx (%s)", (unsigned long long)c.address, c.linear ? "linear" : "gamma");
+    }
+
+    inline void write_params(float start, float end, const float color[3]) {
+        if (g_params.empty()) return;
+        float density = g_original.density;
+        if (g_original.mode == 2) density = 4.605f / std::max(end, 1.f);       // exp: 1% left at the max distance
+        else if (g_original.mode == 3) density = 2.146f / std::max(end, 1.f);  // exp2: same
+        float want[4];
+        params_for(density, start, end, want);
+        for (const auto& p : g_params) {
+            float now[4];
+            if (mem_read(p.address, now, 16) && std::memcmp(now, want, 16) != 0) mem_write(p.address, want, 16);
+        }
+        for (const auto& c : g_colors) {
+            float rgb[3];
+            for (int k = 0; k < 3; ++k) rgb[k] = c.linear ? to_linear(color[k]) : color[k];
+            float now[3];
+            if (mem_read(c.address, now, 12) && std::memcmp(now, rgb, 12) != 0) mem_write(c.address, rgb, 12);
+        }
+        if (!g_params_logged) {
+            g_params_logged = true;
+            diag::log("FOG", "renderer params written: mode=%d density=%.4f start=%.1f end=%.1f", g_original.mode, density, start, end);
+        }
+    }
+
+    inline void restore_params() {
+        for (const auto& p : g_params) mem_write(p.address, p.original, 16);
+        for (const auto& c : g_colors) mem_write(c.address, c.original, 16);
+        g_params_logged = false;
+    }
+
     // Color estimate: the horizon the fog has to blend into, from the scene's ambient equator
     // color (ambient sky when the equator is not readable), else the game's own fog color.
     inline void estimate_color(float out[3]) {
@@ -420,23 +585,50 @@ namespace worldfog {
         for (int i = 0; i < 3; ++i) out[i] = std::clamp(g_original.color[i], 0.f, 1.f);
     }
 
+    struct Want { uint8_t fog; int32_t mode; float start, end; float color[4]; };
+
+    inline Want desired() {
+        Want w{};
+        w.fog = 1;
+        w.mode = 1;  // FogMode.Linear: start and end only apply in this mode
+        w.start = std::max(cfg::fog::min_distance, 0.f);
+        w.end = std::max(cfg::fog::max_distance, w.start + 1.f);
+        w.color[3] = 1.f;
+        if (cfg::fog::auto_color) estimate_color(w.color);
+        else { w.color[0] = cfg::fog::color.x; w.color[1] = cfg::fog::color.y; w.color[2] = cfg::fog::color.z; }
+        return w;
+    }
+
+    inline bool differs(Field f, const void* value, size_t size) {
+        uint8_t now[16]{};
+        return g_fields[f].address && !(mem_read(g_fields[f].address, now, size) && std::memcmp(now, value, size) == 0);
+    }
+
+    inline bool fields_differ(const Want& w) {
+        return differs(Fog, &w.fog, 1) || differs(Mode, &w.mode, 4) || differs(Start, &w.start, 4) ||
+               differs(End, &w.end, 4) || differs(FogColor, w.color, 16);
+    }
+
+    // Field changes (setter replays) run on the worker thread.
+    inline void apply_fields(const Want& w) {
+        set_field(Fog, &w.fog, 1);
+        set_field(Mode, &w.mode, 4);
+        set_field(Start, &w.start, 4);
+        set_field(End, &w.end, 4);
+        set_field(FogColor, w.color, 16);
+    }
+
     inline void apply() {
-        const uint8_t fog = 1;
-        const int32_t linear = 1;  // FogMode.Linear: start and end only apply in this mode
-        const float start = std::max(cfg::fog::min_distance, 0.f);
-        const float end = std::max(cfg::fog::max_distance, start + 1.f);
-        float color[4] = {0, 0, 0, 1.f};
-        if (cfg::fog::auto_color) estimate_color(color);
-        else { color[0] = cfg::fog::color.x; color[1] = cfg::fog::color.y; color[2] = cfg::fog::color.z; }
-        set_field(Fog, &fog, 1);
-        set_field(Mode, &linear, 4);
-        set_field(Start, &start, 4);
-        set_field(End, &end, 4);
-        set_field(FogColor, color, 16);
+        const Want w = desired();
+        write_params(w.start, w.end, w.color);
+        if (!g_resolving.load() && fields_differ(w)) {
+            g_resolving = true;
+            std::thread([w] { apply_fields(w); g_resolving = false; }).detach();
+        }
         if (!g_applied) {
             g_applied = true;
-            diag::log("FOG", "applied start=%.1f end=%.1f color=(%.2f %.2f %.2f) %s", start, end, color[0], color[1],
-                      color[2], cfg::fog::auto_color ? "estimated" : "manual");
+            diag::log("FOG", "applied start=%.1f end=%.1f color=(%.2f %.2f %.2f) %s", w.start, w.end, w.color[0], w.color[1],
+                      w.color[2], cfg::fog::auto_color ? "estimated" : "manual");
         }
     }
 
@@ -459,6 +651,8 @@ namespace worldfog {
             g_dumped = false;
             g_last_resolve = 0;
             for (auto& f : g_fields) f = Resolved{};
+            g_params.clear();
+            g_colors.clear();
         }
         if (proc::pid <= 0 || !plausible(proc::lib)) return;
         if (!cfg::fog::enabled && !g_applied) return;
@@ -477,6 +671,7 @@ namespace worldfog {
             g_last_check = now;
             if (moved()) {
                 diag::log("FOG", "RenderSettings moved (scene load), resolving again");
+                restore_params();
                 g_ready = g_applied = false;
                 g_last_resolve = 0;
                 return;
@@ -484,23 +679,25 @@ namespace worldfog {
         }
 
         if (!cfg::fog::enabled) {
-            restore();
+            restore_params();
+            g_resolving = true;
+            std::thread([] { restore(); g_resolving = false; }).detach();
             g_applied = false;
             return;
         }
-        if (!g_applied) read_original();
+        if (!g_applied && g_params.empty()) read_original();
         if (now - g_last_write < 100) return;
         g_last_write = now;
         apply();
     }
 
-    // Waits for a resolution started by tick() (tests and shutdown).
+    // Waits for work started by tick(): a resolution, a field update or a restore.
     inline void wait() { while (g_resolving.load()) std::this_thread::sleep_for(std::chrono::milliseconds(5)); }
 
     // Menu "Rescan" button.
     inline void rescan() {
         if (g_resolving.load()) return;
-        if (g_applied) restore();
+        if (g_applied) { restore_params(); restore(); }
         g_ready = g_applied = false;
         g_last_resolve = 0;
     }

@@ -58,6 +58,7 @@ namespace a64 {
         std::vector<uint64_t> calls;
         std::unordered_map<uint64_t, Reg> mem;  // local memory, keyed by exact address
         std::vector<Store> stores;
+        std::unordered_map<uint64_t, int16_t> overlay;  // game byte -> value written on this path, -1 = unknown
         int blind_stores{};    // stores through an address that was not known (cannot be replayed)
         uint64_t last_load{};  // last game address loaded from, and its size
         int last_load_size{};
@@ -116,6 +117,12 @@ namespace a64 {
         int max_site_forks = 6;    // per branch instruction
         int max_depth = 8;
         const char* why = "";
+        // Diagnostics for searches that fail: where time went and where paths split.
+        bool profile = false;
+        std::unordered_map<uint64_t, uint32_t> hot;          // pc -> times executed
+        std::unordered_map<uint64_t, uint32_t> fork_sites;   // pc -> forks
+        std::unordered_map<uint64_t, uint32_t> call_targets; // callee -> calls
+        long total_steps = 0;
     };
 
     // After a call we could not follow: AAPCS64 caller-saved registers hold anything.
@@ -140,15 +147,12 @@ namespace a64 {
         uint8_t raw[16]{};
         if (!plausible(addr) || !mem_read(addr, raw, size_t(size))) return r;
         // Earlier stores on this path are visible to later loads, byte for byte, as in the game.
-        for (const Store& st : m.stores) {
-            if (local(st.address) || st.address >= addr + uint64_t(size) || st.address + uint64_t(st.size) <= addr) continue;
-            if (!st.known) return r;
-            uint8_t bytes[16];
-            std::memcpy(bytes, &st.value, 8);
-            std::memcpy(bytes + 8, &st.hi, 8);
-            for (int b = 0; b < st.size; ++b) {
-                const uint64_t at = st.address + uint64_t(b);
-                if (at >= addr && at < addr + uint64_t(size)) raw[at - addr] = bytes[b];
+        if (!m.overlay.empty()) {
+            for (int b = 0; b < size; ++b) {
+                const auto it = m.overlay.find(addr + uint64_t(b));
+                if (it == m.overlay.end()) continue;
+                if (it->second < 0) return r;
+                raw[b] = uint8_t(it->second);
             }
         }
         uint64_t value = 0;
@@ -163,7 +167,11 @@ namespace a64 {
 
     inline void store(Machine& m, uint64_t addr, int size, const Reg& value) {
         m.stores.push_back({addr, size, value.src, value.tag, value.value, value.hi, value.known});
-        if (local(addr)) m.mem[addr] = value;
+        if (local(addr)) { m.mem[addr] = value; return; }
+        uint8_t bytes[16];
+        std::memcpy(bytes, &value.value, 8);
+        std::memcpy(bytes + 8, &value.hi, 8);
+        for (int b = 0; b < size; ++b) m.overlay[addr + uint64_t(b)] = value.known ? int16_t(bytes[b]) : int16_t(-1);
     }
 
     inline bool cond(const Machine& m, int cc, bool& out) {
@@ -212,6 +220,10 @@ namespace a64 {
         uint32_t ins = 0;
         if (++m.steps > s.max_steps) { s.why = "step budget"; return Step::Fail; }
         if (!s.code.fetch(m.pc, ins)) { s.why = "code unreadable"; return Step::Fail; }
+        if (s.profile) {
+            ++s.hot[m.pc];
+            if ((ins & 0xFC000000) == 0x94000000) ++s.call_targets[m.pc + sext(uint64_t(ins & 0x3FFFFFF) << 2, 28)];
+        }
         const uint64_t pc = m.pc;
         m.pc += 4;
         const int rd = int(ins & 31), rn = int((ins >> 5) & 31);
@@ -840,13 +852,15 @@ namespace a64 {
             if (best + 1 != pending.size()) pending[best] = std::move(pending.back());
             pending.pop_back();
             for (;;) {
-                if (++total > s.max_total) { s.why = "total step budget"; return false; }
+                s.total_steps = ++total;
+                if (total > s.max_total) { s.why = "total step budget"; return false; }
                 const uint64_t pc = m.pc;
                 const size_t before = m.stores.size();
                 Machine other;
                 const Step result = step(s, m, other);
                 if (result == Step::Fail) { last_failure = s.why; break; }
                 if (result == Step::Fork) {
+                    if (s.profile) ++s.fork_sites[pc];
                     // Keep both sides only while this branch and the whole search are under
                     // budget; past that, follow the fall-through alone.
                     if (++site_forks[pc] <= s.max_site_forks && ++forks <= s.max_forks) {
@@ -868,8 +882,10 @@ namespace a64 {
     // memory, in order. Only a path that returns normally, writes `must_write`, and whose every
     // store has a known address and value is accepted, so what gets replayed is exactly what the
     // game's own code would have written (a setter plus whatever it updates behind it).
-    inline bool replay(const Machine& start, uint64_t must_write, std::vector<Store>& out, std::string& why) {
-        Session session;
+    inline bool replay(const Machine& start, uint64_t must_write, std::vector<Store>& out, std::string& why,
+                       Session* use = nullptr) {
+        Session local_session;
+        Session& session = use ? *use : local_session;
         auto goal = [&](const Machine& m) {
             if (!m.returned || m.blind_stores) return false;
             bool hit = false;

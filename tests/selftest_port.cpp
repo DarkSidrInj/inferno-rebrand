@@ -381,9 +381,18 @@ int main() {
 
         cfg::fog::enabled = true; cfg::fog::auto_color = true; cfg::fog::min_distance = 25.f; cfg::fog::max_distance = 90.f;
         worldfog::g_pid = -1;
+        // The renderer still holds the map's fog params (start 0, end 300, density 0.01). The
+        // search is limited to the fake library: this process would otherwise find its own
+        // buffers and thread stacks (the game is always another process).
+        float* params_live = reinterpret_cast<float*>(base + fx::g_fog_params);
+        worldfog::params_for(.01f, 0.f, 300.f, params_live);
+        g_scan_maps = {remote_map{lib, lib + 0xC500000, true}};
         worldfog::tick();                       // starts the resolution thread
         worldfog::wait();
-        worldfog::tick();                       // applies
+        CHECK(worldfog::g_params.size() == 1 && worldfog::g_params[0].address == base + fx::g_fog_params,
+              "renderer params found: %zu", worldfog::g_params.size());
+        worldfog::tick();                       // applies (field changes on the worker)
+        worldfog::wait();
         const uint64_t obj = reinterpret_cast<uint64_t>(rs);
         auto how = [](worldfog::Field f) { return worldfog::g_fields[f].how.c_str(); };
         CHECK(worldfog::g_object == obj, "GetRenderSettings traced");
@@ -417,6 +426,7 @@ int main() {
         cfg::fog::auto_color = false; cfg::fog::color = ImVec4(.9f, .1f, .2f, 1.f);
         worldfog::g_last_write = 0;
         worldfog::tick();
+        worldfog::wait();
         std::memcpy(&f, rs + 0x48, 4); CHECK(std::fabs(f - .9f) < 1e-5f, "manual color r=%.2f", f);
 
         // Scene load: RenderSettings moves; the start trace notices and everything follows.
@@ -429,11 +439,13 @@ int main() {
         worldfog::wait();
         worldfog::g_last_write = 0;
         worldfog::tick();                       // applies
+        worldfog::wait();
         CHECK(worldfog::g_fields[worldfog::Start].address == reinterpret_cast<uint64_t>(rs2) + 0x58, "followed the move");
         CHECK(rs2[0x40] == 1, "fog on after the move");
 
         cfg::fog::enabled = false;
         worldfog::tick();
+        worldfog::wait();
         std::memcpy(&f, rs2 + 0x5C, 4);
         std::memcpy(&mode, rs2 + 0x44, 4);
         CHECK(rs2[0x40] == 0 && mode == 3 && f == 300.f, "restored fog=%d mode=%d end=%.1f", rs2[0x40], mode, f);
