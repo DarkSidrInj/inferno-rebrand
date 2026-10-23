@@ -274,8 +274,23 @@ void visuals::draw_world_items(const matrix& view, const matrix& projection, con
 // so the model is drawn here, from the same pose the skeleton uses.
 void visuals::draw_local_model(const matrix& view, const matrix& projection, uint64_t local) {
     if (!local) return;
+    // The own model must not blink: a frame without a fresh pose keeps the last one for two seconds.
+    static Pose last;
+    static uint64_t last_for = 0;
+    static long long last_ok = 0;
+    const long long now = diag::now_ms();
     Pose pose;
-    if (!skeleton::get(local, player::position(local), pose)) return;
+    if (skeleton::get(local, player::position(local), pose)) {
+        pose.live = true;
+        last = pose;
+        last_for = local;
+        last_ok = now;
+    } else if (last_for == local && now - last_ok < 2000) {
+        pose = last;
+        pose.live = true;
+    } else {
+        return;
+    }
     draw_overlay(ImGui::GetBackgroundDrawList(), pose, view, projection, cfg::thirdperson::model_col,
                  cfg::thirdperson::model_outline_col, cfg::thirdperson::model_outline);
 }
