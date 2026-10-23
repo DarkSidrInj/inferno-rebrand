@@ -733,29 +733,50 @@ int main() {
             cfg::thirdperson::enabled = false;
         }
 
-        // Third person look and anti-aim on one local player: body / arms / gloves renderers and the
-        // model root transform.
+        // Third person look and anti-aim on one local player: the body renderer is switched on with
+        // the game's set_enabled (strict replay), the second camera loses the first-person layer, and
+        // the model root transform turns.
         {
-            route(v100::renderer_set_shadow_casting_injected, base + fx::UnityEngine_Renderer__set_shadowCastingMode_Injected);
-            *at(fx::slot_set_shadow_mode) = base + fx::Renderer_set_shadowCastingMode_Injected;
-            auto make_renderer = [&](int mode, uint8_t scene_index, int32_t* ids, int count, uint8_t*& native_out) {
+            route(v100::renderer_get_enabled_injected, base + fx::UnityEngine_Renderer__get_enabled_Injected);
+            route(v100::renderer_set_enabled_injected, base + fx::UnityEngine_Renderer__set_enabled_Injected);
+            *at(fx::slot_get_enabled) = base + fx::Renderer_get_enabled_Injected;
+            *at(fx::slot_set_enabled) = base + fx::Renderer_set_enabled_Injected;
+            auto make_renderer = [&](bool enabled, int32_t* ids, int count, uint8_t*& native_out) {
                 uint8_t* native = static_cast<uint8_t*>(calloc(1, 0x200));
                 *reinterpret_cast<uint64_t*>(native + 0x118) = reinterpret_cast<uint64_t>(ids);  // m_Materials, as chams found it
                 *reinterpret_cast<uint64_t*>(native + 0x128) = uint64_t(count);
                 *reinterpret_cast<uint64_t*>(native) = reinterpret_cast<uint64_t>(native) + 0x1F0;  // a vtable pointer
-                native[0x108] = uint8_t(0x41 | (mode << 2));  // other bits set: the field is a bitfield
-                native[0x10C] = scene_index;
+                native[0x109] = uint8_t(0x05 | (enabled ? 0x10 : 0));  // other bits set: the flag is a bit
                 uint8_t* managed = static_cast<uint8_t*>(calloc(1, 0x40));
                 *reinterpret_cast<uint64_t*>(managed + v100::unity_cached_ptr) = reinterpret_cast<uint64_t>(native);
                 native_out = native;
                 return reinterpret_cast<uint64_t>(managed);
             };
-            uint8_t *body = nullptr, *arms = nullptr, *gloves = nullptr;
+            uint8_t *body = nullptr, *arms = nullptr;
             uint8_t* bindings = static_cast<uint8_t*>(calloc(1, 0x80));
-            int32_t body_ids[2] = {-8000, -8001}, arms_ids[1] = {-8100}, gloves_ids[1] = {-8200};
-            *reinterpret_cast<uint64_t*>(bindings + v100::bindings_character_renderer) = make_renderer(localview::ShadowsOnly, 1, body_ids, 2, body);
-            *reinterpret_cast<uint64_t*>(bindings + v100::bindings_arms_renderer) = make_renderer(localview::On, 2, arms_ids, 1, arms);
-            *reinterpret_cast<uint64_t*>(bindings + v100::bindings_gloves_renderer) = make_renderer(localview::On, 3, gloves_ids, 1, gloves);
+            int32_t body_ids[2] = {-8000, -8001}, arms_ids[1] = {-8100};
+            *reinterpret_cast<uint64_t*>(bindings + v100::bindings_character_renderer) = make_renderer(false, body_ids, 2, body);
+            *reinterpret_cast<uint64_t*>(bindings + v100::bindings_arms_renderer) = make_renderer(true, arms_ids, 1, arms);
+
+            // Main and first-person cameras (same vtable) in one heap block, the search's only map.
+            uint8_t* heap = static_cast<uint8_t*>(aligned_alloc(16, 0x1000));
+            std::memset(heap, 0, 0x1000);
+            const matrix view0 = player::view_from_pose(Vector3(0.f, 1.f, 0.f), Vector4(0.f, 0.f, 0.f, 1.f));
+            const matrix proj0 = player::perspective(60.f, 16.f / 9.f);
+            auto make_camera = [&](size_t off, uint32_t mask) {
+                uint8_t* c = heap + off;
+                *reinterpret_cast<uint64_t*>(c) = proc::lib + v100::data_relro_begin + 0x10;
+                *reinterpret_cast<uint64_t*>(c + 0x20) = reinterpret_cast<uint64_t>(heap + 0xF00);  // a game object
+                std::memcpy(c + v100::camera_view, &view0, sizeof(view0));
+                std::memcpy(c + v100::camera_projection, &proj0, sizeof(proj0));
+                std::memcpy(c + 0x220, &mask, 4);
+                return c;
+            };
+            uint8_t* main_cam = make_camera(0x000, 0xFFFFFEFFu);
+            uint8_t* view_cam = make_camera(0x400, 0x00000100u);
+            uint8_t* ui_cam = make_camera(0x800, 0x00000020u);
+            thirdperson::g_mask_offset = 0x220;
+            g_scan_maps = {remote_map{reinterpret_cast<uint64_t>(heap), reinterpret_cast<uint64_t>(heap) + 0x1000, true}};
 
             auto* aa_entries = static_cast<player::TransformEntry*>(calloc(8, sizeof(player::TransformEntry)));
             auto* aa_parents = static_cast<int*>(calloc(8, sizeof(int)));
@@ -789,27 +810,56 @@ int main() {
             uint8_t* net = static_cast<uint8_t*>(calloc(1, 0x200));
             *reinterpret_cast<uint64_t*>(net + v100::net_systems) = reinterpret_cast<uint64_t>(wmz);
             const uint64_t me = reinterpret_cast<uint64_t>(net);
-            auto mode_of = [](const uint8_t* r) { return (r[0x108] >> 2) & 3; };
-            const uint8_t* scene = reinterpret_cast<const uint8_t*>(base + fx::g_scene_flags);
+            auto enabled_bit = [](const uint8_t* r) { return (r[0x109] >> 4) & 1; };
+            auto mask_of = [](const uint8_t* c) { uint32_t m; std::memcpy(&m, c + 0x220, 4); return m; };
+            const int* scene_count = reinterpret_cast<const int*>(base + fx::g_scene_count);
 
             cfg::thirdperson::show_body = true;
+            cfg::chams::enabled = false;
             localview::g_pid = -1;
-            localview::tick(me, true);
+            localview::tick(me, true, reinterpret_cast<uint64_t>(main_cam));
             localview::wait();
-            CHECK(localview::g_setter.load() != 0, "shadow casting setter found");
-            CHECK(mode_of(body) == localview::On && mode_of(arms) == localview::ShadowsOnly && mode_of(gloves) == localview::ShadowsOnly,
-                  "third-person look: body %d arms %d gloves %d", mode_of(body), mode_of(arms), mode_of(gloves));
-            CHECK((body[0x108] & 0x41) == 0x41 && scene[1] == body[0x108] && scene[2] == arms[0x108], "bitfield kept, scene updated");
-            CHECK(body_ids[0] == 0 && body_ids[1] == 0 && arms_ids[0] == -8000 && gloves_ids[0] == -8000,
-                  "materials: body %d %d, arms %d, gloves %d", body_ids[0], body_ids[1], arms_ids[0], gloves_ids[0]);
+            CHECK(localview::g_enabled_getter && localview::g_enabled_setter, "Renderer.enabled accessors found");
+            CHECK(enabled_bit(body) == 1 && (body[0x109] & 0x05) == 0x05 && *scene_count == 1,
+                  "body switched on through set_enabled (bit %d, scene %d)", enabled_bit(body), *scene_count);
+            CHECK(localview::g_view_cameras.size() == 1 && localview::g_view_cameras[0].native == reinterpret_cast<uint64_t>(view_cam),
+                  "first-person camera found: %zu", localview::g_view_cameras.size());
+            CHECK(mask_of(view_cam) == 0 && mask_of(ui_cam) == 0x20 && mask_of(main_cam) == 0xFFFFFEFFu,
+                  "layer 8 off the first-person camera only (0x%08x 0x%08x)", mask_of(view_cam), mask_of(ui_cam));
+            CHECK(body_ids[0] == 0 && body_ids[1] == 0 && arms_ids[0] == -8100, "body flat, arms untouched (%d %d)", body_ids[0], arms_ids[0]);
             localview::g_last_pass = 0;
             localview::tick(me, false);
             localview::wait();
-            CHECK(mode_of(body) == localview::ShadowsOnly && mode_of(arms) == localview::On && mode_of(gloves) == localview::On,
-                  "first-person look restored: body %d arms %d gloves %d", mode_of(body), mode_of(arms), mode_of(gloves));
-            CHECK(scene[1] == body[0x108] && scene[3] == gloves[0x108], "scene restored with the setter");
-            CHECK(body_ids[0] == -8000 && body_ids[1] == -8001 && arms_ids[0] == -8100 && gloves_ids[0] == -8200,
-                  "materials restored: body %d %d, arms %d, gloves %d", body_ids[0], body_ids[1], arms_ids[0], gloves_ids[0]);
+            CHECK(enabled_bit(body) == 0 && enabled_bit(arms) == 1, "body switched off again (%d)", enabled_bit(body));
+            CHECK(mask_of(view_cam) == 0x100, "first-person camera mask restored (0x%08x)", mask_of(view_cam));
+            CHECK(body_ids[0] == -8000 && body_ids[1] == -8001, "body materials restored (%d %d)", body_ids[0], body_ids[1]);
+
+            // Chams through walls: the outline effect's mask materials, found by the rdj class pointer.
+            uint8_t* rdj_class = static_cast<uint8_t*>(calloc(1, 0x300));
+            char* rdj_name = static_cast<char*>(calloc(1, 16));
+            std::strcpy(rdj_name, "rdj");
+            *reinterpret_cast<uint64_t*>(rdj_class + klass::g_name_offset) = reinterpret_cast<uint64_t>(rdj_name);
+            *reinterpret_cast<uint64_t*>(unity + 0x700) = reinterpret_cast<uint64_t>(rdj_class);  // its TypeInfo global
+            uint8_t* rdj = heap + 0xC00;
+            *reinterpret_cast<uint64_t*>(rdj) = reinterpret_cast<uint64_t>(rdj_class);
+            for (int k = 0; k < 2; ++k) {
+                uint8_t* mat = static_cast<uint8_t*>(calloc(1, 0x40));
+                *reinterpret_cast<uint64_t*>(mat) = reinterpret_cast<uint64_t>(mat) + 0x20;
+                const int32_t id = -12000 - k;
+                std::memcpy(mat + v100::native_instance_id, &id, 4);
+                uint8_t* managed_mat = static_cast<uint8_t*>(calloc(1, 0x40));
+                *reinterpret_cast<uint64_t*>(managed_mat + v100::unity_cached_ptr) = reinterpret_cast<uint64_t>(mat);
+                *reinterpret_cast<uint64_t*>(rdj + 0x38 + k * 8) = reinterpret_cast<uint64_t>(managed_mat);
+            }
+            chams::resolve_outline_masks();
+            CHECK(chams::g_mask_ids[0].load() == -12000 && chams::g_mask_ids[1].load() == -12001,
+                  "outline mask materials %d %d", chams::g_mask_ids[0].load(), chams::g_mask_ids[1].load());
+            cfg::chams::through_walls = true;
+            cfg::chams::wall_material = 1;
+            CHECK(chams::desired_id(reinterpret_cast<uint64_t>(bindings), true) == -12001, "wall material choice");
+            cfg::chams::wall_material = 0;
+            CHECK(chams::desired_id(reinterpret_cast<uint64_t>(bindings), true) == -12000, "wall material default");
+            cfg::chams::through_walls = false;
 
             // Anti-aim turns only the model root.
             skeleton::g_index_pid = -1;

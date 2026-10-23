@@ -64,6 +64,9 @@ namespace a64 {
         int last_load_size{};
         // First 1-byte game load inside [watch_lo, watch_hi) on this path (a flag check).
         uint64_t watch_lo{}, watch_hi{}, watch_byte{};
+        int skipped{};       // calls stepped over (too deep, unknown target, outside Session::code_lo..hi)
+        bool watch_hit{};    // a load or store inside [watch_lo, watch_hi) happened
+        int skipped_late{};  // calls stepped over after watch_hit (could hide work on the watched object)
         uint64_t pc{};
         int steps{};
         bool returned{};
@@ -118,6 +121,9 @@ namespace a64 {
         int max_forks = 2000;
         int max_site_forks = 6;    // per branch instruction
         int max_depth = 8;
+        // When set, calls into code outside [code_lo, code_hi) are stepped over (and counted in
+        // Machine::skipped) instead of followed: keeps replays out of libc (malloc, locks).
+        uint64_t code_lo = 0, code_hi = 0;
         const char* why = "";
         // Diagnostics for searches that fail: where time went and where paths split.
         bool profile = false;
@@ -147,6 +153,7 @@ namespace a64 {
         m.last_load = addr;
         m.last_load_size = size;
         if (size == 1 && !m.watch_byte && addr >= m.watch_lo && addr < m.watch_hi) m.watch_byte = addr;
+        if (addr >= m.watch_lo && addr < m.watch_hi) m.watch_hit = true;
         uint8_t raw[16]{};
         if (!plausible(addr) || !mem_read(addr, raw, size_t(size))) return r;
         // Earlier stores on this path are visible to later loads, byte for byte, as in the game.
@@ -170,6 +177,7 @@ namespace a64 {
 
     inline void store(Machine& m, uint64_t addr, int size, const Reg& value) {
         m.stores.push_back({addr, size, value.src, value.tag, value.value, value.hi, value.known});
+        if (addr >= m.watch_lo && addr < m.watch_hi) m.watch_hit = true;
         if (local(addr)) { m.mem[addr] = value; return; }
         uint8_t bytes[16];
         std::memcpy(bytes, &value.value, 8);
@@ -241,7 +249,8 @@ namespace a64 {
         if ((ins & 0x7C000000) == 0x14000000) {  // B / BL
             const uint64_t target = pc + sext(uint64_t(ins & 0x3FFFFFF) << 2, 28);
             if (ins & 0x80000000) {
-                if (int(m.calls.size()) >= s.max_depth) { clobber(m); return Step::Next; }  // too deep: step over
+                const bool outside = s.code_hi && (target < s.code_lo || target >= s.code_hi);
+                if (int(m.calls.size()) >= s.max_depth || outside) { clobber(m); ++m.skipped; m.skipped_late += m.watch_hit; return Step::Next; }  // step over
                 m.calls.push_back(m.pc);
                 m.x[30] = known_value(m.pc);
             }
@@ -258,9 +267,10 @@ namespace a64 {
                 m.calls.pop_back();
                 return Step::Next;
             }
-            const bool followable = target.known && plausible(target.value);
+            const bool followable = target.known && plausible(target.value) &&
+                                    !(s.code_hi && (target.value < s.code_lo || target.value >= s.code_hi));
             if (opc == 1) {  // BLR
-                if (!followable || int(m.calls.size()) >= s.max_depth) { clobber(m); return Step::Next; }
+                if (!followable || int(m.calls.size()) >= s.max_depth) { clobber(m); ++m.skipped; m.skipped_late += m.watch_hit; return Step::Next; }
                 m.calls.push_back(m.pc);
                 m.x[30] = known_value(m.pc);
                 m.pc = target.value;
@@ -269,6 +279,8 @@ namespace a64 {
             if (!followable) {  // BR: a tail call or PLT jump we cannot follow
                 if (m.calls.empty()) { s.why = "tail call to an unresolved target (icall slot empty?)"; return Step::Fail; }
                 clobber(m);
+                ++m.skipped;
+                m.skipped_late += m.watch_hit;
                 m.pc = m.calls.back();
                 m.calls.pop_back();
                 return Step::Next;

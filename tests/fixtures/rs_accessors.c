@@ -215,3 +215,35 @@ f_set_shadow slot_set_shadow_mode;
 void UnityEngine_Renderer__set_shadowCastingMode_Injected(void* self, int mode, const void* method) {
     RESOLVE(slot_set_shadow_mode, f_set_shadow, "UnityEngine.Renderer::set_shadowCastingMode_Injected(System.IntPtr,UnityEngine.Rendering.ShadowCastingMode)"); f(self, mode);
 }
+
+// Renderer.enabled: bit 4 of the byte at +0x109; enabling puts the renderer in the scene list.
+void* g_scene_renderers[16];
+int g_scene_count;
+__attribute__((noinline)) void AddToScene(unsigned char* r) {
+    if (g_scene_count < 16) g_scene_renderers[g_scene_count++] = r;
+    *(int*)(r + 0x110) = g_scene_count;
+}
+__attribute__((noinline)) void RemoveFromScene(unsigned char* r) {
+    const int i = *(int*)(r + 0x110);
+    if (i > 0 && i <= 16) g_scene_renderers[i - 1] = 0;
+    *(int*)(r + 0x110) = 0;
+}
+unsigned char Renderer_get_enabled_Injected(void* self) { CHECK_THREAD("get_enabled"); return (((unsigned char*)self)[0x109] >> 4) & 1; }
+void Renderer_set_enabled_Injected(void* self, unsigned char value) {
+    CHECK_THREAD("set_enabled");
+    unsigned char* r = (unsigned char*)self;
+    const int on = (r[0x109] >> 4) & 1;
+    if (on == (value != 0)) return;
+    r[0x109] = value ? (unsigned char)(r[0x109] | 0x10) : (unsigned char)(r[0x109] & ~0x10);
+    if (value) AddToScene(r); else RemoveFromScene(r);
+}
+typedef unsigned char (*f_get_enabled)(void*);
+typedef void (*f_set_enabled)(void*, unsigned char);
+f_get_enabled slot_get_enabled;
+f_set_enabled slot_set_enabled;
+unsigned char UnityEngine_Renderer__get_enabled_Injected(void* self, const void* method) {
+    RESOLVE(slot_get_enabled, f_get_enabled, "UnityEngine.Renderer::get_enabled_Injected(System.IntPtr)"); return f(self);
+}
+void UnityEngine_Renderer__set_enabled_Injected(void* self, unsigned char value, const void* method) {
+    RESOLVE(slot_set_enabled, f_set_enabled, "UnityEngine.Renderer::set_enabled_Injected(System.IntPtr,System.Boolean)"); f(self, value);
+}

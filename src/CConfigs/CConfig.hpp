@@ -37,7 +37,8 @@ namespace chams {
     inline bool local_arms = false;
     inline bool local_weapon = false;
     inline int material = 0;         // 0 flat (material id 0, as the legacy chams), 1 untouchable, 2 outline
-    inline bool through_walls = true; // Unity's default UI material: ZWrite Off, no depth test
+    inline bool through_walls = true; // enemies / teammates get a material drawn without depth test
+    inline int wall_material = 0;     // 0 / 1 the game's outline mask materials (rdj +0x38 / +0x40), 2 Unity default UI
 }
 
 namespace thirdperson {

@@ -130,7 +130,7 @@ void visuals::draw() {
         // Third person owns the camera's matrix: draw with the one written this frame.
         tp_guard.active = thirdperson::tick(&GameCamera, ViewMatrix);
         tp_guard.ticked = true;
-        localview::tick(LocalPlayer, tp_guard.active);
+        localview::tick(LocalPlayer, tp_guard.active, GameCamera.native);
         if (g_camera != GameCamera.native)
             diag::log("CAMERA", "selected game camera native=0x%llx holder=0x%llx", (unsigned long long)GameCamera.native,
                       (unsigned long long)GameCamera.holder);

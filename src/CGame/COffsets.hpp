@@ -98,6 +98,7 @@ namespace v100 {
     inline constexpr uint64_t camera_set_culling_mask_injected = 0x6D1DAD4;     // static set_cullingMask_Injected(IntPtr, int)
     inline constexpr uint64_t renderer_set_shadow_casting_injected = 0x75FD534; // static set_shadowCastingMode_Injected(IntPtr, mode)
     inline constexpr uint64_t renderer_get_enabled_injected = 0x75FF098;        // static get_enabled_Injected(IntPtr)
+    inline constexpr uint64_t renderer_set_enabled_injected = 0x76058D0;        // static set_enabled_Injected(IntPtr, bool)
     inline constexpr uint64_t gamecam_state = 0x10;                              // nrl.jlli : ckk (camera pose the game follows)
     inline constexpr uint64_t camstate_position = 0x10;                          // ckk.dkde.Position (ValueTransform)
     inline constexpr uint64_t camstate_euler = 0x1C;                             // ckk.dkde.EulerAngles

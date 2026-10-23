@@ -147,6 +147,74 @@ namespace chams {
         return 0;
     }
 
+    // An Il2Cpp class among libunity's TypeInfo globals, by name.
+    inline uint64_t find_class(const char* wanted) {
+        if (!klass::calibrate()) return 0;
+        std::unordered_map<uint64_t, bool> checked;
+        std::vector<uint64_t> words;
+        for (const auto& seg : icalls::unity_segments()) {
+            if (seg.exec) continue;
+            for (uint64_t at = seg.begin; at < seg.end;) {
+                const size_t chunk = size_t(std::min<uint64_t>(seg.end - at, 1024 * 1024)) & ~size_t(7);
+                if (chunk < 8) break;
+                words.assign(chunk / 8, 0);
+                if (mem_read(at, words.data(), chunk)) {
+                    for (uint64_t v : words) {
+                        if (!plausible(v) || !checked.emplace(v, true).second) continue;
+                        char name[16];
+                        if (klass::name_at(v, klass::g_name_offset, name, sizeof(name)) && std::strcmp(name, wanted) == 0) return v;
+                    }
+                }
+                at += chunk;
+            }
+        }
+        return 0;
+    }
+
+    // The game's own through-wall material: the outline post effect (rdj, PPv2 renderer of
+    // Axlebolt...OutlineProfile.Outline) renders players into its mask with materials it keeps at
+    // +0x38 / +0x40. Depth is tested later in its post pass (DepthCulling), so the mask pass
+    // itself draws through walls. The one live rdj is found by its class pointer in the heap.
+    inline std::atomic<int32_t> g_mask_ids[2] = {{0}, {0}};
+    inline std::atomic<bool> g_mask_scanning{false};
+    inline long long g_last_mask_scan = 0;
+
+    inline void resolve_outline_masks() {
+        const uint64_t cls = find_class("rdj");
+        if (!cls) { diag::log("WARN", "CHAMS outline effect class rdj not found"); return; }
+        if (g_scan_maps.empty()) refresh_scan_maps();
+        const std::vector<remote_map> maps = g_scan_maps;
+        std::vector<uint64_t> words;
+        int objects = 0;
+        for (const auto& m : maps) {
+            for (uint64_t at = m.begin; at < m.end;) {
+                const size_t chunk = size_t(std::min<uint64_t>(m.end - at, 1024 * 1024)) & ~size_t(7);
+                if (chunk < 8) break;
+                words.assign(chunk / 8, 0);
+                if (mem_read(at, words.data(), chunk)) {
+                    for (size_t i = 0; i < words.size(); i += 2) {  // objects are 16-byte aligned
+                        if (words[i] != cls) continue;
+                        const uint64_t object = at + i * 8;
+                        ++objects;
+                        int32_t ids[2]{};
+                        for (int k = 0; k < 2; ++k) {
+                            const uint64_t native = native_of(rpm<uint64_t>(object + 0x38 + uint64_t(k) * 8));
+                            if (native && plausible(rpm<uint64_t>(native))) ids[k] = rpm<int32_t>(native + v100::native_instance_id);
+                        }
+                        diag::log("CHAMS", "outline effect rdj=0x%llx mask materials: +0x38 id %d, +0x40 id %d",
+                                  (unsigned long long)object, ids[0], ids[1]);
+                        if (!ids[0] && !ids[1]) continue;
+                        g_mask_ids[0] = ids[0];
+                        g_mask_ids[1] = ids[1];
+                        return;
+                    }
+                }
+                at += chunk;
+            }
+        }
+        diag::log("WARN", "CHAMS outline effect: %d rdj objects, none with materials yet (class 0x%llx)", objects, (unsigned long long)cls);
+    }
+
     // uGUI's own default material: Graphic.s_DefaultUI, the first static field of
     // UnityEngine.UI.Graphic. The class is found among libunity's TypeInfo globals by its Il2Cpp
     // name; the static must be a material (native object with a non-zero instance id).
@@ -255,7 +323,16 @@ namespace chams {
     inline int32_t desired_id(uint64_t bindings, bool through_walls = true) {
         int source = 0;
         int32_t id = 0;
-        if (through_walls && cfg::chams::through_walls && (id = g_ui_material.load())) source = 3;
+        if (through_walls && cfg::chams::through_walls) {
+            // The chosen wall material first, then the others.
+            const int pick = std::clamp(cfg::chams::wall_material, 0, 2);
+            const int order[3][3] = {{0, 1, 2}, {1, 0, 2}, {2, 0, 1}};
+            for (int k = 0; k < 3 && !id; ++k) {
+                const int which = order[pick][k];
+                id = which < 2 ? g_mask_ids[which].load() : g_ui_material.load();
+                if (id) source = which < 2 ? 4 + which : 3;
+            }
+        }
         if (!id && cfg::chams::material != 0) {
             const int mode = cfg::chams::material;
             id = material_id(bindings, mode == 1 ? v100::bindings_untouchable_material : v100::bindings_outline_material);
@@ -265,9 +342,10 @@ namespace chams {
         int& logged = g_logged_sources[through_walls ? 0 : 1];
         if (source != logged) {
             logged = source;
-            static const char* names[] = {"flat (id 0)", "untouchable", "outline", "Unity default UI (through walls)"};
+            static const char* names[] = {"flat (id 0)", "untouchable", "outline", "Unity default UI (through walls)",
+                                          "outline mask +0x38 (through walls)", "outline mask +0x40 (through walls)"};
             diag::log("CHAMS", "%s targets: %s, id %d%s", through_walls ? "player" : "local", names[source], id,
-                      through_walls && cfg::chams::through_walls && source != 3 ? " (through-walls material not found)" : "");
+                      through_walls && cfg::chams::through_walls && source < 3 ? " (through-walls material not found)" : "");
         }
         return id;
     }
@@ -342,11 +420,7 @@ namespace chams {
     // ---- targets ------------------------------------------------------------------------------
     enum Target { Enemy, Teammate, LocalBody, LocalArms, LocalWeapon, kTargets };
     inline const char* const kTargetNames[kTargets] = {"enemy", "teammate", "local body", "local arms", "local weapon"};
-    // Set by third person (CLocalView.hpp) while it hides the first-person arms and weapon.
-    inline bool g_tp_hides_first_person = false;
-
     inline bool target_on(Target t) {
-        if (g_tp_hides_first_person && (t == LocalArms || t == LocalWeapon)) return false;
         switch (t) {
             case Enemy: return cfg::chams::enemies;
             case Teammate: return cfg::chams::teammates;
@@ -383,8 +457,10 @@ namespace chams {
     // Once per frame with every player of the match.
     inline void tick(const std::vector<uint64_t>& players, uint64_t local, int local_team) {
         if (g_pid != proc::pid) {
-            if (g_resolving.load() || g_weapon_scanning.load()) return;
+            if (g_resolving.load() || g_weapon_scanning.load() || g_mask_scanning.load()) return;
             g_pid = proc::pid;
+            g_mask_ids[0] = g_mask_ids[1] = 0;
+            g_last_mask_scan = 0;
             g_data_offset = -1;
             g_size_offset = -1;
             g_ui_material = 0;
@@ -425,6 +501,14 @@ namespace chams {
                 g_weapon_owner = local_bindings;
                 g_weapon_scanning = false;
             }).detach();
+        }
+
+        // The outline effect's mask materials: searched on a worker, again every 30 s until found.
+        if (cfg::chams::through_walls && !g_mask_ids[0].load() && !g_mask_ids[1].load() && !g_mask_scanning.load() &&
+            now - g_last_mask_scan > 30000) {
+            g_last_mask_scan = now;
+            g_mask_scanning = true;
+            std::thread([] { resolve_outline_masks(); g_mask_scanning = false; }).detach();
         }
 
         if (now - g_last_apply < 200) return;
@@ -473,6 +557,6 @@ namespace chams {
     }
 
     inline void wait() {
-        while (g_resolving.load() || g_weapon_scanning.load()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        while (g_resolving.load() || g_weapon_scanning.load() || g_mask_scanning.load()) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
 }
