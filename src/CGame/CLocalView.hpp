@@ -16,6 +16,7 @@
 #include "COffsets.hpp"
 #include "CIcalls.hpp"
 #include "CChams.hpp"
+#include "CSceneNode.hpp"
 #include "CThirdPerson.hpp"
 #include "CPlayer.hpp"
 #include "../CUtils/CArm64.hpp"
@@ -299,29 +300,118 @@ namespace localview {
         if (rpm<uint32_t>(main + uint64_t(off)) != want) wpm<uint32_t>(main + uint64_t(off), want);
     }
 
-    // Chams layer pass, once per frame with the enemies' body renderers. Their GameObjects are put on
-    // an unused layer (written straight into the native GameObject, +0x40) that the main camera
-    // leaves out and the first-person camera draws after clearing depth: drawn over the world, through
-    // walls, with the real mesh, animation and materials. Originals are put back when it is switched
-    // off. Whether Unity honors a plain layer write for already-registered renderers shows in the
-    // log: "layer pass: N renderers moved" and whether the enemies still show in the main view.
+    // Chams layer pass, once per frame. The enemies' scene layer is changed to an unused layer (30) that
+    // the main camera leaves out and the first-person camera draws after clearing depth: drawn over the
+    // world, through walls, with the real mesh, animation and materials. The scene's own copy of the
+    // layer is what Unity culls with (the GameObject's layer is not re-read), it is found by
+    // CSceneNode.hpp from renderers whose layer is known and verified against all of them.
+    // Originals are put back when the pass is switched off or the cheat exits.
     inline constexpr uint32_t kMoveLayer = 30;
-    struct Moved { uint64_t renderer{}, vtable{}; uint32_t original{}; };
-    inline std::unordered_map<uint64_t, Moved> g_moved;  // GameObject -> what it was
+    struct NodeMoved { uint64_t vtable{}; int index{}; uint32_t original{}; uint32_t written{}; };
+    inline std::unordered_map<uint64_t, NodeMoved> g_node_moved;  // renderer -> what its node was
+    inline scenenode::Layout g_layout;
+    inline std::vector<scenenode::Ref> g_anchor_refs;             // renderers the layout was verified with
+    inline std::atomic<bool> g_calibrating{false};
+    inline long long g_last_calibration = 0;
+    inline int g_calibration_tries = 0;
+
+    // Real third-person body: the arms' scene node is handed to the body renderer.
+    struct Transplant {
+        bool active{};
+        uint64_t body{}, arms{}, body_vtable{}, arms_vtable{}, slot{}, bindings{};
+        int index{};
+        uint32_t body_index_high{}, arms_index_high{};
+        uint32_t layer_before{};
+        uint64_t flag_addr{}; int flag_bit{-1}; bool flag_was_set{};
+    };
+    inline Transplant g_transplant;
+    inline bool g_transplant_failed = false;
 
     inline void release_layers() {
-        for (const auto& e : g_moved) {
-            const Moved& m = e.second;
-            if (rpm<uint64_t>(m.renderer) == m.vtable && rpm<uint32_t>(e.first + 0x40) == kMoveLayer)
-                wpm<uint32_t>(e.first + 0x40, m.original);
+        if (g_layout.ok) {
+            for (const auto& e : g_node_moved) {
+                const NodeMoved& m = e.second;
+                if (rpm<uint64_t>(e.first) == m.vtable && scenenode::index_of(e.first) == m.index &&
+                    scenenode::read_field(g_layout, m.index) == m.written)
+                    scenenode::write_field(g_layout, m.index, m.original);
+            }
         }
-        g_moved.clear();
+        g_node_moved.clear();
     }
 
-    inline void layer_pass_tick(uint64_t main, const std::vector<uint64_t>& enemy_renderers) {
+    // Worker: renderers with known layers -> the layer field of the scene.
+    inline void calibrate_scene(std::vector<uint64_t> players, uint64_t local, int local_team) {
+        const uint64_t bindings = local ? chams::bindings_of(local) : 0;
+        std::vector<uint64_t> enemies, mates, arms, weapons;
+        for (uint64_t p : players) {
+            if (!p || p == local || player::health(p) <= 0) continue;
+            const uint64_t r = chams::renderer_of(p);
+            if (!r) continue;
+            (player::team(p) == local_team ? mates : enemies).push_back(r);
+        }
+        if (bindings) {
+            for (uint64_t field : {v100::bindings_arms_renderer, v100::bindings_gloves_renderer})
+                if (const uint64_t r = chams::native_of(rpm<uint64_t>(bindings + field))) arms.push_back(r);
+            for (uint64_t object : chams::scan_weapons(bindings)) chams::weapon_renderers(object, weapons);
+        }
+        std::vector<scenenode::Ref> refs, first_person;
+        std::unordered_map<uint64_t, bool> seen;
+        auto add = [&](uint64_t r, bool fp) {
+            if (!r || !seen.emplace(r, true).second) return;
+            const int index = scenenode::index_of(r), layer = chams::layer_of(r);
+            if (index < 0 || layer < 0) return;
+            refs.push_back({r, index, layer});
+            if (fp) first_person.push_back(refs.back());
+        };
+        for (uint64_t r : arms) add(r, true);
+        for (uint64_t r : weapons) add(r, true);
+        for (uint64_t r : enemies) add(r, false);
+        for (uint64_t r : mates) add(r, false);
+        int eights = 0, zeros = 0;
+        for (const auto& r : refs) { eights += r.layer == 8; zeros += r.layer == 0; }
+        scenenode::Layout layout;
+        const bool ok = scenenode::calibrate(refs, layout);
+        if (ok) {
+            g_anchor_refs = first_person.size() > 4 ? std::vector<scenenode::Ref>(first_person.begin(), first_person.begin() + 4) : first_person;
+            g_layout = layout;
+            diag::log("CHAMS", "scene layer field found: %s, %s %s%d byte(s), %s (verified on %d renderers)", layout.how,
+                      layout.soa ? "array" : "nodes", layout.soa ? "" : "stride ", layout.stride, layout.mask ? "mask" : "layer", layout.refs);
+        } else {
+            diag::log("CHAMS", "scene layer field NOT found (%zu renderers: %d on layer 8, %d on layer 0, %zu weapon parts)", refs.size(), eights, zeros, weapons.size());
+        }
+    }
+
+    // The scene layout, searched on a worker when needed. True when it is known and still verified.
+    inline bool ensure_layout(const std::vector<uint64_t>& players, uint64_t local, int local_team) {
+        if (g_calibrating.load()) return false;
+        const long long now = diag::now_ms();
+        static long long check_stamp = 0;
+        if (g_layout.ok && now - check_stamp > 1000) {
+            check_stamp = now;
+            if (!scenenode::still_valid(g_layout, g_anchor_refs)) {
+                diag::log("CHAMS", "scene layer field no longer matches the first-person renderers: searching again");
+                g_node_moved.clear();  // the arrays moved: nothing safe to restore
+                g_layout = {};
+                g_transplant = {};
+            }
+        }
+        if (g_layout.ok) return true;
+        if (g_calibration_tries >= 4 || now - g_last_calibration < 20000) return false;
+        ++g_calibration_tries;
+        g_last_calibration = now;
+        g_calibrating = true;
+        std::thread([players, local, local_team] {
+            calibrate_scene(players, local, local_team);
+            g_calibrating = false;
+        }).detach();
+        return false;
+    }
+
+    inline void layer_pass_tick(uint64_t main, const std::vector<uint64_t>& enemy_renderers, const std::vector<uint64_t>& players,
+                                uint64_t local, int local_team) {
         const bool want = cfg::chams::enabled && cfg::chams::layer_pass && main && !enemy_renderers.empty();
         if (!want) {
-            if (g_layer_move || !g_moved.empty()) {
+            if (g_layer_move || !g_node_moved.empty()) {
                 release_layers();
                 g_layer_move = 0;
                 apply_masks(main ? main : g_main_for);
@@ -329,7 +419,7 @@ namespace localview {
             }
             return;
         }
-        if (g_busy.load() || thirdperson::g_mask_resolving.load()) return;
+        if (g_busy.load() || g_calibrating.load() || thirdperson::g_mask_resolving.load()) return;
         if (thirdperson::g_mask_offset.load() < 0) {
             thirdperson::g_mask_resolving = true;
             std::thread([main] { thirdperson::resolve_mask(main); thirdperson::g_mask_resolving = false; }).detach();
@@ -341,33 +431,119 @@ namespace localview {
             return;
         }
         if (g_view_cameras.empty()) return;
+        if (!ensure_layout(players, local, local_team)) return;
 
+        const uint32_t value = scenenode::expect(int(kMoveLayer), g_layout.mask);
         std::unordered_map<uint64_t, bool> current;
         for (uint64_t r : enemy_renderers) {
-            const uint64_t go = rpm<uint64_t>(r + 0x20);
-            if (!plausible(go)) continue;
-            current[go] = true;
-            const uint32_t layer = rpm<uint32_t>(go + 0x40);
-            if (layer == kMoveLayer) continue;
-            if (layer >= 32) continue;  // not a GameObject
-            g_moved[go] = {r, rpm<uint64_t>(r), layer};
-            wpm<uint32_t>(go + 0x40, kMoveLayer);
+            const int index = scenenode::index_of(r);
+            if (index < 0) continue;
+            current[r] = true;
+            const uint32_t now_value = scenenode::read_field(g_layout, index);
+            if (now_value == value) continue;
+            if (now_value != scenenode::expect(0, g_layout.mask)) continue;  // not the layer an enemy has: leave it
+            g_node_moved[r] = {rpm<uint64_t>(r), index, now_value, value};
+            scenenode::write_field(g_layout, index, value);
         }
-        for (auto it = g_moved.begin(); it != g_moved.end();) {  // players that are no longer enemies
+        for (auto it = g_node_moved.begin(); it != g_node_moved.end();) {  // players that are no longer enemies
             if (current.count(it->first)) { ++it; continue; }
-            if (rpm<uint64_t>(it->second.renderer) == it->second.vtable && rpm<uint32_t>(it->first + 0x40) == kMoveLayer)
-                wpm<uint32_t>(it->first + 0x40, it->second.original);
-            it = g_moved.erase(it);
+            const NodeMoved& m = it->second;
+            if (rpm<uint64_t>(it->first) == m.vtable && scenenode::index_of(it->first) == m.index &&
+                scenenode::read_field(g_layout, m.index) == m.written)
+                scenenode::write_field(g_layout, m.index, m.original);
+            it = g_node_moved.erase(it);
         }
         const uint32_t move = 1u << kMoveLayer;
         static size_t logged = size_t(-1);
-        if (g_layer_move != move || logged != g_moved.size()) {
+        if (g_layer_move != move || logged != g_node_moved.size()) {
             g_layer_move = move;
-            logged = g_moved.size();
-            diag::log("CHAMS", "layer pass: %zu enemy renderers moved to layer %u (main camera leaves it out, first-person camera draws it)",
-                      g_moved.size(), kMoveLayer);
+            logged = g_node_moved.size();
+            diag::log("CHAMS", "layer pass: %zu enemy renderers on layer %u in the scene (main camera leaves it out, first-person camera draws it)",
+                      g_node_moved.size(), kMoveLayer);
         }
         apply_masks(main);
+    }
+
+    // ---- real third-person body ---------------------------------------------------------------------
+    // The body renderer is not in the render scene (scene index -1) and registering it needs the game's
+    // allocator. The first-person arms ARE in it, and are not wanted in third person. Their scene node is
+    // handed over: the node's renderer pointer becomes the body renderer, the body takes the arms' scene
+    // index (and the arms the "not registered" value the body had), the node's layer becomes 0 so the main
+    // camera draws it, and the body's enabled flag is set. Everything is put back when third person ends.
+    // Needs a scene layout with renderer pointers (node array) from CSceneNode.hpp.
+    inline void transplant_off() {
+        const Transplant t = g_transplant;
+        g_transplant = {};
+        if (!t.active) return;
+        const bool same = rpm<uint64_t>(t.body) == t.body_vtable && rpm<uint64_t>(t.arms) == t.arms_vtable;
+        if (same && g_layout.ok && rpm<uint64_t>(t.slot) == t.body) {
+            wpm<uint64_t>(t.slot, t.arms);
+            scenenode::write_field(g_layout, t.index, t.layer_before);
+            wpm<uint32_t>(t.arms + scenenode::kIndexField, uint32_t(t.index));
+            wpm<uint32_t>(t.body + scenenode::kIndexField, 0xFFFFFFFFu);
+            if (t.flag_addr && !t.flag_was_set) wpm<uint8_t>(t.flag_addr, uint8_t(rpm<uint8_t>(t.flag_addr) & ~(1 << t.flag_bit)));
+            diag::log("TP", "scene node %d handed back to the arms", t.index);
+        } else {
+            diag::log("TP", "body hand-over dropped: the renderers changed (respawn), nothing to restore");
+        }
+    }
+
+    inline void transplant_tick(bool want, uint64_t local, const std::vector<uint64_t>& players, int local_team) {
+        if (!want || !local) { if (g_transplant.active) transplant_off(); return; }
+        if (g_transplant_failed || g_busy.load()) return;
+        static long long stamp = 0;
+        const long long now = diag::now_ms();
+        Transplant& t = g_transplant;
+        if (t.active) {
+            // Per frame: only cheap checks. The game must not have taken the node back.
+            if (rpm<uint64_t>(t.slot) != t.body || rpm<uint64_t>(t.body) != t.body_vtable) { transplant_off(); return; }
+            if (scenenode::read_field(g_layout, t.index) != scenenode::expect(0, g_layout.mask))
+                scenenode::write_field(g_layout, t.index, scenenode::expect(0, g_layout.mask));
+            if (now - stamp > 500) {  // a respawn gives the player new renderers
+                stamp = now;
+                if (chams::bindings_of(local) != t.bindings) transplant_off();
+            }
+            return;
+        }
+        if (now - stamp < 500) return;
+        stamp = now;
+        if (!ensure_layout(players, local, local_team)) return;
+        if (g_layout.soa) {
+            diag::log("TP", "real body needs the scene's renderer pointers, the layout found is a flat array: overlay stays");
+            g_transplant_failed = true;
+            return;
+        }
+        const uint64_t bindings = chams::bindings_of(local);
+        if (!bindings) return;
+        const uint64_t body = chams::native_of(rpm<uint64_t>(bindings + v100::bindings_character_renderer));
+        const uint64_t arms = chams::native_of(rpm<uint64_t>(bindings + v100::bindings_arms_renderer));
+        const int index = arms ? scenenode::index_of(arms) : -1;
+        const uint32_t body_low = body ? rpm<uint32_t>(body + scenenode::kIndexField) : 0;
+        const uint64_t slot = index >= 0 ? g_layout.base + uint64_t(index) * uint64_t(g_layout.stride) : 0;
+        if (!body || !arms || index < 0 || body_low != 0xFFFFFFFFu || rpm<uint64_t>(slot) != arms) {
+            diag::log("TP", "body hand-over not possible: body index 0x%08x, arms index %d, node holds 0x%llx (arms 0x%llx)", body_low, index,
+                      (unsigned long long)(slot ? rpm<uint64_t>(slot) : 0), (unsigned long long)arms);
+            return;
+        }
+        t = {};
+        t.body = body; t.arms = arms; t.bindings = bindings; t.index = index; t.slot = slot;
+        t.body_vtable = rpm<uint64_t>(body);
+        t.arms_vtable = rpm<uint64_t>(arms);
+        t.layer_before = scenenode::read_field(g_layout, index);
+        // The flag first (an interpreter run), then the swap, short together.
+        uint64_t flag_addr = 0;
+        int flag_bit = -1;
+        if (g_enabled_getter && is_enabled(body) == 0 && find_flag(body, flag_addr, flag_bit)) {
+            t.flag_addr = flag_addr; t.flag_bit = flag_bit;
+        }
+        wpm<uint32_t>(body + scenenode::kIndexField, uint32_t(index));
+        wpm<uint32_t>(arms + scenenode::kIndexField, 0xFFFFFFFFu);
+        wpm<uint64_t>(slot, body);
+        scenenode::write_field(g_layout, index, scenenode::expect(0, g_layout.mask));
+        if (t.flag_addr) wpm<uint8_t>(t.flag_addr, uint8_t(rpm<uint8_t>(t.flag_addr) | (1 << t.flag_bit)));
+        t.active = true;
+        diag::log("TP", "body hand-over: scene node %d now holds the body renderer 0x%llx (arms 0x%llx unregistered), layer %u -> 0, enabled flag %s",
+                  index, (unsigned long long)body, (unsigned long long)arms, t.layer_before, t.flag_addr ? "set" : "not found");
     }
 
     // ---- materials ----------------------------------------------------------------------------
@@ -464,7 +640,7 @@ namespace localview {
             chams::resolve(body);
             chams::g_resolving = false;
         }
-        if (body && (!cfg::chams::enabled || !cfg::chams::local_body)) {
+        if (body && cfg::thirdperson::flat_body && (!cfg::chams::enabled || !cfg::chams::local_body)) {
             const bool ok = patch_material(body, 0);
             if (!g_logged_material) { g_logged_material = true; diag::log("TP", "body material -> flat (id 0): %s", ok ? "ok" : "failed"); }
         } else if (!g_materials.empty()) {
@@ -476,6 +652,8 @@ namespace localview {
     inline void tick(uint64_t local, bool active, uint64_t camera = 0) {
         if (g_pid != proc::pid) {
             if (g_busy.load()) return;
+            g_transplant = {};
+            g_transplant_failed = false;
             g_pid = proc::pid;
             g_active = false;
             g_dumped_for = 0;
@@ -484,7 +662,9 @@ namespace localview {
             g_enabled_body = g_checked_body = 0;
             g_hide_first_person = false;
             g_layer_move = 0;
-            g_moved.clear();
+            g_node_moved.clear();
+            g_layout = {};
+            g_calibration_tries = 0;
             g_main_for = 0;
             g_flag_addr = 0;
             g_flag_bit = -1;

@@ -30,7 +30,8 @@ void visuals::draw() {
     if (!any) {
         chams::tick({}, 0, 0);
         chams::occlusion_tick(0);
-        localview::layer_pass_tick(0, {});
+        localview::layer_pass_tick(0, {}, {}, 0, 0);
+        localview::transplant_tick(false, 0, {}, 0);
         matrix unused{};
         thirdperson::tick(nullptr, unused);
         localview::tick(0, false);
@@ -49,7 +50,8 @@ void visuals::draw() {
             thirdperson::tick(nullptr, unused);
             localview::tick(0, false);
             chams::occlusion_tick(0);
-            localview::layer_pass_tick(0, {});
+            localview::layer_pass_tick(0, {}, {}, 0, 0);
+            localview::transplant_tick(false, 0, {}, 0);
         }
     } tp_guard;
     std::vector<uint64_t> Players = players();
@@ -135,7 +137,8 @@ void visuals::draw() {
         tp_guard.active = thirdperson::tick(&GameCamera, ViewMatrix);
         tp_guard.ticked = true;
         chams::occlusion_tick(GameCamera.native);
-        localview::layer_pass_tick(GameCamera.native, chams::g_enemy_renderers);
+        localview::layer_pass_tick(GameCamera.native, chams::g_enemy_renderers, Players, LocalPlayer, LocalTeam);
+        localview::transplant_tick(tp_guard.active && cfg::thirdperson::show_body && cfg::thirdperson::real_model, LocalPlayer, Players, LocalTeam);
         localview::tick(LocalPlayer, tp_guard.active, GameCamera.native);
         if (g_camera != GameCamera.native)
             diag::log("CAMERA", "selected game camera native=0x%llx holder=0x%llx", (unsigned long long)GameCamera.native,
@@ -297,7 +300,7 @@ void visuals::draw() {
     if (tp_guard.active) animate.push_back(LocalPlayer);
     animcull::tick(animate, !animate.empty());
     if (posed) draw_skeletons(ViewMatrix, ProjectionMatrix, enemy_objects);
-    if (tp_guard.active && cfg::thirdperson::show_body && cfg::thirdperson::model_overlay)
+    if (tp_guard.active && cfg::thirdperson::show_body && cfg::thirdperson::model_overlay && !localview::g_transplant.active)
         draw_local_model(ViewMatrix, ProjectionMatrix, LocalPlayer);
     draw_world_items(ViewMatrix, ProjectionMatrix, LocalPosition);
 

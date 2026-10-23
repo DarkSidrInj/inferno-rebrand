@@ -54,6 +54,8 @@ namespace thirdperson {
     inline float side = 0.f;        // meters to the right (negative: left shoulder)
     inline bool show_body = true;   // draw the own body, hide first-person arms, gloves and weapon
     inline bool try_enable_body = false;  // replay the game's set_enabled on the body renderer once (fails on device)
+    inline bool real_model = true;     // hand the arms' scene node to the body renderer (the game's own mesh and skin)
+    inline bool flat_body = false;     // flat white body material instead of the real skin
     inline bool model_overlay = true;  // draw the own character from its bones (its real renderer is not in the scene)
     inline ImVec4 model_col = ImVec4(.86f, .91f, 1.f, 1.f);
     inline ImVec4 model_outline_col = ImVec4(0.f, 0.f, 0.f, 1.f);

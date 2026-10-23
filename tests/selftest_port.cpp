@@ -12,6 +12,7 @@
 #include "CGame/CThirdPerson.hpp"
 #include "CGame/CAntiAim.hpp"
 #include "CGame/CLocalView.hpp"
+#include "CGame/CSceneNode.hpp"
 #include "fixtures/rs_accessors.h"
 #include "CConfigs/CConfig.hpp"
 #include <sys/mman.h>
@@ -816,6 +817,7 @@ int main() {
 
             cfg::thirdperson::show_body = true;
             cfg::thirdperson::try_enable_body = true;
+            cfg::thirdperson::flat_body = true;
             cfg::chams::enabled = false;
             localview::g_pid = -1;
             localview::tick(me, true, reinterpret_cast<uint64_t>(main_cam));
@@ -843,29 +845,102 @@ int main() {
                       "enabled flag found: +0x%llx bit %d", (unsigned long long)(addr - reinterpret_cast<uint64_t>(body)), bit);
             }
 
-            // Chams layer pass: enemy bodies move to layer 30; the main camera leaves it out and the
-            // first-person camera draws it.
-            {
-                uint8_t* go = static_cast<uint8_t*>(calloc(1, 0x100));
-                uint8_t* enemy_r = static_cast<uint8_t*>(calloc(1, 0x200));
-                *reinterpret_cast<uint64_t*>(enemy_r) = reinterpret_cast<uint64_t>(enemy_r) + 0x1F0;
-                *reinterpret_cast<uint64_t*>(enemy_r + 0x20) = reinterpret_cast<uint64_t>(go);
-                *reinterpret_cast<uint32_t*>(go + 0x40) = 0;
-                auto layer_of_go = [&] { return *reinterpret_cast<uint32_t*>(go + 0x40); };
-                const std::vector<uint64_t> enemies_r{reinterpret_cast<uint64_t>(enemy_r)};
+            // Chams layer pass: the scene keeps its own layer per renderer (indexed by renderer+0x198). The
+            // layout is found from renderers with known layers, then enemies move to layer 30 in the scene.
+            for (int shape = 0; shape < 2; ++shape) {  // 0: array of nodes with a layer mask, 1: flat byte array
+                const size_t kBlock = 0x20000;
+                uint8_t* scene = static_cast<uint8_t*>(aligned_alloc(16, kBlock));
+                uint32_t noise = 12345u + uint32_t(shape);
+                for (size_t i = 0; i < kBlock; ++i) { noise = noise * 1664525u + 1013904223u; scene[i] = uint8_t(noise >> 24); }
+                const int kStride = 96, kPtr = 8, kField = 0x30;  // node: pointer at +8, layer mask at +0x30
+                auto make_ref = [&](int index, int layer) {
+                    uint8_t* r = static_cast<uint8_t*>(calloc(1, 0x300));
+                    *reinterpret_cast<uint64_t*>(r) = reinterpret_cast<uint64_t>(r) + 0x2F0;
+                    uint8_t* go = static_cast<uint8_t*>(calloc(1, 0x100));
+                    *reinterpret_cast<uint32_t*>(go + 0x40) = uint32_t(layer);
+                    *reinterpret_cast<uint64_t*>(r + 0x20) = reinterpret_cast<uint64_t>(go);
+                    *reinterpret_cast<int32_t*>(r + 0x198) = index;
+                    if (shape == 0) {
+                        uint8_t* node = scene + 0x400 + size_t(index) * kStride;
+                        *reinterpret_cast<uint64_t*>(node + kPtr) = reinterpret_cast<uint64_t>(r);
+                        *reinterpret_cast<uint32_t*>(node + kField) = 1u << layer;
+                    } else {
+                        scene[0x400 + index] = uint8_t(layer);
+                    }
+                    return r;
+                };
+                std::vector<uint64_t> enemies_r, mates_r, arms_r;
+                std::vector<uint8_t*> enemy_ptrs;
+                const int enemy_index[] = {7, 19, 23, 31}, mate_index[] = {11, 13, 29}, arm_index[] = {41, 42};
+                for (int idx : enemy_index) { uint8_t* r = make_ref(idx, 0); enemy_ptrs.push_back(r); enemies_r.push_back(reinterpret_cast<uint64_t>(r)); }
+                for (int idx : mate_index) mates_r.push_back(reinterpret_cast<uint64_t>(make_ref(idx, 0)));
+                for (int idx : arm_index) arms_r.push_back(reinterpret_cast<uint64_t>(make_ref(idx, 8)));
+                if (shape == 1)  // a flat array needs more renderers to be unambiguous: add layer-8 parts
+                    for (int idx = 50; idx < 60; ++idx) arms_r.push_back(reinterpret_cast<uint64_t>(make_ref(idx, 8)));
+                std::vector<scenenode::Ref> refs;
+                for (uint64_t r : arms_r) refs.push_back({r, scenenode::index_of(r), 8});
+                for (uint64_t r : enemies_r) refs.push_back({r, scenenode::index_of(r), 0});
+                for (uint64_t r : mates_r) refs.push_back({r, scenenode::index_of(r), 0});
+                g_scan_maps = {remote_map{reinterpret_cast<uint64_t>(scene), reinterpret_cast<uint64_t>(scene) + kBlock, true}};
+                auto node_value = [&](int idx) -> uint32_t {
+                    if (shape == 0) return *reinterpret_cast<uint32_t*>(scene + 0x400 + size_t(idx) * kStride + kField);
+                    return scene[0x400 + idx];
+                };
+                scenenode::Layout found;
+                const bool calibrated = scenenode::calibrate(refs, found);
+                CHECK(calibrated && found.ok && found.soa == (shape == 1) && found.mask == (shape == 0),
+                      "scene layout found (shape %d): ok %d soa %d mask %d width %d stride %d rel %d", shape, found.ok,
+                      found.soa, found.mask, found.width, found.stride, found.rel);
+                localview::g_layout = found;
+                localview::g_anchor_refs.assign(refs.begin(), refs.begin() + 2);
                 cfg::chams::enabled = true; cfg::chams::layer_pass = true;
-                localview::layer_pass_tick(reinterpret_cast<uint64_t>(main_cam), enemies_r);
-                CHECK(layer_of_go() == 30 && mask_of(main_cam) == (0xFFFFFEFFu & ~(1u << 30)) && mask_of(view_cam) == (0x100u | (1u << 30)),
-                      "layer pass applied: layer %u, masks 0x%08x 0x%08x", layer_of_go(), mask_of(main_cam), mask_of(view_cam));
-                localview::layer_pass_tick(reinterpret_cast<uint64_t>(main_cam), {});  // no enemies left in the list: put back
-                CHECK(layer_of_go() == 0 && mask_of(main_cam) == 0xFFFFFEFFu, "layer pass releases a player that left (layer %u)", layer_of_go());
-                localview::layer_pass_tick(reinterpret_cast<uint64_t>(main_cam), enemies_r);
+                localview::layer_pass_tick(reinterpret_cast<uint64_t>(main_cam), enemies_r, {}, 0, 0);
+                const uint32_t moved = shape == 0 ? (1u << 30) : 30u;
+                const uint32_t original = shape == 0 ? 1u : 0u;
+                CHECK(node_value(7) == moved && node_value(19) == moved && node_value(23) == moved && node_value(31) == moved,
+                      "enemy nodes moved to layer 30 (%u %u)", node_value(7), node_value(31));
+                CHECK(node_value(11) == original && node_value(41) == (shape == 0 ? 0x100u : 8u), "teammates and arms untouched (%u %u)", node_value(11), node_value(41));
+                CHECK(mask_of(main_cam) == (0xFFFFFEFFu & ~(1u << 30)) && mask_of(view_cam) == (0x100u | (1u << 30)),
+                      "masks: main 0x%08x, first-person 0x%08x", mask_of(main_cam), mask_of(view_cam));
+                localview::layer_pass_tick(reinterpret_cast<uint64_t>(main_cam), {}, {}, 0, 0);   // enemies gone: nodes put back
+                CHECK(node_value(7) == original && mask_of(main_cam) == 0xFFFFFEFFu, "nodes put back when the list is empty (%u)", node_value(7));
+                localview::layer_pass_tick(reinterpret_cast<uint64_t>(main_cam), enemies_r, {}, 0, 0);
                 cfg::chams::layer_pass = false;
-                localview::layer_pass_tick(reinterpret_cast<uint64_t>(main_cam), enemies_r);
-                CHECK(layer_of_go() == 0 && mask_of(main_cam) == 0xFFFFFEFFu && mask_of(view_cam) == 0x100u,
-                      "layer pass off restores all (layer %u, 0x%08x 0x%08x)", layer_of_go(), mask_of(main_cam), mask_of(view_cam));
+                localview::layer_pass_tick(reinterpret_cast<uint64_t>(main_cam), enemies_r, {}, 0, 0);
+                CHECK(node_value(19) == original && node_value(31) == original && mask_of(main_cam) == 0xFFFFFEFFu && mask_of(view_cam) == 0x100u,
+                      "layer pass off restores nodes and masks (%u, 0x%08x 0x%08x)", node_value(19), mask_of(main_cam), mask_of(view_cam));
                 cfg::chams::enabled = false;
+                if (shape == 0) {
+                    // Real body: the arms' node is handed to the body renderer and back.
+                    const int arms_idx = 60;
+                    uint8_t* arms_node = scene + 0x400 + size_t(arms_idx) * kStride;
+                    *reinterpret_cast<uint64_t*>(arms_node + kPtr) = reinterpret_cast<uint64_t>(arms);
+                    *reinterpret_cast<uint32_t*>(arms_node + kField) = 0x100u;
+                    *reinterpret_cast<int32_t*>(arms + 0x198) = arms_idx;
+                    *reinterpret_cast<int32_t*>(body + 0x198) = -1;
+                    localview::g_layout = found;
+                    localview::g_anchor_refs.clear();
+                    localview::g_transplant = {};
+                    localview::g_transplant_failed = false;
+                    localview::transplant_tick(true, me, {}, 1);
+                    CHECK(localview::g_transplant.active && *reinterpret_cast<uint64_t*>(arms_node + kPtr) == reinterpret_cast<uint64_t>(body),
+                          "arms node holds the body renderer");
+                    CHECK(*reinterpret_cast<int32_t*>(body + 0x198) == arms_idx && *reinterpret_cast<int32_t*>(arms + 0x198) == -1,
+                          "scene indices swapped (%d %d)", *reinterpret_cast<int32_t*>(body + 0x198), *reinterpret_cast<int32_t*>(arms + 0x198));
+                    CHECK(*reinterpret_cast<uint32_t*>(arms_node + kField) == 1u && enabled_bit(body) == 1,
+                          "node layer 0, body enabled (%u, %d)", *reinterpret_cast<uint32_t*>(arms_node + kField), enabled_bit(body));
+                    localview::transplant_tick(true, me, {}, 1);  // nothing to redo
+                    localview::transplant_tick(false, me, {}, 1);
+                    CHECK(!localview::g_transplant.active && *reinterpret_cast<uint64_t*>(arms_node + kPtr) == reinterpret_cast<uint64_t>(arms) &&
+                          *reinterpret_cast<int32_t*>(arms + 0x198) == arms_idx && *reinterpret_cast<int32_t*>(body + 0x198) == -1 &&
+                          *reinterpret_cast<uint32_t*>(arms_node + kField) == 0x100u && enabled_bit(body) == 0,
+                          "hand-over undone (node 0x%llx, arms %d, body %d, layer 0x%x, enabled %d)",
+                          (unsigned long long)*reinterpret_cast<uint64_t*>(arms_node + kPtr), *reinterpret_cast<int32_t*>(arms + 0x198),
+                          *reinterpret_cast<int32_t*>(body + 0x198), *reinterpret_cast<uint32_t*>(arms_node + kField), enabled_bit(body));
+                }
+                free(scene);
             }
+            g_scan_maps = {remote_map{reinterpret_cast<uint64_t>(heap), reinterpret_cast<uint64_t>(heap) + 0x1000, true}};
 
             // Chams through walls: the outline effect's mask materials, found by the rdj class pointer.
             uint8_t* rdj_class = static_cast<uint8_t*>(calloc(1, 0x300));

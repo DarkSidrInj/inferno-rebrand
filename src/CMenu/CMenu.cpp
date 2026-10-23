@@ -146,6 +146,10 @@ namespace ui::menu {
         separator(a);
         checkbox("Show own body, hide first-person arms", &cfg::thirdperson::show_body, a);
         separator(a);
+        checkbox("Real own model (experimental)", &cfg::thirdperson::real_model, a);
+        separator(a);
+        checkbox("Flat white body", &cfg::thirdperson::flat_body, a);
+        separator(a);
         checkbox("Own model overlay", &cfg::thirdperson::model_overlay, a);
         separator(a);
         colorpick("Own model color", &cfg::thirdperson::model_col, a);
