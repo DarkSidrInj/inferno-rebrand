@@ -5,6 +5,8 @@
 #include "../CGame/CCamera.hpp"
 #include "../CGame/CAnimCull.hpp"
 #include "../CGame/CChams.hpp"
+#include "../CGame/CThirdPerson.hpp"
+#include "../CGame/CAntiAim.hpp"
 #include "../CMenu/Theme/CTheme.hpp"
 #include "../CConfigs/CConfig.hpp"
 #include "../CProtection/COxorany.hpp"
@@ -22,11 +24,25 @@ static void esp_wait(const char* stage) {
 
 void visuals::draw() {
     bool any = cfg::esp::box || cfg::esp::name || cfg::esp::health || cfg::esp::distance ||
-               cfg::esp::skeleton || cfg::esp::grenade || cfg::esp::dropped || cfg::chams::enabled;
-    if (!any) { chams::tick({}, 0, 0); esp_wait("all ESP options disabled"); return; }
+               cfg::esp::skeleton || cfg::esp::grenade || cfg::esp::dropped || cfg::chams::enabled ||
+               cfg::thirdperson::enabled || cfg::antiaim::enabled;
+    if (!any) {
+        chams::tick({}, 0, 0);
+        matrix unused{};
+        thirdperson::tick(nullptr, unused);
+        antiaim::tick(0, {});
+        esp_wait("all ESP options disabled");
+        return;
+    }
 
+    // Any path that ends the frame without the game camera gives it back to the game, so a
+    // third-person matrix never stays frozen on screen.
+    struct ThirdPersonGuard {
+        bool ticked = false;
+        ~ThirdPersonGuard() { if (!ticked) { matrix unused{}; thirdperson::tick(nullptr, unused); } }
+    } tp_guard;
     std::vector<uint64_t> Players = players();
-    if (Players.empty()) { esp_wait("player discovery / registry scan"); return; }
+    if (Players.empty()) { antiaim::tick(0, {}); esp_wait("player discovery / registry scan"); return; }
     struct name_cache_entry { uint32_t id{}; std::string name; long long refreshed{}; };
     static std::unordered_map<uint64_t, name_cache_entry> name_cache;
     static size_t name_cursor = 0;
@@ -58,11 +74,12 @@ void visuals::draw() {
     }
     uint64_t LocalPlayer = 0;
     for (uint64_t p : Players) if (player::local(p)) { LocalPlayer = p; break; }
-    if (!LocalPlayer) { esp_wait("local player flag"); return; }
+    if (!LocalPlayer) { antiaim::tick(0, {}); esp_wait("local player flag"); return; }
     Vector3 LocalPosition = player::position(LocalPlayer);
     int LocalTeam = player::team(LocalPlayer);
     if (LocalTeam != 1 && LocalTeam != 2) { esp_wait("local team validation"); return; }
     chams::tick(Players, LocalPlayer, LocalTeam);
+    antiaim::tick(LocalPlayer, LocalPosition);
     if (!std::isfinite(LocalPosition.x) ||
         (LocalPosition.x == 0.f && LocalPosition.y == 0.f && LocalPosition.z == 0.f)) {
         esp_wait("local transform hierarchy"); return;
@@ -103,6 +120,9 @@ void visuals::draw() {
     if (game_camera::acquire(Players, LocalPlayer, GameCamera)) {
         ViewMatrix = GameCamera.view;
         ProjectionMatrix = GameCamera.projection;
+        // Third person owns the camera's matrix: draw with the one written this frame.
+        thirdperson::tick(&GameCamera, ViewMatrix);
+        tp_guard.ticked = true;
         if (g_camera != GameCamera.native)
             diag::log("CAMERA", "selected game camera native=0x%llx holder=0x%llx", (unsigned long long)GameCamera.native,
                       (unsigned long long)GameCamera.holder);

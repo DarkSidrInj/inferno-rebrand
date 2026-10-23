@@ -130,13 +130,14 @@ namespace player {
         return true;
     }
 
-    inline bool decode_transform_pose(uint64_t native, Vector3& position, Vector4& rotation) noexcept {
+    inline bool decode_transform_pose(uint64_t native, Vector3& position, Vector4& rotation, int index_offset = -1) noexcept {
         const auto& layout = g_transform_layout;
         if (layout.pid != proc::pid || layout.data_offset < 0) {
             if (!native_transform_position(native, position)) return false;
         }
+        if (index_offset < 0) index_offset = g_transform_layout.index_offset;
         uint64_t data = rpm<uint64_t>(native + uint64_t(g_transform_layout.data_offset));
-        int index = rpm<int>(native + uint64_t(g_transform_layout.index_offset));
+        int index = rpm<int>(native + uint64_t(index_offset));
         uint64_t entries = rpm<uint64_t>(data + uint64_t(g_transform_layout.entries_offset));
         uint64_t parents = rpm<uint64_t>(data + uint64_t(g_transform_layout.parents_offset));
         if (!plausible(data) || !plausible(entries) || !plausible(parents) || index < 0 || index > 8192) return false;

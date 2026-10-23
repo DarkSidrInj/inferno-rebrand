@@ -91,6 +91,20 @@ namespace v100 {
     inline constexpr uint64_t legacy_renderer_materials = 0x140;             // pre-Unity-6 m_Materials data (legacy chams)
     inline constexpr uint64_t canvas_default_material_injected = 0x7A6957C;  // static Canvas.GetDefaultCanvasMaterial_Injected()
 
+    // --- Third person: Camera accessors (dump.cs; the worldToCameraMatrix setter is stripped
+    //     from managed code, its native icall is looked up by name) ---------------------------
+    inline constexpr uint64_t camera_get_world_to_camera_injected = 0x6D11938;  // static get_worldToCameraMatrix_Injected(IntPtr, out Matrix4x4)
+    inline constexpr uint64_t camera_get_culling_mask_injected = 0x6D19498;     // static get_cullingMask_Injected(IntPtr)
+    inline constexpr uint64_t camera_set_culling_mask_injected = 0x6D1DAD4;     // static set_cullingMask_Injected(IntPtr, int)
+    inline constexpr uint64_t gamecam_state = 0x10;                              // nrl.jlli : ckk (camera pose the game follows)
+    inline constexpr uint64_t camstate_position = 0x10;                          // ckk.dkde.Position (ValueTransform)
+    inline constexpr uint64_t camstate_euler = 0x1C;                             // ckk.dkde.EulerAngles
+
+    // --- Anti-aim: the local aim component ios (rpi<nmj>; nmj = networked pitch/yaw floats) ---
+    inline constexpr uint64_t ios_aim_state = 0x38;                              // ios.tryh : eir (view quaternions)
+    inline constexpr uint64_t ios_pivot_a = 0x50;                                // ios.rkym : Transform
+    inline constexpr uint64_t ios_pivot_b = 0x58;                                // ios.qrhf : Transform
+
     // --- Optional TypeInfo RVAs (ARM64 libunity). 0 = unknown, class name is used. ---
     // FILL (optional): script.json -> cim_TypeInfo / qak_TypeInfo / njg_TypeInfo / xmt_TypeInfo
     inline constexpr uint64_t grenade_typeinfo = 0;

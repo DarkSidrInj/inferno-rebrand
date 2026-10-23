@@ -62,6 +62,8 @@ namespace a64 {
         int blind_stores{};    // stores through an address that was not known (cannot be replayed)
         uint64_t last_load{};  // last game address loaded from, and its size
         int last_load_size{};
+        // First 1-byte game load inside [watch_lo, watch_hi) on this path (a flag check).
+        uint64_t watch_lo{}, watch_hi{}, watch_byte{};
         uint64_t pc{};
         int steps{};
         bool returned{};
@@ -144,6 +146,7 @@ namespace a64 {
         r.src = addr;
         m.last_load = addr;
         m.last_load_size = size;
+        if (size == 1 && !m.watch_byte && addr >= m.watch_lo && addr < m.watch_hi) m.watch_byte = addr;
         uint8_t raw[16]{};
         if (!plausible(addr) || !mem_read(addr, raw, size_t(size))) return r;
         // Earlier stores on this path are visible to later loads, byte for byte, as in the game.

@@ -43,9 +43,11 @@ namespace icalls {
         "UnityEngine.Animator::get_cullingMode", "UnityEngine.Animator::set_cullingMode",
         "UnityEngine.Renderer::GetMaterialCount_Injected", "UnityEngine.Renderer::GetMaterialCount",
         "UnityEngine.Canvas::GetDefaultCanvasMaterial_Injected",
+        "UnityEngine.Camera::set_worldToCameraMatrix_Injected", "UnityEngine.Camera::get_worldToCameraMatrix_Injected",
+        "UnityEngine.Camera::get_cullingMask_Injected", "UnityEngine.Camera::set_cullingMask_Injected",
     };
     inline const char* const kPrefixes[] = {"UnityEngine.RenderSettings::", "UnityEngine.Animator::", "UnityEngine.Renderer::",
-                                           "UnityEngine.Canvas::"};
+                                           "UnityEngine.Canvas::", "UnityEngine.Camera::"};
 
     struct Segment { uint64_t begin, end; bool exec; };
     struct Candidate { std::string name; uint64_t fn; const char* how; };

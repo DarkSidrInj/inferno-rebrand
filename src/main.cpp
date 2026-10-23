@@ -5,6 +5,8 @@
 #include "CUtils/CMemory.hpp"
 #include "CGame/CGameContext.hpp"
 #include "CGame/CFog.hpp"
+#include "CGame/CThirdPerson.hpp"
+#include "CGame/CAntiAim.hpp"
 #include "CVisual/CVisualManager.hpp"
 #include "CProtection/COxorany.hpp"
 #include <cstdio>
@@ -131,6 +133,9 @@ int main() {
         usleep(vis ? 1500 : 4000);
     }
 
+    // Never leave the game with a frozen camera matrix or rotated pivots.
+    thirdperson::release();
+    antiaim::release();
     shutdown();
     return 0;
 }

@@ -9,6 +9,8 @@
 #include "CGame/CFog.hpp"
 #include "CGame/CAnimCull.hpp"
 #include "CGame/CChams.hpp"
+#include "CGame/CThirdPerson.hpp"
+#include "CGame/CAntiAim.hpp"
 #include "fixtures/rs_accessors.h"
 #include "CConfigs/CConfig.hpp"
 #include <sys/mman.h>
@@ -367,6 +369,11 @@ int main() {
         std::memcpy(unity + 0x200, sky_name, sizeof(sky_name));
         *reinterpret_cast<uint64_t*>(unity + 0x400) = reinterpret_cast<uint64_t>(unity + 0x100);
         *reinterpret_cast<uint64_t*>(unity + 0x408) = base + fx::RenderSettings_get_ambientEquatorColor_Injected;
+        // The Camera matrix setter has no managed wrapper (stripped): only its {name, fn} pair.
+        const char cam_set_name[] = "UnityEngine.Camera::set_worldToCameraMatrix_Injected";
+        std::memcpy(unity + 0x300, cam_set_name, sizeof(cam_set_name));
+        *reinterpret_cast<uint64_t*>(unity + 0x420) = reinterpret_cast<uint64_t>(unity + 0x300);
+        *reinterpret_cast<uint64_t*>(unity + 0x428) = base + fx::Camera_set_worldToCameraMatrix_Injected;
         const uint64_t site = reinterpret_cast<uint64_t>(unity + 0x1000);
         const uint64_t sky_fn = base + fx::RenderSettings_get_ambientSkyColor_Injected;
         const int64_t reach = int64_t(sky_fn) - int64_t(site);
@@ -643,6 +650,142 @@ int main() {
             chams::tick(players, local, 2);
             CHECK(enemy_ids[0] == -5000 && enemy_ids[1] == -5002 && mate_ids[0] == -6000, "materials restored (%d %d %d)",
                   enemy_ids[0], enemy_ids[1], mate_ids[0]);
+        }
+
+        // Third person: the implicit-matrix flag comes from the setter found by name (then from the
+        // getter's flag check), the culling mask from its getter; the camera keeps what is written.
+        {
+            route(v100::camera_get_world_to_camera_injected, base + fx::UnityEngine_Camera__get_worldToCameraMatrix_Injected);
+            route(v100::camera_get_culling_mask_injected, base + fx::UnityEngine_Camera__get_cullingMask_Injected);
+            route(v100::camera_set_culling_mask_injected, 0);
+            *at(fx::slot_get_world_to_camera) = base + fx::Camera_get_worldToCameraMatrix_Injected;
+            *at(fx::slot_get_culling_mask) = base + fx::Camera_get_cullingMask_Injected;
+            uint8_t* cam = static_cast<uint8_t*>(calloc(1, 0x300));
+            *reinterpret_cast<uint64_t*>(cam) = proc::lib + v100::data_relro_begin + 0x10;
+            *reinterpret_cast<uint64_t*>(cam + 0x20) = reinterpret_cast<uint64_t>(calloc(1, 0x100));
+            cam[0x240] = 1;
+            const uint32_t mask0 = 0x00FF00FF;
+            std::memcpy(cam + 0x220, &mask0, 4);
+            const Vector3 eye_pos(1.f, 2.f, 3.f), eye_euler(10.f, 30.f, 0.f);
+            uint8_t* ckk = static_cast<uint8_t*>(calloc(1, 0x60));
+            std::memcpy(ckk + v100::camstate_position, &eye_pos, 12);
+            std::memcpy(ckk + v100::camstate_euler, &eye_euler, 12);
+            uint8_t* holder = static_cast<uint8_t*>(calloc(1, 0x60));
+            *reinterpret_cast<uint64_t*>(holder + v100::gamecam_state) = reinterpret_cast<uint64_t>(ckk);
+            const Vector4 eye_q = thirdperson::euler(eye_euler);
+            const matrix live = player::view_from_pose(eye_pos, eye_q);
+            std::memcpy(cam + v100::camera_view, &live, sizeof(live));
+            const matrix proj = player::perspective(60.f, 16.f / 9.f);
+            std::memcpy(cam + v100::camera_projection, &proj, sizeof(proj));
+            game_camera::Reading reading;
+            reading.holder = reinterpret_cast<uint64_t>(holder);
+            reading.native = reinterpret_cast<uint64_t>(cam);
+            reading.view = live;
+            cfg::thirdperson::enabled = true; cfg::thirdperson::distance = 3.f; cfg::thirdperson::height = 0.f;
+            cfg::thirdperson::side = 0.f; cfg::thirdperson::show_body = true;
+            thirdperson::g_pid = -1;
+            matrix out{};
+            CHECK(!thirdperson::tick(&reading, out), "first tick only starts the resolution");
+            thirdperson::wait();
+            CHECK(thirdperson::g_flag_offset.load() == 0x240 && thirdperson::g_matrix_offset.load() == 0x70,
+                  "setter traced: flag +0x%x matrix +0x%x", thirdperson::g_flag_offset.load(), thirdperson::g_matrix_offset.load());
+            CHECK(thirdperson::g_mask_offset.load() == 0x220, "culling mask +0x%x", thirdperson::g_mask_offset.load());
+            CHECK(thirdperson::tick(&reading, out), "camera taken");
+            CHECK(thirdperson::g_source == thirdperson::State, "pose from the ckk state");
+            const Vector3 fwd = player::rotate(eye_q, Vector3(0.f, 0.f, 1.f));
+            const matrix expected = player::view_from_pose(eye_pos - fwd * 3.f, eye_q);
+            matrix written{};
+            std::memcpy(&written, cam + 0x70, sizeof(written));
+            CHECK(thirdperson::diff(out, expected) < 1e-5f && thirdperson::diff(written, expected) < 1e-5f, "third-person matrix written");
+            uint32_t mask = 0;
+            std::memcpy(&mask, cam + 0x220, 4);
+            CHECK(cam[0x240] == 0 && mask == 0xFFFFFFFFu, "flag off (%u), every layer (0x%08x)", cam[0x240], mask);
+            thirdperson::g_taken_at -= 1000;
+            thirdperson::tick(&reading, out);
+            CHECK(thirdperson::g_verified && !thirdperson::g_failed, "the matrix held");
+            cfg::thirdperson::enabled = false;
+            thirdperson::tick(&reading, out);
+            std::memcpy(&mask, cam + 0x220, 4);
+            CHECK(cam[0x240] == 1 && mask == mask0, "camera given back: flag %u mask 0x%08x", cam[0x240], mask);
+
+            // No setter: the getter's flag check gives the flag.
+            {
+                std::lock_guard<std::mutex> lock(icalls::g_mutex);
+                auto& c = icalls::g_candidates;
+                c.erase(std::remove_if(c.begin(), c.end(), [](const icalls::Candidate& x) {
+                    return x.name == "UnityEngine.Camera::set_worldToCameraMatrix_Injected"; }), c.end());
+            }
+            cfg::thirdperson::enabled = true;
+            thirdperson::g_pid = -1;
+            thirdperson::tick(&reading, out);
+            thirdperson::wait();
+            CHECK(thirdperson::g_flag_offset.load() == 0x240 && thirdperson::g_matrix_offset.load() == 0x70,
+                  "getter traced: flag +0x%x matrix +0x%x", thirdperson::g_flag_offset.load(), thirdperson::g_matrix_offset.load());
+            // The game keeps recomputing the matrix: third person must notice and give the camera back.
+            CHECK(thirdperson::tick(&reading, out), "taken again");
+            for (int i = 0; i < 5; ++i) {
+                std::memcpy(cam + 0x70, &live, sizeof(live));
+                thirdperson::tick(&reading, out);
+            }
+            thirdperson::g_taken_at -= 1000;
+            thirdperson::tick(&reading, out);
+            CHECK(thirdperson::g_failed && cam[0x240] == 1, "overwritten matrix detected (failed %d, flag %u)", thirdperson::g_failed, cam[0x240]);
+            cfg::thirdperson::enabled = false;
+        }
+
+        // Anti-aim: pivots of the local ios, rotation written into their local transform entry.
+        {
+            auto* aa_entries = static_cast<player::TransformEntry*>(calloc(8, sizeof(player::TransformEntry)));
+            auto* aa_parents = static_cast<int*>(calloc(8, sizeof(int)));
+            for (int i = 0; i < 8; ++i) {
+                aa_entries[i].position = Vector4(.1f * i, 0.f, 0.f, 0.f);
+                aa_entries[i].rotation = Vector4(0.f, 0.f, 0.f, 1.f);
+                aa_entries[i].scale = Vector4(1.f, 1.f, 1.f, 0.f);
+                aa_parents[i] = -1;
+            }
+            uint8_t* data = static_cast<uint8_t*>(calloc(1, 0x40));
+            *reinterpret_cast<uint64_t*>(data + 0x18) = reinterpret_cast<uint64_t>(aa_entries);
+            *reinterpret_cast<uint64_t*>(data + 0x20) = reinterpret_cast<uint64_t>(aa_parents);
+            player::g_transform_layout = {0x38, 0x40, 0x18, 0x20, proc::pid};
+            auto make_pivot = [&](int index) {
+                uint8_t* native = static_cast<uint8_t*>(calloc(1, 0x80));
+                *reinterpret_cast<uint64_t*>(native + 0x38) = reinterpret_cast<uint64_t>(data);
+                std::memcpy(native + 0x30, &index, 4);
+                const int wrong = 7;  // the layout's +0x40 points elsewhere
+                std::memcpy(native + 0x40, &wrong, 4);
+                uint8_t* managed = static_cast<uint8_t*>(calloc(1, 0x40));
+                *reinterpret_cast<uint64_t*>(managed + v100::unity_cached_ptr) = reinterpret_cast<uint64_t>(native);
+                return reinterpret_cast<uint64_t>(managed);
+            };
+            uint8_t* ios = static_cast<uint8_t*>(calloc(1, 0x80));
+            *reinterpret_cast<uint64_t*>(ios) = rpm<uint64_t>(proc::lib + v100::ios_typeinfo);
+            *reinterpret_cast<uint64_t*>(ios + v100::ios_pivot_a) = make_pivot(1);
+            *reinterpret_cast<uint64_t*>(ios + v100::ios_pivot_b) = make_pivot(2);
+            uint8_t* comps = static_cast<uint8_t*>(calloc(1, 0x30));
+            *reinterpret_cast<uint64_t*>(comps + v100::array_length) = 1;
+            *reinterpret_cast<uint64_t*>(comps + v100::array_data) = reinterpret_cast<uint64_t>(ios);
+            uint8_t* container = static_cast<uint8_t*>(calloc(1, 0x40));
+            *reinterpret_cast<uint64_t*>(container + 0x10) = reinterpret_cast<uint64_t>(comps);
+            uint8_t* me = static_cast<uint8_t*>(calloc(1, 0x100));
+            *reinterpret_cast<uint64_t*>(me + 0x20) = reinterpret_cast<uint64_t>(container);
+            skeleton::g_index_pid = -1;
+            cfg::antiaim::enabled = true; cfg::antiaim::yaw_mode = 3; cfg::antiaim::pitch_mode = 0; cfg::antiaim::target = 0;
+            antiaim::g_pid = -1;
+            const uint64_t local_aa = reinterpret_cast<uint64_t>(me);
+            antiaim::tick(local_aa, Vector3(0.f, 0.f, 0.f));
+            CHECK(antiaim::g_pivots[0].index_offset == 0x30 && antiaim::g_pivots[1].index_offset == 0x30,
+                  "pivot index offsets +0x%x +0x%x", antiaim::g_pivots[0].index_offset, antiaim::g_pivots[1].index_offset);
+            auto yaw180 = [](const Vector4& q) { return std::fabs(q.y) > .999f && std::fabs(q.w) < 1e-3f; };
+            CHECK(yaw180(aa_entries[1].rotation) && yaw180(aa_entries[2].rotation), "backwards written");
+            CHECK(aa_entries[0].rotation.w == 1.f && aa_entries[3].rotation.w == 1.f, "other entries untouched");
+            antiaim::tick(local_aa, Vector3(0.f, 0.f, 0.f));  // the game left the pivots alone: no compounding
+            CHECK(yaw180(aa_entries[1].rotation) && antiaim::g_pivots[0].held == 1, "held without compounding");
+            aa_entries[2].rotation = Vector4(0.f, 0.f, 0.f, 1.f);  // the game re-posed the second pivot
+            antiaim::tick(local_aa, Vector3(0.f, 0.f, 0.f));
+            CHECK(yaw180(aa_entries[2].rotation) && antiaim::g_pivots[1].rewritten == 1, "re-applied on top of the game's pose");
+            cfg::antiaim::enabled = false;
+            antiaim::tick(local_aa, Vector3(0.f, 0.f, 0.f));
+            CHECK(aa_entries[1].rotation.w == 1.f, "held pivot restored on disable (%.3f)", aa_entries[1].rotation.w);
         }
 
         // Every slot empty: no trace may invent an address, and the code dump must run.

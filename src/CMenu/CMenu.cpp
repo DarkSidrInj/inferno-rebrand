@@ -38,7 +38,7 @@ namespace ui::menu {
     static const char* tabs[] = {"Visuals", "Settings"};
     static constexpr int tc = sizeof(tabs) / sizeof(tabs[0]);
 
-    static const char* vstabs[] = {"ESP", "World"};
+    static const char* vstabs[] = {"ESP", "World", "Misc"};
     static constexpr int vstc = sizeof(vstabs) / sizeof(vstabs[0]);
 
     static float lrp(float a, float b, float t) { return a + (b - a) * t; }
@@ -124,10 +124,32 @@ namespace ui::menu {
         button("Rescan fog", a, [] { worldfog::rescan(); });
     }
 
+    static void misc_tab(float a) {
+        checkbox("Third person", &cfg::thirdperson::enabled, a);
+        separator(a);
+        slider("Camera distance", &cfg::thirdperson::distance, 0.5f, 10.f, a, "%.1f m");
+        slider("Camera height", &cfg::thirdperson::height, -1.f, 2.f, a, "%.1f m");
+        slider("Camera side", &cfg::thirdperson::side, -2.f, 2.f, a, "%.1f m");
+        separator(a);
+        checkbox("Show own body", &cfg::thirdperson::show_body, a);
+        separator(a);
+        checkbox("Anti-aim", &cfg::antiaim::enabled, a);
+        separator(a);
+        combo("Yaw", &cfg::antiaim::yaw_mode, {"Legacy", "Spin", "Jitter", "Backwards", "None"}, a);
+        separator(a);
+        combo("Pitch", &cfg::antiaim::pitch_mode, {"None", "Down", "Up"}, a);
+        separator(a);
+        combo("Pivot", &cfg::antiaim::target, {"Both", "First (+0x50)", "Second (+0x58)"}, a);
+        separator(a);
+        slider("Spin speed", &cfg::antiaim::spin_speed, 90.f, 2000.f, a, "%.0f deg/s");
+        slider("Jitter range", &cfg::antiaim::jitter, 10.f, 180.f, a, "%.0f deg");
+    }
+
     static void visuals_tab(float a) {
         switch (stab) {
             case 0: esp_tab(a); break;
             case 1: world_tab(a); break;
+            case 2: misc_tab(a); break;
         }
     }
 

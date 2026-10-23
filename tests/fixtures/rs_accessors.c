@@ -156,3 +156,45 @@ f_ptr slot_get_default_ui_material;
 void* UnityEngine_Canvas__GetDefaultCanvasMaterial_Injected(const void* method) {
     RESOLVE(slot_get_default_ui_material, f_ptr, "UnityEngine.Canvas::GetDefaultCanvasMaterial_Injected()"); return f();
 }
+
+// Camera (Unity 6 binding style). The view matrix is recomputed from the transform while
+// m_ImplicitWorldToCameraMatrix is set; the setter stores the matrix and clears the flag.
+typedef struct Matrix4 { float m[16]; } Matrix4;
+typedef struct Camera {
+    void* vtable;
+    char pad[0x18];
+    void* game_object;          // 0x20
+    char pad2[0x48];
+    Matrix4 world_to_camera;    // 0x70
+    Matrix4 projection;         // 0xB0
+    char pad3[0x130];
+    int culling_mask;           // 0x220
+    char pad4[0x1C];
+    unsigned char implicit_view;  // 0x240
+    unsigned char other_flags;    // 0x241
+} Camera;
+Matrix4 g_transform_view;  // stands for the camera transform's inverse
+__attribute__((noinline)) void UpdateViewFromTransform(Camera* c) { c->world_to_camera = g_transform_view; }
+void Camera_get_worldToCameraMatrix_Injected(Camera* c, Matrix4* out) {
+    CHECK_THREAD("get_worldToCameraMatrix");
+    if (c->implicit_view) UpdateViewFromTransform(c);
+    *out = c->world_to_camera;
+}
+void Camera_set_worldToCameraMatrix_Injected(Camera* c, const Matrix4* m) {
+    CHECK_THREAD("set_worldToCameraMatrix");
+    c->implicit_view = 0;
+    c->world_to_camera = *m;
+    SetDirty(c);
+}
+int Camera_get_cullingMask_Injected(Camera* c) { CHECK_THREAD("get_cullingMask"); return c->culling_mask; }
+void Camera_set_cullingMask_Injected(Camera* c, int mask) { CHECK_THREAD("set_cullingMask"); c->culling_mask = mask; }
+typedef void (*f_get_view)(Camera*, Matrix4*);
+typedef int (*f_get_mask)(Camera*);
+f_get_view slot_get_world_to_camera;
+f_get_mask slot_get_culling_mask;
+void UnityEngine_Camera__get_worldToCameraMatrix_Injected(void* self, Matrix4* ret, const void* method) {
+    RESOLVE(slot_get_world_to_camera, f_get_view, "UnityEngine.Camera::get_worldToCameraMatrix_Injected(System.IntPtr,UnityEngine.Matrix4x4&)"); f((Camera*)self, ret);
+}
+int UnityEngine_Camera__get_cullingMask_Injected(void* self, const void* method) {
+    RESOLVE(slot_get_culling_mask, f_get_mask, "UnityEngine.Camera::get_cullingMask_Injected(System.IntPtr)"); return f((Camera*)self);
+}
