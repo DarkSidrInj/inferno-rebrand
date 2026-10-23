@@ -13,12 +13,13 @@
 //   - dlz: mesh @+0x10, animations @+0x18, sounds @+0x20.
 //   - iwf<T> also has a name table: knife models by template ("skinTemplate/KnifeButterfly", ...),
 //     seen on device; the int table was empty there.
-// A chosen skin: the weapon's entry in each WeaponId dictionary gets the skin's model (its template,
-// else its id, else another player's built content with that skin), and every cached dlz of that
-// weapon gets the same, so a default knife is built as a Butterfly (every default knife this client
-// draws is). The skin id itself (the paint) is read from the registry entry of the weapon's meta id,
-// which for a weapon without a skin is entry 0, shared: it carries the chosen id only for the load
-// of the weapon in hands (beh's cached meta id spoiled) and gets its 0 back 300 ms after that load.
+// A chosen skin: the loader reads the skin id from the registry entry of the weapon's meta id, which
+// for a weapon without a skin is entry 0, shared by everyone. It carries the chosen id while the
+// weapon in hands loads (beh's cached meta id spoiled) and gets its 0 back 3 s after the load
+// started (the skin's packs load asynchronously). The game then resolves (weapon, skin) itself:
+// on device a default knife with a Butterfly skin id was built from the Butterfly template with the
+// skin's packs. "Force model" (off by default) also writes the skin's model into the weapon's own
+// table entries and cached contents, the earlier way: it showed the model without its packs.
 // All put back on Original or disable.
 
 #include "CGameContext.hpp"
@@ -81,6 +82,7 @@ namespace skins {
     inline uint64_t g_loaded_beh = 0;                // what the weapon in hands was last loaded with by us
     inline int g_loaded_op = -1, g_loaded_skin = 0, g_pending_skin = 0;
     inline long long g_retry_at = 0;
+    inline constexpr long long kHoldMs = 3000;
 
     inline void set_status(const std::string& s) {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -288,8 +290,8 @@ namespace skins {
                 from = "content of another player's weapon";
                 return false;
             });
-        // Animations stay the weapon's own unless asked: on device the Butterfly ones stuck to every weapon.
-        if (!cfg::skins::animations) values[1] = 0;
+        // Animations stay the weapon's own: on device the Butterfly ones stuck to every weapon.
+        values[1] = 0;
         if (!values[0]) { diag::log("SKINS", "skin %d: no mesh entry (mesh %d anim %d sound %d)", skin, !!values[0], !!values[1], !!values[2]); return false; }
         put_back(weapon);
         std::vector<Swap> swaps;
@@ -377,14 +379,14 @@ namespace skins {
         });
     }
 
-    // The entry gets its skin back once the weapon has loaded (300 ms after its op id moved), or
-    // after 1.5 s without a load.
+    // The entry gets its skin back once the weapon has loaded (3 s after its op id moved: the skin's
+    // packs load asynchronously), or after 1.5 s without a load.
     inline void transient_tick(uint64_t beh) {
         if (!g_tr.at) return;
         const long long now = diag::now_ms();
         const int op = rpm<int>(beh + kBehOpId);
         if (!g_tr.seen && op != g_tr.op) g_tr.seen = now;
-        if (!(g_tr.seen && now - g_tr.seen > 300) && now - g_tr.started < 1500) return;
+        if (g_tr.seen ? now - g_tr.seen < kHoldMs : now - g_tr.started < 1500) return;
         if (rpm<int>(g_tr.at + kMetaSkin) == g_tr.written) wpm<int>(g_tr.at + kMetaSkin, g_tr.original);
         if (g_tr.seen) {
             g_loaded_beh = beh;
@@ -452,9 +454,9 @@ namespace skins {
 
         // Every weapon with a chosen skin (they stay changed, so switching shows them at once).
         bool held_changed = false;
-        static bool animations = cfg::skins::animations;
-        if (animations != cfg::skins::animations) {  // animations switched: everything again
-            animations = cfg::skins::animations;
+        static bool force_model = cfg::skins::force_model;
+        if (force_model != cfg::skins::force_model) {  // switched: everything again
+            force_model = cfg::skins::force_model;
             std::vector<int> weapons;
             for (const auto& e : g_applied) weapons.push_back(e.first);
             for (int w : weapons) { put_back(w); held_changed |= w == held; }
@@ -464,8 +466,11 @@ namespace skins {
             const auto it = g_applied.find(w);
             const int now = it == g_applied.end() ? 0 : it->second;
             if (chosen == now) continue;
-            if (chosen > 0) { if (!apply(w, chosen)) { put_back(w); cfg::skins::chosen[w] = 0; } }
-            else put_back(w);
+            put_back(w);
+            if (chosen > 0) {
+                if (!force_model) g_applied[w] = chosen;
+                else if (!apply(w, chosen)) { put_back(w); cfg::skins::chosen[w] = 0; }
+            }
             held_changed |= w == held;
         }
         const int chosen = held < 256 && g_applied.count(held) ? cfg::skins::chosen[held] : 0;

@@ -67,7 +67,7 @@ namespace thirdperson {
 namespace skins {
     inline bool enabled = false;
     inline int chosen[256]{};       // WeaponId raw -> SkinDefinition id (0: the game's own)
-    inline bool animations = false; // the skin's animations too (on device they stuck to every weapon)
+    inline bool force_model = false; // also write the skin's model into the weapon's own tables (the earlier way)
 }
 
 namespace antiaim {

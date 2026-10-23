@@ -1127,42 +1127,49 @@ int main() {
                             *reinterpret_cast<uint16_t*>(beh + 0x42) = 0;
                             *reinterpret_cast<int32_t*>(beh + 0x48) += 1;
                             skins::tick(local_s, {local_s});
-                            skins::g_tr.seen -= 400;
+                            skins::g_tr.seen -= skins::kHoldMs + 100;
                             skins::g_reload_at = 0;
                             skins::tick(local_s, {local_s});
                         };
 
                         skins::g_pid = -1;
                         cfg::skins::enabled = true;
+                        cfg::skins::force_model = false;
                         cfg::skins::chosen[70] = 47502;
                         skins::tick(local_s, {local_s});
                         CHECK(skins::g_params[0].by_weapon == reinterpret_cast<uint64_t>(by_weapon[0]) && skins::g_params[2].by_name, "tables found");
-                        CHECK(*value_of(by_weapon[0], 0) == 0x7500 && *value_of(by_weapon[2], 0) == 0x7502 && *value_of(by_weapon[0], 1) == 0x3300 &&
-                              field(knife_content, 1) == 0x7001 && *value_of(by_weapon[1], 0) == 0x7001 && field(knife_content, 2) == 0x7502 &&
-                              entry0() == 47502 && beh_meta() == 0xFFFE,
-                              "knife -> Butterfly template, skin id in the entry for the load (entry %d)", entry0());
+                        CHECK(*value_of(by_weapon[0], 0) == 0x7000 && field(knife_content, 0) == 0x7000 && entry0() == 47502 && beh_meta() == 0xFFFE,
+                              "skin id in the entry for the load, tables untouched (entry %d)", entry0());
                         const skins::View v = skins::view();
                         CHECK(v.weapon == 70 && v.names.size() == 16 && v.current == 1, "menu: weapon %d current %d", v.weapon, v.current);
-                        game_loads();
+                        *reinterpret_cast<uint16_t*>(beh + 0x42) = 0;
+                        *reinterpret_cast<int32_t*>(beh + 0x48) += 1;
+                        skins::tick(local_s, {local_s});
+                        skins::g_tr.seen -= 1000;
+                        skins::tick(local_s, {local_s});
+                        CHECK(entry0() == 47502, "the skin id is held while the skin loads");
+                        skins::g_tr.seen -= skins::kHoldMs;
+                        skins::g_reload_at = 0;
+                        skins::tick(local_s, {local_s});
                         CHECK(entry0() == 0 && skins::g_loaded_skin == 47502 && beh_meta() == 0, "entry back after the load (%d)", entry0());
                         skins::tick(local_s, {local_s});
                         CHECK(beh_meta() == 0 && !skins::g_tr.at, "nothing more while it shows the skin");
-                        cfg::skins::animations = true;   // animations asked for: the knife gets them too
-                        skins::tick(local_s, {local_s});
-                        CHECK(field(knife_content, 1) == 0x7501 && *value_of(by_weapon[1], 0) == 0x7501, "animations on request");
-                        game_loads();
-                        cfg::skins::animations = false;
-                        skins::tick(local_s, {local_s});
-                        CHECK(field(knife_content, 1) == 0x7001 && *value_of(by_weapon[1], 0) == 0x7001, "animations off again");
-                        game_loads();
                         cfg::skins::chosen[70] = 240007;
                         skins::tick(local_s, {local_s});
-                        CHECK(entry0() == 240007 && beh_meta() == 0xFFFE && *value_of(by_weapon[0], 0) == 0x7500, "another Butterfly skin");
+                        CHECK(entry0() == 240007 && beh_meta() == 0xFFFE, "another Butterfly skin");
                         game_loads();
                         CHECK(entry0() == 0 && skins::g_loaded_skin == 240007, "loaded 240007");
                         *reinterpret_cast<int32_t*>(beh + 0x48) += 1;  // the game loads it again itself (switch back)
                         skins::tick(local_s, {local_s});
                         CHECK(entry0() == 240007 && beh_meta() == 0xFFFE, "skin given again after the game's own load");
+                        game_loads();
+                        // The earlier way, on request: the knife's own entries get the template's mesh and sounds.
+                        cfg::skins::force_model = true;
+                        cfg::skins::chosen[70] = 47502;
+                        skins::tick(local_s, {local_s});
+                        CHECK(*value_of(by_weapon[0], 0) == 0x7500 && *value_of(by_weapon[2], 0) == 0x7502 && *value_of(by_weapon[1], 0) == 0x7001 &&
+                              *value_of(by_weapon[0], 1) == 0x3300 && field(knife_content, 0) == 0x7500 && field(knife_content, 1) == 0x7001 &&
+                              entry0() == 47502, "force model: Butterfly template mesh and sounds");
                         game_loads();
                         cfg::skins::chosen[70] = 12345;   // unknown: nothing, choice dropped, knife back
                         skins::tick(local_s, {local_s});
@@ -1173,6 +1180,10 @@ int main() {
                         skins::tick(local_s, {local_s});
                         CHECK(*value_of(by_weapon[0], 0) == 0x9900 && field(knife_content, 2) == 0x9902 && entry0() == 99999,
                               "skin from another player's content");
+                        game_loads();
+                        cfg::skins::force_model = false;
+                        skins::tick(local_s, {local_s});
+                        CHECK(*value_of(by_weapon[0], 0) == 0x7000 && field(knife_content, 2) == 0x7002, "force model off: tables back");
                         game_loads();
                         cfg::skins::chosen[70] = 47502;
                         skins::tick(local_s, {local_s});
