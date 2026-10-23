@@ -74,6 +74,8 @@ namespace {
         int opened_frame = 0;
     };
 
+    bool g_exit = false;
+
     struct State {
         Page page = Page::Players;
         float page_mix = 1.f;
@@ -92,6 +94,8 @@ namespace {
         ImDrawList* d = nullptr;
         bool input = true;       // false while a popup or the opening animation owns the input
     } fr;
+
+    float g_exit_armed = -100.f;     // time of the first tap on the exit button
 
     ImVec2 P(float x, float y) { return fr.origin + ImVec2(x, y) * fr.s; }
     ImVec2 P(ImVec2 v) { return P(v.x, v.y); }
@@ -255,8 +259,8 @@ namespace {
             break;
         }
         case K::Slider: {
-            const float tw = 80.f;
-            const float start_x = cx + cw - 145, start_y = y + 18;
+            const float tw = 76.f;
+            const float start_x = cx + cw - 150, start_y = y + 18;
             bool active = false;
             hit("##slider", start_x - 8, start_y - 11, tw + 16, 24, nullptr, &active);
             if (active && r.f) {
@@ -270,8 +274,8 @@ namespace {
             fr.d->AddCircleFilled(P(start_x + tw * shown, start_y + 1.5f), Z(5.5f), C(247, 248, 252));
             char buf[32] = "";
             if (r.f) std::snprintf(buf, sizeof(buf), r.fmt, *r.f);
-            const float pw = 52.f;
-            const float px = cx + cw - 55 - (pw - 42);
+            const float pw = 46.f;
+            const float px = cx + cw - 56;
             rect(px, y + 8, pw, 21, C(25, 28, 38), 5);
             float size = kControl;
             while (size > 8.f && text_width(buf, size) > pw - 8.f) size -= 1.f;
@@ -482,6 +486,7 @@ namespace {
 
         ImGui::SetNextWindowPos(pos);
         ImGui::SetNextWindowSize(size);
+        ImGui::SetNextWindowFocus();   // above the menu, always
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
         if (!ImGui::Begin("##nl_select", nullptr, kPopupFlags)) { ImGui::End(); ImGui::PopStyleVar(2); return; }
@@ -571,6 +576,7 @@ namespace {
 
         ImGui::SetNextWindowPos(pos);
         ImGui::SetNextWindowSize(size);
+        ImGui::SetNextWindowFocus();   // above the menu, always
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
         if (!ImGui::Begin("##nl_color", nullptr, kPopupFlags)) { ImGui::End(); ImGui::PopStyleVar(2); return; }
@@ -789,9 +795,31 @@ namespace {
         icon(181, 14, 30, C(194, 197, 206), page_icon(), kIcon);
         text_mid(217, 14, 30, C(184, 187, 197), page_title(), kControl);
         chevron(317, 25, C(130, 135, 146));
-        // the search glass of the original, here the status of the bar toggle
-        fr.d->AddCircle(P(719, 28), Z(5), C(180, 184, 194), 0, Z(2));
-        line(723, 32, 727, 36, C(180, 184, 194), 2.f);
+        // exit: the first tap arms it, the second one (within 3 s) leaves
+        {
+            const float now = float(ImGui::GetTime());
+            const bool armed = now - g_exit_armed < 3.f;
+            bool hover = false;
+            ImGui::PushID("##exit");
+            const bool clicked = hit("##exit", 664, 14, 72, 30, &hover);
+            const float r = motion(ImGui::GetID("##exit_m"), armed ? 1.f : hover ? 0.5f : 0.f, 18.f);
+            ImGui::PopID();
+            if (clicked) {
+                if (armed) g_exit = true;
+                else g_exit_armed = now;
+            }
+            const ImU32 red = C(255, 112, 135);
+            rect(664, 14, 72, 30, mix(C(17, 19, 27), C(58, 24, 34), r), 6);
+            outline(664, 14, 72, 30, mix(C(28, 31, 41), red, r * 0.8f), 6);
+            const char* label = armed ? "Confirm" : "Exit";
+            const float lw = text_width(label, kControl);
+            if (nlIcons) {
+                icon(675, 14, 30, mix(C(184, 187, 197), red, r), u8"\uf011", kIcon);
+                text_mid(695 + (36 - lw) * 0.5f - 4, 14, 30, mix(C(184, 187, 197), red, r), label, armed ? 12.f : kControl);
+            } else {
+                text_mid(664 + (72 - lw) * 0.5f, 14, 30, mix(C(184, 187, 197), red, r), label, kControl);
+            }
+        }
     }
 
     void page_content() {
@@ -808,6 +836,8 @@ namespace {
         st.content_h = ImMax(cols.y[0], cols.y[1]) + 12.f;   // design units, scroll excluded
     }
 }
+
+bool exit_requested() { return g_exit; }
 
 void render() {
     bar::render();
@@ -836,7 +866,8 @@ void render() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.f);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0, 0, 0, 0));
     const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+        ImGuiWindowFlags_NoBringToFrontOnFocus;   // a tap on the menu must not lift it over its own popups
     if (ImGui::Begin("##nl_menu", nullptr, flags)) {
         fr.origin = ImGui::GetWindowPos();
         fr.d = ImGui::GetWindowDrawList();
@@ -854,7 +885,7 @@ void render() {
         // dragging by the toolbar
         {
             bool active = false;
-            hit("##drag", 160, 2, 588, 54, nullptr, &active);
+            hit("##drag", 160, 2, 500, 54, nullptr, &active);
             if (active) st.pos += io.MouseDelta;
         }
 

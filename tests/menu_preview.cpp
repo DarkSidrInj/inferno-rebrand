@@ -7,7 +7,7 @@
 #include <vector>
 #include <algorithm>
 
-ImFont *nlText, *nlBold, *nlIcons, *fontBold, *fontMedium, *fontDesc, *espFont;
+ImFont *fontBold, *fontMedium, *fontDesc, *espFont;   // nlText / nlBold / nlIcons: weak definitions in CMenu.cpp
 namespace ui::bar { void render() {} void set_game_alpha(float) {} float game_alpha() { return 1.f; } }
 
 struct Image { int w, h; std::vector<float> px; };
@@ -81,6 +81,8 @@ int main(int argc, char** argv) {
     for (int f = 0; f < 40; ++f) {
         io.DeltaTime = 0.05f;
         io.MousePos = ImVec2(-1000, -1000);
+        io.MouseDown[0] = false;
+        if (std::strcmp(mode, "select") == 0 && f >= 24 && f <= 26) { io.MousePos = ImVec2(1000, 1180); io.MouseDown[0] = f < 26; }   // taps near the bottom of the shell
         ImGui::NewFrame();
         ui::menu::render();
         if (f == 20 && std::strcmp(mode, "color") == 0) ui::menu::open_color(3, &cfg::esp::box_col, ImVec2(1180, 330));
@@ -99,6 +101,12 @@ int main(int argc, char** argv) {
             std::fprintf(fp, "P6\n%d %d\n255\n", W, H);
             for (size_t i = 0; i < img.px.size(); ++i) std::fputc(int(std::clamp(img.px[i], 0.f, 1.f) * 255.f + .5f), fp);
             std::fclose(fp);
+        }
+        if (f == 39) {   // the order the windows are drawn in: the popups must come after the menu
+            ImGuiContext& g = *ImGui::GetCurrentContext();
+            std::printf("window order:");
+            for (ImGuiWindow* w : g.Windows) std::printf(" %s", w->Name);
+            std::printf("\n");
         }
         ImGui::EndFrame();
     }

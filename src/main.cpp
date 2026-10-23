@@ -74,7 +74,7 @@ int main() {
     static bool prev = false;
     static bool game_started = false;
 
-    while (true) {
+    while (!ui::menu::exit_requested()) {
         drawBegin();
 
         bool run = game::valid();
