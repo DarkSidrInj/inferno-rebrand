@@ -1036,8 +1036,9 @@ int main() {
             antiaim::tick(me, feet);
             CHECK(aa_entries[1].rotation.w == 1.f, "model restored on disable (%.3f)", aa_entries[1].rotation.w);
 
-            // Skin changer: the weapon content resolver. The weapon's own mesh/animations/sounds and its
-            // cached contents become the chosen skin's; the weapon in hands loads again; all put back.
+            // Skin changer: the weapon content resolver gives the knife the Butterfly template's mesh,
+            // animations and sounds; the registry entry of the knife in hands carries the skin id for
+            // one load and gets its own back after; all put back on Original / disable.
             {
                 auto named_class = [&](const char* name) {
                     uint8_t* k = static_cast<uint8_t*>(calloc(1, 0x300));
@@ -1064,82 +1065,116 @@ int main() {
                     *reinterpret_cast<int32_t*>(d + 0x20) = int32_t(kv.size());
                     return d;
                 };
+                auto managed = [](const char* text) {
+                    const size_t n = std::strlen(text);
+                    uint8_t* o = static_cast<uint8_t*>(calloc(1, 0x20 + n * 2));
+                    *reinterpret_cast<int32_t*>(o + 0x10) = int32_t(n);
+                    for (size_t i = 0; i < n; ++i) *reinterpret_cast<uint16_t*>(o + 0x14 + i * 2) = uint16_t(text[i]);
+                    return reinterpret_cast<uint64_t>(o);
+                };
                 auto value_of = [&](uint8_t* d, size_t i) { return reinterpret_cast<uint64_t*>(*reinterpret_cast<uint64_t*>(d + 0x18) + 0x20 + i * 0x18 + 0x10); };
-                // Params: per kind k, knife 70 = 0x7000 + k, gun 33 = 0x3300 + k, skin 47502 = 0x4700 + k.
+                // Params per kind k: knife 70 = 0x7000 + k, gun 33 = 0x3300 + k, Butterfly template = 0x7500 + k.
                 uint8_t* by_weapon[3];
-                uint8_t* iwf[3];
+                const uint64_t butterfly = managed("skinTemplate/KnifeButterfly"), karambit = managed("skinTemplate/KnifeKarambit");
                 for (int k = 0; k < 3; ++k) {
                     by_weapon[k] = make_dict({{70, 0x7000u + k}, {33, 0x3300u + k}});
-                    uint8_t* by_skin = make_dict({{47502, 0x4700u + k}, {240007, 0x2400u + k}});
-                    uint8_t* by_name = make_dict({{reinterpret_cast<uint64_t>(dict_class), 1}});  // string keys
-                    iwf[k] = static_cast<uint8_t*>(calloc(1, 0x80));
-                    *reinterpret_cast<uint64_t*>(iwf[k] + 0x38) = reinterpret_cast<uint64_t>(by_weapon[k]);
-                    *reinterpret_cast<uint64_t*>(iwf[k] + 0x40) = reinterpret_cast<uint64_t>(by_name);
-                    *reinterpret_cast<uint64_t*>(iwf[k] + 0x48) = reinterpret_cast<uint64_t>(by_skin);
-                }
-                uint8_t* knife_content = static_cast<uint8_t*>(calloc(1, 0x40));
-                for (int k = 0; k < 3; ++k) *reinterpret_cast<uint64_t*>(knife_content + 0x10 + k * 8) = 0x7000u + k;
-                uint8_t* gun_content = static_cast<uint8_t*>(calloc(1, 0x40));
-                for (int k = 0; k < 3; ++k) *reinterpret_cast<uint64_t*>(gun_content + 0x10 + k * 8) = 0x3300u + k;
-                uint8_t* other_content = static_cast<uint8_t*>(calloc(1, 0x40));  // someone's Butterfly Kumo
-                for (int k = 0; k < 3; ++k) *reinterpret_cast<uint64_t*>(other_content + 0x10 + k * 8) = 0x5700u + k;
-                uint8_t* cache = make_dict({{70, reinterpret_cast<uint64_t>(knife_content)}, {33, reinterpret_cast<uint64_t>(gun_content)},
-                                            {75 | (uint64_t(157500) << 32), reinterpret_cast<uint64_t>(other_content)}});
-                uint8_t* ybt = static_cast<uint8_t*>(calloc(1, 0x60));
-                *reinterpret_cast<uint64_t*>(ybt) = reinterpret_cast<uint64_t>(ybt_class);
-                *reinterpret_cast<uint64_t*>(ybt + 0x38) = reinterpret_cast<uint64_t>(iwf[0]);
-                *reinterpret_cast<uint64_t*>(ybt + 0x28) = reinterpret_cast<uint64_t>(iwf[1]);
-                *reinterpret_cast<uint64_t*>(ybt + 0x30) = reinterpret_cast<uint64_t>(iwf[2]);
-                *reinterpret_cast<uint64_t*>(ybt + 0x40) = reinterpret_cast<uint64_t>(cache);
-                uint8_t* beh = static_cast<uint8_t*>(calloc(1, 0xC0));
-                *reinterpret_cast<uint64_t*>(beh) = reinterpret_cast<uint64_t>(beh_class);
-                beh[0x40] = 70;
-                *reinterpret_cast<uint64_t*>(beh + 0x68) = reinterpret_cast<uint64_t>(ybt);
-                uint8_t* parts = static_cast<uint8_t*>(calloc(1, 0x30));
-                *reinterpret_cast<uint64_t*>(parts + 0x18) = 1;
-                *reinterpret_cast<uint64_t*>(parts + 0x20) = reinterpret_cast<uint64_t>(beh);
-                uint8_t* wmz = static_cast<uint8_t*>(calloc(1, 0x50));
-                *reinterpret_cast<uint64_t*>(wmz + 0x18) = reinterpret_cast<uint64_t>(parts);
-                uint8_t* player = static_cast<uint8_t*>(calloc(1, 0x100));
-                *reinterpret_cast<uint64_t*>(player + v100::net_systems) = reinterpret_cast<uint64_t>(wmz);
-                const uint64_t local_s = reinterpret_cast<uint64_t>(player);
-                auto field = [](uint8_t* c, int k) { return *reinterpret_cast<uint64_t*>(c + 0x10 + k * 8); };
-                auto beh_meta = [&] { return *reinterpret_cast<uint16_t*>(beh + 0x42); };
+                    uint8_t* by_name = make_dict({{karambit, 0x6600u + k}, {butterfly, 0x7500u + k}});
+                    uint8_t* empty = make_dict({});
+                    uint8_t* iwf = static_cast<uint8_t*>(calloc(1, 0x80));
+                    *reinterpret_cast<uint64_t*>(iwf + 0x38) = reinterpret_cast<uint64_t>(by_weapon[k]);
+                    *reinterpret_cast<uint64_t*>(iwf + 0x40) = reinterpret_cast<uint64_t>(by_name);
+                    *reinterpret_cast<uint64_t*>(iwf + 0x48) = reinterpret_cast<uint64_t>(empty);
+                    static uint8_t* iwfs[3];
+                    iwfs[k] = iwf;
+                    if (k == 2) {
+                        uint8_t* knife_content = static_cast<uint8_t*>(calloc(1, 0x40));
+                        for (int j = 0; j < 3; ++j) *reinterpret_cast<uint64_t*>(knife_content + 0x10 + j * 8) = 0x7000u + j;
+                        uint8_t* other_content = static_cast<uint8_t*>(calloc(1, 0x40));  // someone's skin 99999
+                        for (int j = 0; j < 3; ++j) *reinterpret_cast<uint64_t*>(other_content + 0x10 + j * 8) = 0x9900u + j;
+                        uint8_t* cache = make_dict({{70, reinterpret_cast<uint64_t>(knife_content)}, {44 | (uint64_t(99999) << 32), reinterpret_cast<uint64_t>(other_content)}});
+                        uint8_t* ybt = static_cast<uint8_t*>(calloc(1, 0x60));
+                        *reinterpret_cast<uint64_t*>(ybt) = reinterpret_cast<uint64_t>(ybt_class);
+                        *reinterpret_cast<uint64_t*>(ybt + 0x38) = reinterpret_cast<uint64_t>(iwfs[0]);
+                        *reinterpret_cast<uint64_t*>(ybt + 0x28) = reinterpret_cast<uint64_t>(iwfs[1]);
+                        *reinterpret_cast<uint64_t*>(ybt + 0x30) = reinterpret_cast<uint64_t>(iwfs[2]);
+                        *reinterpret_cast<uint64_t*>(ybt + 0x40) = reinterpret_cast<uint64_t>(cache);
+                        // Registry: entry 0 blank (meta id 0), entry 1 someone's skin.
+                        uint8_t* items = static_cast<uint8_t*>(calloc(1, 0x20 + 4 * 0x38));
+                        *reinterpret_cast<uint64_t*>(items + 0x18) = 4;
+                        *reinterpret_cast<int32_t*>(items + 0x20 + 0x38 + 4) = 240095;
+                        uint8_t* list = static_cast<uint8_t*>(calloc(1, 0x20));
+                        *reinterpret_cast<uint64_t*>(list + 0x10) = reinterpret_cast<uint64_t>(items);
+                        *reinterpret_cast<int32_t*>(list + 0x18) = 2;
+                        uint8_t* yvh = static_cast<uint8_t*>(calloc(1, 0x20));
+                        *reinterpret_cast<uint64_t*>(yvh + 0x10) = reinterpret_cast<uint64_t>(list);
+                        uint8_t* beh = static_cast<uint8_t*>(calloc(1, 0xC0));
+                        *reinterpret_cast<uint64_t*>(beh) = reinterpret_cast<uint64_t>(beh_class);
+                        beh[0x40] = 70;
+                        *reinterpret_cast<uint64_t*>(beh + 0x68) = reinterpret_cast<uint64_t>(ybt);
+                        *reinterpret_cast<uint64_t*>(beh + 0x80) = reinterpret_cast<uint64_t>(yvh);
+                        uint8_t* parts = static_cast<uint8_t*>(calloc(1, 0x30));
+                        *reinterpret_cast<uint64_t*>(parts + 0x18) = 1;
+                        *reinterpret_cast<uint64_t*>(parts + 0x20) = reinterpret_cast<uint64_t>(beh);
+                        uint8_t* wmz = static_cast<uint8_t*>(calloc(1, 0x50));
+                        *reinterpret_cast<uint64_t*>(wmz + 0x18) = reinterpret_cast<uint64_t>(parts);
+                        uint8_t* player = static_cast<uint8_t*>(calloc(1, 0x100));
+                        *reinterpret_cast<uint64_t*>(player + v100::net_systems) = reinterpret_cast<uint64_t>(wmz);
+                        const uint64_t local_s = reinterpret_cast<uint64_t>(player);
+                        auto field = [](uint8_t* c, int j) { return *reinterpret_cast<uint64_t*>(c + 0x10 + j * 8); };
+                        auto beh_meta = [&] { return *reinterpret_cast<uint16_t*>(beh + 0x42); };
+                        auto entry0 = [&] { return *reinterpret_cast<int32_t*>(items + 0x20 + 4); };
+                        auto game_loads = [&] {  // the game loads the weapon in hands, 0.4 s pass
+                            *reinterpret_cast<uint16_t*>(beh + 0x42) = 0;
+                            *reinterpret_cast<int32_t*>(beh + 0x48) += 1;
+                            skins::tick(local_s, {local_s});
+                            skins::g_tr.seen -= 400;
+                            skins::g_reload_at = 0;
+                            skins::tick(local_s, {local_s});
+                        };
 
-                skins::g_pid = -1;
-                cfg::skins::enabled = true;
-                cfg::skins::chosen[70] = 47502;
-                skins::tick(local_s, {local_s});
-                CHECK(skins::g_params[0].by_weapon == reinterpret_cast<uint64_t>(by_weapon[0]) && skins::g_params[2].by_skin, "resolver dictionaries found");
-                CHECK(*value_of(by_weapon[0], 0) == 0x4700 && *value_of(by_weapon[1], 0) == 0x4701 && *value_of(by_weapon[2], 0) == 0x4702 &&
-                      *value_of(by_weapon[0], 1) == 0x3300 && field(knife_content, 0) == 0x4700 && field(knife_content, 2) == 0x4702 &&
-                      field(gun_content, 0) == 0x3300 && beh_meta() == 0xFFFE, "knife content -> skin 47502");
-                const skins::View v = skins::view();
-                CHECK(v.weapon == 70 && v.names.size() == 16 && v.current == 1, "menu: weapon %d current %d", v.weapon, v.current);
-                *reinterpret_cast<uint16_t*>(beh + 0x42) = 0; *reinterpret_cast<int32_t*>(beh + 0x48) += 1;  // the game loads
-                skins::g_reload_at -= 1000;
-                skins::tick(local_s, {local_s});
-                CHECK(beh_meta() == 0, "nothing more to do");
-                cfg::skins::chosen[70] = 240007;
-                skins::tick(local_s, {local_s});
-                CHECK(*value_of(by_weapon[0], 0) == 0x2400 && field(knife_content, 1) == 0x2401 && beh_meta() == 0xFFFE, "another skin");
-                *reinterpret_cast<uint16_t*>(beh + 0x42) = 0;
-                skins::g_reload_at = 0;
-                cfg::skins::chosen[70] = 12345;   // unknown skin: nothing changes, choice dropped
-                skins::tick(local_s, {local_s});
-                CHECK(cfg::skins::chosen[70] == 0 && *value_of(by_weapon[0], 0) == 0x7000 && field(knife_content, 0) == 0x7000,
-                      "unknown skin: knife back to its own");
-                *reinterpret_cast<uint16_t*>(beh + 0x42) = 0;
-                skins::g_reload_at = 0;
-                cfg::skins::chosen[70] = 157500;  // not in the tables: from another player's built content
-                skins::tick(local_s, {local_s});
-                CHECK(*value_of(by_weapon[0], 0) == 0x5700 && field(knife_content, 2) == 0x5702, "skin from another player's content");
-                *reinterpret_cast<uint16_t*>(beh + 0x42) = 0;
-                skins::g_reload_at = 0;
-                cfg::skins::enabled = false;
-                skins::tick(local_s, {local_s});
-                CHECK(*value_of(by_weapon[0], 0) == 0x7000 && *value_of(by_weapon[2], 0) == 0x7002 && field(knife_content, 0) == 0x7000 &&
-                      field(knife_content, 1) == 0x7001, "disabled: all back");
+                        skins::g_pid = -1;
+                        cfg::skins::enabled = true;
+                        cfg::skins::chosen[70] = 47502;
+                        skins::tick(local_s, {local_s});
+                        CHECK(skins::g_params[0].by_weapon == reinterpret_cast<uint64_t>(by_weapon[0]) && skins::g_params[2].by_name, "tables found");
+                        CHECK(*value_of(by_weapon[0], 0) == 0x7500 && *value_of(by_weapon[2], 0) == 0x7502 && *value_of(by_weapon[0], 1) == 0x3300 &&
+                              field(knife_content, 1) == 0x7501 && entry0() == 47502 && beh_meta() == 0xFFFE,
+                              "knife -> Butterfly template, skin id in the entry for the load (entry %d)", entry0());
+                        const skins::View v = skins::view();
+                        CHECK(v.weapon == 70 && v.names.size() == 16 && v.current == 1, "menu: weapon %d current %d", v.weapon, v.current);
+                        game_loads();
+                        CHECK(entry0() == 0 && skins::g_loaded_skin == 47502 && beh_meta() == 0, "entry back after the load (%d)", entry0());
+                        skins::tick(local_s, {local_s});
+                        CHECK(beh_meta() == 0 && !skins::g_tr.at, "nothing more while it shows the skin");
+                        cfg::skins::chosen[70] = 240007;
+                        skins::tick(local_s, {local_s});
+                        CHECK(entry0() == 240007 && beh_meta() == 0xFFFE && *value_of(by_weapon[0], 0) == 0x7500, "another Butterfly skin");
+                        game_loads();
+                        CHECK(entry0() == 0 && skins::g_loaded_skin == 240007, "loaded 240007");
+                        *reinterpret_cast<int32_t*>(beh + 0x48) += 1;  // the game loads it again itself (switch back)
+                        skins::tick(local_s, {local_s});
+                        CHECK(entry0() == 240007 && beh_meta() == 0xFFFE, "skin given again after the game's own load");
+                        game_loads();
+                        cfg::skins::chosen[70] = 12345;   // unknown: nothing, choice dropped, knife back
+                        skins::tick(local_s, {local_s});
+                        CHECK(cfg::skins::chosen[70] == 0 && *value_of(by_weapon[0], 0) == 0x7000 && field(knife_content, 0) == 0x7000 &&
+                              beh_meta() == 0xFFFE && entry0() == 0, "unknown skin: knife back to its own");
+                        game_loads();
+                        cfg::skins::chosen[70] = 99999;   // not in the tables: from another player's built content
+                        skins::tick(local_s, {local_s});
+                        CHECK(*value_of(by_weapon[0], 0) == 0x9900 && field(knife_content, 2) == 0x9902 && entry0() == 99999,
+                              "skin from another player's content");
+                        game_loads();
+                        cfg::skins::chosen[70] = 47502;
+                        skins::tick(local_s, {local_s});
+                        cfg::skins::enabled = false;
+                        skins::g_reload_at = 0;
+                        *reinterpret_cast<uint16_t*>(beh + 0x42) = 0;
+                        skins::tick(local_s, {local_s});
+                        CHECK(*value_of(by_weapon[0], 0) == 0x7000 && *value_of(by_weapon[2], 0) == 0x7002 && field(knife_content, 0) == 0x7000 &&
+                              field(knife_content, 1) == 0x7001 && entry0() == 0, "disabled: all back");
+                    }
+                }
             }
         }
 

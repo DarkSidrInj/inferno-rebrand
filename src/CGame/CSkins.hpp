@@ -11,10 +11,15 @@
 //   - iwf<T>: Dictionary<WeaponId, T> (the weapon's own content) and Dictionary<int, T> (by skin
 //     id), among others; generic, so their offsets are found in game by their keys.
 //   - dlz: mesh @+0x10, animations @+0x18, sounds @+0x20.
-// A chosen skin: the weapon's entry in each WeaponId dictionary gets the skin's value, and every
-// cached dlz of that weapon gets the skin's mesh, animations and sounds. A default knife with a
-// Butterfly skin then loads as that Butterfly (every default knife this client draws does). beh's
-// cached meta id is spoiled so the weapon in hands loads again. All put back on Original/disable.
+//   - iwf<T> also has a name table: knife models by template ("skinTemplate/KnifeButterfly", ...),
+//     seen on device; the int table was empty there.
+// A chosen skin: the weapon's entry in each WeaponId dictionary gets the skin's model (its template,
+// else its id, else another player's built content with that skin), and every cached dlz of that
+// weapon gets the same, so a default knife is built as a Butterfly (every default knife this client
+// draws is). The skin id itself (the paint) is read from the registry entry of the weapon's meta id,
+// which for a weapon without a skin is entry 0, shared: it carries the chosen id only for the load
+// of the weapon in hands (beh's cached meta id spoiled) and gets its 0 back 300 ms after that load.
+// All put back on Original or disable.
 
 #include "CGameContext.hpp"
 #include "CClass.hpp"
@@ -34,16 +39,18 @@ namespace skins {
     inline constexpr uint64_t kContentParams[3] = {0x10, 0x18, 0x20};    // dlz: mesh, animations, sounds
     inline constexpr uint64_t kDictEntries = 0x18, kDictCount = 0x20, kEntryStride = 0x18, kEntryKey = 0x8, kEntryValue = 0x10;
     inline constexpr const char* kParamNames[3] = {"mesh", "animations", "sounds"};
+    inline constexpr uint64_t kBehRegistry = 0x80, kRegistryList = 0x10, kMetaStride = 0x38, kMetaSkin = 0x4;
 
-    struct Skin { int id; const char* name; };
+    inline constexpr const char* kButterflyModel = "skinTemplate/KnifeButterfly";
+    struct Skin { int id; const char* name; const char* model; };   // model: the game's skin template
     // The skins offered in the menu.
     inline constexpr Skin kSkins[] = {
         // Knife_Butterfly / Бабочка
-        {47502, "Butterfly Gold"},          {47503, "Butterfly DragonGlass"},  {47504, "Butterfly Red"},
-        {47505, "Butterfly Starfall"},      {57501, "Butterfly New1"},         {97500, "Butterfly ColdFlame"},
-        {157500, "Butterfly Kumo"},         {240007, "Butterfly Glitch"},      {240059, "Butterfly Saphira"},
-        {240130, "Butterfly Ripple"},       {240225, "Butterfly Gambit"},      {240269, "Butterfly ArcaneSurge"},
-        {240319, "Butterfly WildWest"},     {240331, "Butterfly JadeStone"},   {240369, "Butterfly Twilight"},
+        {47502, "Butterfly Gold", kButterflyModel},          {47503, "Butterfly DragonGlass", kButterflyModel},  {47504, "Butterfly Red", kButterflyModel},
+        {47505, "Butterfly Starfall", kButterflyModel},      {57501, "Butterfly New1", kButterflyModel},         {97500, "Butterfly ColdFlame", kButterflyModel},
+        {157500, "Butterfly Kumo", kButterflyModel},         {240007, "Butterfly Glitch", kButterflyModel},      {240059, "Butterfly Saphira", kButterflyModel},
+        {240130, "Butterfly Ripple", kButterflyModel},       {240225, "Butterfly Gambit", kButterflyModel},      {240269, "Butterfly ArcaneSurge", kButterflyModel},
+        {240319, "Butterfly WildWest", kButterflyModel},     {240331, "Butterfly JadeStone", kButterflyModel},   {240369, "Butterfly Twilight", kButterflyModel},
     };
 
     struct View { int weapon = -1; int current = 0; std::vector<int> ids; std::vector<std::string> names; std::string status; };
@@ -68,6 +75,12 @@ namespace skins {
     inline uint64_t g_reload_beh = 0;
     inline int g_reload_op = 0, g_reload_meta = 0;
     inline long long g_reload_at = 0, g_log = 0;
+    // The skin id written into the registry entry of the weapon in hands for one load.
+    struct Transient { uint64_t at{}; int original{}, written{}; int op{}; long long started{}, seen{}; };
+    inline Transient g_tr;
+    inline uint64_t g_loaded_beh = 0;                // what the weapon in hands was last loaded with by us
+    inline int g_loaded_op = -1, g_loaded_skin = 0, g_pending_skin = 0;
+    inline long long g_retry_at = 0;
 
     inline void set_status(const std::string& s) {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -244,7 +257,20 @@ namespace skins {
         uint64_t values[3]{};
         const char* from = "skin id table";
         const std::string id = std::to_string(skin);
+        const char* model = nullptr;
+        for (const Skin& k : kSkins) if (k.id == skin) model = k.model;
+        if (model)  // the skin's model template in the name table
+            for (int k = 0; k < 3; ++k) {
+                if (!g_params[k].by_name) continue;
+                each_entry(g_params[k].by_name, [&](uint64_t e) {
+                    if (managed_text(rpm<uint64_t>(e + kEntryKey)) != model) return true;
+                    values[k] = rpm<uint64_t>(e + kEntryValue);
+                    return false;
+                });
+                if (values[k]) from = model;
+            }
         for (int k = 0; k < 3; ++k) {
+            if (values[k]) continue;
             uint64_t at = g_params[k].by_skin ? find_value(g_params[k].by_skin, uint64_t(uint32_t(skin)), 4) : 0;
             if (!at && g_params[k].by_name)  // the name table: the id as the key, or in it
                 each_entry(g_params[k].by_name, [&](uint64_t e) {
@@ -318,8 +344,44 @@ namespace skins {
         diag::log("SKINS", "no reload after the state change: the skin shows from the next weapon switch");
     }
 
+    // Registry entry (WeaponMetaData) of a meta id: index = meta id (entry 0 = the blank one that
+    // weapons without a skin use; seen on device).
+    inline uint64_t meta_entry(uint64_t beh, int meta) {
+        const uint64_t reg = rpm<uint64_t>(beh + kBehRegistry);
+        const uint64_t list = plausible(reg) ? rpm<uint64_t>(reg + kRegistryList) : 0;
+        const uint64_t items = plausible(list) ? rpm<uint64_t>(list + v100::list_items) : 0;
+        const int count = plausible(list) ? rpm<int>(list + v100::list_count) : 0;
+        if (!plausible(items) || meta < 0 || meta >= count || count > 4096) return 0;
+        return items + v100::array_data + uint64_t(meta) * kMetaStride;
+    }
+
+    // The entry gets its skin back once the weapon has loaded (300 ms after its op id moved), or
+    // after 1.5 s without a load.
+    inline void transient_tick(uint64_t beh) {
+        if (!g_tr.at) return;
+        const long long now = diag::now_ms();
+        const int op = rpm<int>(beh + kBehOpId);
+        if (!g_tr.seen && op != g_tr.op) g_tr.seen = now;
+        if (!(g_tr.seen && now - g_tr.seen > 300) && now - g_tr.started < 1500) return;
+        if (rpm<int>(g_tr.at + kMetaSkin) == g_tr.written) wpm<int>(g_tr.at + kMetaSkin, g_tr.original);
+        if (g_tr.seen) {
+            g_loaded_beh = beh;
+            g_loaded_op = op;
+            g_loaded_skin = g_pending_skin;
+            diag::log("SKINS", "weapon in hands loaded with skin %d (op %d)", g_pending_skin, op);
+        } else {
+            g_retry_at = now + 2000;
+            diag::log("SKINS", "no load within 1.5 s; trying again in 2 s");
+        }
+        g_tr = {};
+    }
+
     inline void restore() {
-        if (g_swaps.empty()) return;
+        if (g_tr.at && rpm<int>(g_tr.at + kMetaSkin) == g_tr.written) wpm<int>(g_tr.at + kMetaSkin, g_tr.original);
+        g_tr = {};
+        if (g_swaps.empty() && !g_loaded_skin) return;
+        g_loaded_skin = 0;
+        g_loaded_beh = 0;
         std::vector<int> weapons;
         for (const auto& e : g_swaps) weapons.push_back(e.first);
         for (int w : weapons) put_back(w);
@@ -341,6 +403,11 @@ namespace skins {
         g_values.clear();
         g_reload_beh = 0;
         g_reload_at = 0;
+        g_tr = {};
+        g_loaded_beh = 0;
+        g_loaded_op = -1;
+        g_loaded_skin = g_pending_skin = 0;
+        g_retry_at = 0;
     }
 
     // Once per frame.
@@ -353,6 +420,7 @@ namespace skins {
 
         const uint64_t b = find_beh(local);
         if (!b) { set_status("weapon view not found"); return; }
+        transient_tick(b);
         const int cached = rpm<uint16_t>(b + kBehMeta);
         if (cached == kSpoiled) return;  // our reload is pending
         const int held = rpm<uint8_t>(b + kBehState);
@@ -370,12 +438,31 @@ namespace skins {
             else put_back(w);
             held_changed |= w == held;
         }
-        const int chosen = held < 256 ? cfg::skins::chosen[held] : 0;
+        const int chosen = held < 256 && g_applied.count(held) ? cfg::skins::chosen[held] : 0;
         set_status("weapon " + std::to_string(held) + ": " + (chosen > 0 ? "skin " + std::to_string(chosen) : "original"));
-        if (held_changed) reload(b, cached);
+
+        // The weapon in hands loads again when it does not show the chosen skin: its registry entry
+        // carries the skin id for that one load.
+        const int op = rpm<int>(b + kBehOpId);
+        const int shown = g_loaded_beh == b && g_loaded_op == op ? g_loaded_skin : 0;
+        if (g_tr.at || (!held_changed && shown == chosen) || diag::now_ms() < g_retry_at) return;
+        if (chosen > 0) {
+            const uint64_t e = meta_entry(b, cached);
+            if (!e) { set_status("weapon in hands: no registry entry for meta id " + std::to_string(cached)); return; }
+            g_tr = {e, rpm<int>(e + kMetaSkin), chosen, op, diag::now_ms(), 0};
+            wpm<int>(e + kMetaSkin, chosen);
+        } else {
+            g_tr = {0, 0, 0, op, diag::now_ms(), 0};
+        }
+        g_pending_skin = chosen;
+        reload(b, cached);
+        if (!g_tr.at) {  // nothing to put back: count the load when it comes
+            g_loaded_beh = b;
+            g_loaded_op = -1;
+            g_loaded_skin = 0;
+        }
     }
 
-    // ---- menu -------------------------------------------------------------------------------------
     // ---- menu -------------------------------------------------------------------------------------
     inline View view() {
         View v;
