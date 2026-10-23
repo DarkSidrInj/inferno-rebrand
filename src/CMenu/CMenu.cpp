@@ -2,7 +2,6 @@
 #include "CMenu.hpp"
 #include "Widgets/CStatusBar.hpp"
 #include "../CConfigs/CConfig.hpp"
-#include "../CGame/CFog.hpp"
 #include "Theme/CTheme.hpp"
 #include "Widgets/CWidgets.hpp"
 #include "imgui.h"
@@ -38,7 +37,7 @@ namespace ui::menu {
     static const char* tabs[] = {"Visuals", "Settings"};
     static constexpr int tc = sizeof(tabs) / sizeof(tabs[0]);
 
-    static const char* vstabs[] = {"ESP", "World", "Misc"};
+    static const char* vstabs[] = {"ESP", "Misc"};
     static constexpr int vstc = sizeof(vstabs) / sizeof(vstabs[0]);
 
     static float lrp(float a, float b, float t) { return a + (b - a) * t; }
@@ -113,29 +112,7 @@ namespace ui::menu {
         colorpick("Dropped color", &cfg::esp::dropped_col, a);
     }
 
-    static void world_tab(float a) {
-        checkbox("Fog", &cfg::fog::enabled, a);
-        separator(a);
-        checkbox("Auto fog color", &cfg::fog::auto_color, a);
-        separator(a);
-        slider("Fog min distance", &cfg::fog::min_distance, 0.f, 200.f, a, "%.0f m");
-        slider("Fog max distance", &cfg::fog::max_distance, 10.f, 400.f, a, "%.0f m");
-        separator(a);
-        colorpick("Fog color", &cfg::fog::color, a);
-        separator(a);
-        button("Rescan fog", a, [] { worldfog::rescan(); });
-    }
-
     static void misc_tab(float a) {
-        checkbox("Third person", &cfg::thirdperson::enabled, a);
-        checkbox("Real model (ptrace)", &cfg::thirdperson::real_body, a);
-        separator(a);
-        slider("Camera distance", &cfg::thirdperson::distance, 0.5f, 10.f, a, "%.1f m");
-        slider("Camera height", &cfg::thirdperson::height, -1.f, 2.f, a, "%.1f m");
-        slider("Camera side", &cfg::thirdperson::side, -2.f, 2.f, a, "%.1f m");
-        separator(a);
-        colorpick("Own model color", &cfg::thirdperson::model_col, a);
-        separator(a);
         checkbox("Anti-aim", &cfg::antiaim::enabled, a);
         separator(a);
         combo("Yaw", &cfg::antiaim::yaw_mode, {"Legacy", "Spin", "Jitter", "Backwards", "None"}, a);
@@ -149,8 +126,7 @@ namespace ui::menu {
     static void visuals_tab(float a) {
         switch (stab) {
             case 0: esp_tab(a); break;
-            case 1: world_tab(a); break;
-            case 2: misc_tab(a); break;
+            case 1: misc_tab(a); break;
         }
     }
 
