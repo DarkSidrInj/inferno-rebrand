@@ -354,45 +354,56 @@ namespace localview {
                 if (const uint64_t r = chams::native_of(rpm<uint64_t>(bindings + field))) arms.push_back(r);
             for (uint64_t object : chams::scan_weapons(bindings)) chams::weapon_renderers(object, weapons);
         }
-        std::vector<scenenode::Ref> refs, first_person;
-        std::unordered_map<uint64_t, bool> seen;
-        auto add = [&](uint64_t r, bool fp) {
-            if (!r || !seen.emplace(r, true).second) return;
-            const int index = scenenode::index_of(r), layer = chams::layer_of(r);
-            if (layer < 0) return;  // an index of -1 is placed by the renderer's pointer later
-            refs.push_back({r, index, layer});
-            if (fp) first_person.push_back(refs.back());
+        auto build = [&](int field, std::vector<scenenode::Ref>& refs, std::vector<scenenode::Ref>& first_person) {
+            std::unordered_map<uint64_t, bool> seen;
+            std::unordered_map<int, bool> used_index;
+            auto add = [&](uint64_t r, bool fp) {
+                if (!r || !seen.emplace(r, true).second) return;
+                const int index = scenenode::index_of(r, field), layer = chams::layer_of(r);
+                if (layer < 0) return;  // an index of -1 is placed by the renderer's pointer later
+                if (index >= 0 && !used_index.emplace(index, true).second) return;  // renderers of one rig share a value
+                refs.push_back({r, index, layer});
+                if (fp) first_person.push_back(refs.back());
+            };
+            for (uint64_t r : arms) add(r, true);
+            for (uint64_t r : weapons) add(r, true);
+            for (uint64_t r : enemies) add(r, false);
+            for (uint64_t r : mates) add(r, false);
         };
-        for (uint64_t r : arms) add(r, true);
-        for (uint64_t r : weapons) add(r, true);
-        for (uint64_t r : enemies) add(r, false);
-        for (uint64_t r : mates) add(r, false);
-        int eights = 0, zeros = 0;
-        for (const auto& r : refs) { eights += r.layer == 8; zeros += r.layer == 0; }
         {
-            // What the index field holds on each kind of renderer (raw qword at +0x198).
+            // What the index fields hold on each kind of renderer (raw qword at +0x198).
             auto line = [&](const char* kind, const std::vector<uint64_t>& list) {
                 std::string text;
-                int valid = 0, shown = 0;
+                int low = 0, high = 0, shown = 0;
                 for (uint64_t r : list) {
                     const uint64_t raw = rpm<uint64_t>(r + scenenode::kIndexField);
-                    valid += scenenode::index_of(r) >= 0;
+                    low += scenenode::index_of(r, 0) >= 0;
+                    high += scenenode::index_of(r, 1) >= 0;
                     if (shown++ < 6) { char b[24]; std::snprintf(b, sizeof(b), "%016llx ", (unsigned long long)raw); text += b; }
                 }
-                diag::log("SCENE", "%s: %zu renderers, %d with a scene index; +0x198: %s", kind, list.size(), valid, text.c_str());
+                diag::log("SCENE", "%s: %zu renderers, low dword valid on %d, high dword valid on %d; +0x198: %s", kind, list.size(), low, high, text.c_str());
             };
             line("enemies", enemies); line("teammates", mates); line("arms", arms); line("weapon parts", weapons);
         }
-        scenenode::Layout layout;
-        const bool ok = scenenode::calibrate(refs, layout);
-        if (ok) {
+        // The persistent scene index is one of the two dwords at +0x198: try the low one, then the high one.
+        for (int field = 0; field < 2; ++field) {
+            std::vector<scenenode::Ref> refs, first_person;
+            build(field, refs, first_person);
+            int eights = 0, zeros = 0, indexed = 0;
+            for (const auto& r : refs) { eights += r.layer == 8; zeros += r.layer == 0; indexed += r.index >= 0; }
+            diag::log("SCENE", "searching with the %s dword as the index: %zu renderers (%d indexed, %d on layer 8, %d on layer 0)",
+                      field ? "high" : "low", refs.size(), indexed, eights, zeros);
+            scenenode::Layout layout;
+            if (!scenenode::calibrate(refs, layout)) continue;
+            layout.field = field;
             g_anchor_refs = first_person.size() > 4 ? std::vector<scenenode::Ref>(first_person.begin(), first_person.begin() + 4) : first_person;
             g_layout = layout;
-            diag::log("CHAMS", "scene layer field found: %s, %s %s%d byte(s), %s (verified on %d renderers)", layout.how,
-                      layout.soa ? "array" : "nodes", layout.soa ? "" : "stride ", layout.stride, layout.mask ? "mask" : "layer", layout.refs);
-        } else {
-            diag::log("CHAMS", "scene layer field NOT found (%zu renderers: %d on layer 8, %d on layer 0, %zu weapon parts)", refs.size(), eights, zeros, weapons.size());
+            diag::log("CHAMS", "scene layer field found: %s, %s %s%d byte(s), %s, index in the %s dword (verified on %d renderers)", layout.how,
+                      layout.soa ? "array" : "nodes", layout.soa ? "" : "stride ", layout.stride, layout.mask ? "mask" : "layer",
+                      field ? "high" : "low", layout.refs);
+            return;
         }
+        diag::log("CHAMS", "scene layer field NOT found (%zu enemies, %zu teammates, %zu arms, %zu weapon parts)", enemies.size(), mates.size(), arms.size(), weapons.size());
     }
 
     // The scene layout, searched on a worker when needed. True when it is known and still verified.
@@ -493,8 +504,8 @@ namespace localview {
         if (same && g_layout.ok && rpm<uint64_t>(t.slot) == t.body) {
             wpm<uint64_t>(t.slot, t.arms);
             scenenode::write_field(g_layout, t.index, t.layer_before);
-            wpm<uint32_t>(t.arms + scenenode::kIndexField, uint32_t(t.index));
-            wpm<uint32_t>(t.body + scenenode::kIndexField, 0xFFFFFFFFu);
+            wpm<uint32_t>(t.arms + scenenode::kIndexField + uint64_t(g_layout.field) * 4, uint32_t(t.index));
+            wpm<uint32_t>(t.body + scenenode::kIndexField + uint64_t(g_layout.field) * 4, 0xFFFFFFFFu);
             if (t.flag_addr && !t.flag_was_set) wpm<uint8_t>(t.flag_addr, uint8_t(rpm<uint8_t>(t.flag_addr) & ~(1 << t.flag_bit)));
             diag::log("TP", "scene node %d handed back to the arms", t.index);
         } else {
@@ -531,8 +542,9 @@ namespace localview {
         if (!bindings) return;
         const uint64_t body = chams::native_of(rpm<uint64_t>(bindings + v100::bindings_character_renderer));
         const uint64_t arms = chams::native_of(rpm<uint64_t>(bindings + v100::bindings_arms_renderer));
-        const int index = arms ? scenenode::index_of(arms) : -1;
-        const uint32_t body_low = body ? rpm<uint32_t>(body + scenenode::kIndexField) : 0;
+        const uint64_t index_at = scenenode::kIndexField + uint64_t(g_layout.field) * 4;
+        const int index = arms ? scenenode::index_of(arms, g_layout.field) : -1;
+        const uint32_t body_low = body ? rpm<uint32_t>(body + index_at) : 0;
         const uint64_t slot = index >= 0 ? g_layout.base + uint64_t(index) * uint64_t(g_layout.stride) : 0;
         if (!body || !arms || index < 0 || body_low != 0xFFFFFFFFu || rpm<uint64_t>(slot) != arms) {
             diag::log("TP", "body hand-over not possible: body index 0x%08x, arms index %d, node holds 0x%llx (arms 0x%llx)", body_low, index,
@@ -550,8 +562,8 @@ namespace localview {
         if (g_enabled_getter && is_enabled(body) == 0 && find_flag(body, flag_addr, flag_bit)) {
             t.flag_addr = flag_addr; t.flag_bit = flag_bit;
         }
-        wpm<uint32_t>(body + scenenode::kIndexField, uint32_t(index));
-        wpm<uint32_t>(arms + scenenode::kIndexField, 0xFFFFFFFFu);
+        wpm<uint32_t>(body + index_at, uint32_t(index));
+        wpm<uint32_t>(arms + index_at, 0xFFFFFFFFu);
         wpm<uint64_t>(slot, body);
         scenenode::write_field(g_layout, index, scenenode::expect(0, g_layout.mask));
         if (t.flag_addr) wpm<uint8_t>(t.flag_addr, uint8_t(rpm<uint8_t>(t.flag_addr) | (1 << t.flag_bit)));

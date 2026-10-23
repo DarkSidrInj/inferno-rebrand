@@ -34,14 +34,18 @@ namespace scenenode {
         int width{1};      // bytes of the layer field
         bool mask{};       // the field holds 1 << layer
         int refs{};        // renderers it was verified against
+        int field{};       // which dword of renderer+0x198 is the scene index (0 low, 1 high)
         const char* how{""};
     };
 
     inline constexpr uint64_t kIndexField = 0x198;  // renderer + 0x198: scene index (low dword)
     inline constexpr int kMaxIndex = 1 << 20;
 
-    inline int index_of(uint64_t renderer) {
-        const int32_t v = rpm<int32_t>(renderer + kIndexField);
+    // field 0: the low dword at +0x198, field 1: the high dword at +0x19C. Measured on device: the low one is
+    // small and valid only for renderers drawn right now, the high one is large and shared by renderers of
+    // one rig (arms and gloves); which of them is the persistent scene index is found by the search.
+    inline int index_of(uint64_t renderer, int field = 0) {
+        const int32_t v = rpm<int32_t>(renderer + kIndexField + uint64_t(field) * 4);
         return v >= 0 && v < kMaxIndex ? int(v) : -1;
     }
 
@@ -139,14 +143,14 @@ namespace scenenode {
     // Is `index` still this renderer's node?
     inline bool node_is(const Layout& l, int index, uint64_t renderer) {
         if (index < 0) return false;
-        if (l.soa) return index_of(renderer) == index;
+        if (l.soa) return index_of(renderer, l.field) == index;
         return rpm<uint64_t>(l.base + uint64_t(index) * uint64_t(l.stride)) == renderer;
     }
 
     // The scene node of a renderer: its index field when the node holds its pointer, otherwise a search
     // of the node array (cached; a miss is not searched again for two seconds).
     inline int node_index(const Layout& l, uint64_t renderer) {
-        const int index = index_of(renderer);
+        const int index = index_of(renderer, l.field);
         if (l.soa) return index;
         auto holds = [&](int i) { return i >= 0 && rpm<uint64_t>(l.base + uint64_t(i) * uint64_t(l.stride)) == renderer; };
         if (holds(index)) return index;
@@ -332,8 +336,10 @@ namespace scenenode {
         for (const Ref& r : refs) eights += r.layer == 8;
         if (find_aos(refs, out)) return true;
         // A flat array is matched by values alone, so it needs enough renderers to be unambiguous.
+        // Several of both layers, or an array of 8s and a few 0s would match anything.
         std::vector<Ref> indexed;
-        for (const Ref& r : refs) if (r.index >= 0) indexed.push_back(r);
-        return indexed.size() >= 10 && eights >= 3 && find_soa(indexed, out);
+        int zeros = 0;
+        for (const Ref& r : refs) if (r.index >= 0) { indexed.push_back(r); zeros += r.layer == 0; }
+        return indexed.size() >= 10 && eights >= 3 && zeros >= 3 && find_soa(indexed, out);
     }
 }
