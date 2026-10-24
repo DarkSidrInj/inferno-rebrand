@@ -17,16 +17,20 @@
 // and kept only if its value is sane.
 //
 // Writing a field alone does nothing visible: Unity hands fog to the renderer inside its own
-// setters. So a change is made by *replaying* the game's setter (CUtils/CArm64.hpp): the
-// setter runs in the interpreter with the new value, against live memory, and the stores it
-// would make (the field plus what it updates behind it) are written to the game. A replay is
-// used only when every store is fully known; otherwise the field is written directly. The object moves on scene loads, so fog start is re-read every
-// two seconds and everything is resolved again when it moved. Turning the fog off writes the
-// game's values back.
+// setters. So a change is made by *calling* the game's setter (CUtils/CRemoteCall.hpp): on its
+// UnityMain thread, through a ptrace stop, the way TP calls Renderer.set_enabled, with the new
+// value in the argument registers (a float in s0, a colour by reference). Every setter of a
+// change runs inside one stop. Where that cannot be done the setter is *replayed* in the
+// interpreter (CUtils/CArm64.hpp) and the stores it would make are written to the game, and
+// where that cannot be done either the field is written directly. The object moves on scene
+// loads, so fog start is re-read every two seconds and everything is resolved again when it
+// moved. Turning the fog off puts the game's values back the same way (and whatever the menu
+// says, so nothing stays changed).
 
 #include "CGameContext.hpp"
 #include "COffsets.hpp"
 #include "../CUtils/CArm64.hpp"
+#include "../CUtils/CRemoteCall.hpp"
 #include "CIcalls.hpp"
 #include "../CConfigs/CConfig.hpp"
 #include <algorithm>
@@ -95,6 +99,9 @@ namespace worldfog {
     inline long long g_last_resolve = 0, g_last_check = 0, g_last_write = 0;
     inline bool g_applied = false;
     inline Original g_original{};
+    // The game's RenderSettings hold values of ours (set by apply_fields, not yet put back). While they do, nothing may be
+    // read as "the game's own": g_original would take our fog for the map's.
+    inline std::atomic<bool> g_touched{false};
     inline bool g_dumped = false;            // wrapper code logged once per process
     // Resolution can walk deep into il2cpp (an empty icall slot leads into the resolver), so it
     // runs on its own thread; the frame only picks up the result.
@@ -277,6 +284,7 @@ namespace worldfog {
     inline void resolve_all() {
         g_ready = false;
         g_applied = false;
+        g_touched = false;   // whatever object this finds, its values are the game's
         std::string why = "icall slot empty";
         g_object = 0;
         const uint64_t object_wrapper = proc::lib + v100::rs_get_render_settings_injected;
@@ -454,9 +462,10 @@ namespace worldfog {
         return a64::commit(stores);
     }
 
-    // Sets one field the way the game would (setter replay), or directly when that cannot be done.
-    inline void set_field(Field f, const void* value, size_t size) {
-        if (!cfg::fog::replay) return;   // the engine's setters are not to be run (menu switch)
+    // Sets one field the way the game would (setter replay), or directly when that cannot be done. `force` = put the
+    // game's own value back whatever the menu says.
+    inline void set_field(Field f, const void* value, size_t size, bool force = false) {
+        if (!cfg::fog::replay && !force) return;   // the engine path is off (menu switch)
         const uint64_t a = g_fields[f].address;
         uint8_t now[16]{};
         if (!a || (mem_read(a, now, size) && std::memcmp(now, value, size) == 0)) return;
@@ -467,25 +476,137 @@ namespace worldfog {
         }
     }
 
+    // ---- the game's own setters, run on its main thread --------------------------------------------
+    // The setters are native code (RenderSettings.set_fogStartDistance and the like). They are called the way the game's
+    // scripts call them, on UnityMain through a ptrace stop (CUtils/CRemoteCall.hpp, as TP does for Renderer.set_enabled):
+    // everything the setter does behind the field runs, which writing the field cannot do.
+    inline std::atomic<bool> g_native_failed{false};      // ptrace refused or a call faulted: not tried again
+    inline std::atomic<long long> g_native_retry_at{0};   // after a failed attempt (thread not caught, timeout)
+    inline int g_native_errors = 0;
+    inline bool (*g_remote_batch)(remote::Call*, int, std::string&) = nullptr;   // tests replace the real call
+
+    inline bool remote_batch(remote::Call* calls, int n, std::string& why) {
+        if (g_remote_batch) return g_remote_batch(calls, n, why);
+        const int tid = remote::find_thread(proc::pid, "UnityMain");
+        if (tid <= 0) { why = "no thread UnityMain"; return false; }
+        return remote::call_batch(tid, calls, n, why);
+    }
+
+    inline bool native_wanted() {
+        return cfg::fog::native && !g_native_failed.load() && proc::pid > 0 && diag::now_ms() >= g_native_retry_at.load();
+    }
+
+    // How a field's setter is called: a float in s0, a bool or int in x0, a colour by reference (x0 = its address).
+    // x1 stays 0, for the il2cpp wrappers' MethodInfo*.
+    inline bool make_call(Field f, const uint8_t* value, size_t size, remote::Call& c) {
+        c = remote::Call{};
+        c.fn = g_setter[f];
+        if (!c.fn) return false;
+        c.nx = 2;
+        switch (kSpecs[f].kind) {
+            case Float: std::memcpy(&c.f[0], value, 4); c.nf = 1; break;
+            case Color: std::memcpy(c.blob, value, std::min<size_t>(size, 16)); c.blob_len = 16; c.blob_arg = 0; break;
+            default: { uint64_t v = 0; std::memcpy(&v, value, std::min<size_t>(size, 8)); c.x[0] = v; break; }
+        }
+        return true;
+    }
+
+    // A pending change of one field.
+    struct Change { Field f; uint8_t bytes[16]; size_t size; };
+
+    inline Change change_of(Field f, const void* value, size_t size) {
+        Change c{f, {}, size};
+        std::memcpy(c.bytes, value, std::min<size_t>(size, sizeof(c.bytes)));
+        return c;
+    }
+
+    inline bool differs(Field f, const void* value, size_t size);
+
+    // Writes the changes: fields that have a setter go through the game's setters, all in one stop of its main thread; the
+    // others (fog flag, mode, ambient intensity: no setter was found) are written first, so the setters see them. When the
+    // setters cannot be called, a replay and then a plain write take over.
+    inline void write_changes(const std::vector<Change>& todo, bool force) {
+        if (todo.empty()) return;
+        g_touched = true;
+        const bool native = native_wanted() && (force || cfg::fog::replay);
+        std::vector<remote::Call> calls;
+        std::vector<Change> called, plain;
+        for (const Change& c : todo) {
+            remote::Call call;
+            if (native && make_call(c.f, c.bytes, c.size, call)) { calls.push_back(call); called.push_back(c); }
+            else plain.push_back(c);
+        }
+        // The fog flag and the mode have no setter here: calling fog start too (with its own value) makes the engine take in
+        // the whole state.
+        bool flag = false, has_start = false;
+        for (const Change& c : plain) flag |= c.f == Fog || c.f == Mode;
+        for (const Change& c : called) has_start |= c.f == Start;
+        if (native && flag && !has_start && g_fields[Start].address) {
+            const float now = rpm<float>(g_fields[Start].address);
+            remote::Call call;
+            if (make_call(Start, reinterpret_cast<const uint8_t*>(&now), 4, call)) { calls.push_back(call); called.push_back(change_of(Start, &now, 4)); }
+        }
+        for (const Change& c : plain) set_field(c.f, c.bytes, c.size, force);
+        if (calls.empty()) return;
+
+        std::string names;
+        for (const Change& c : called) names += std::string(names.empty() ? "" : ", ") + kSpecs[c.f].name;
+        std::string why;
+        const long long t0 = diag::now_ms();
+        const bool ok = remote_batch(calls.data(), int(calls.size()), why);
+        if (ok) {
+            g_native_errors = 0;
+            int off = 0;
+            for (const Change& c : called) if (differs(c.f, c.bytes, c.size)) ++off;
+            diag::log("FOG", "engine setters called in the game (%s): %lld ms%s", names.c_str(), (long long)(diag::now_ms() - t0),
+                      off ? ", but some fields hold other values afterwards (the setter changed them)" : "");
+            return;
+        }
+        diag::log("WARN", "FOG engine setters (%s) could not be called in the game: %s", names.c_str(), why.c_str());
+        const bool hard = why.find("PTRACE_SEIZE") != std::string::npos || why.find("faulted") != std::string::npos ||
+                          why.find("no thread") != std::string::npos || why.find("exited") != std::string::npos;
+        if (hard || ++g_native_errors >= 3) {
+            g_native_failed = true;
+            diag::log("WARN", "FOG calling the game's setters is off from now on; replays and field writes are used instead");
+        } else {
+            g_native_retry_at = diag::now_ms() + 10000;
+        }
+        for (size_t i = 0; i < calls.size(); ++i)
+            if (!calls[i].done) set_field(called[i].f, called[i].bytes, called[i].size, force);
+    }
+
     inline bool g_ambient_written = false;   // night mode changed the ambient light: the map's values go back
 
-    inline void restore_ambient() {
+    // The map's own ambient light, as changes (only what is not already there).
+    inline void collect_ambient_restore(std::vector<Change>& todo) {
         if (!g_ambient_written) return;
         g_ambient_written = false;
+        auto add = [&](Field f, const void* v, size_t size) { if (differs(f, v, size)) todo.push_back(change_of(f, v, size)); };
         if (g_original.ambient) {
-            set_field(Sky, g_original.sky, 16);
-            set_field(Equator, g_original.equator, 16);
+            add(Sky, g_original.sky, 16);
+            add(Equator, g_original.equator, 16);
         }
-        if (g_original.intensity >= 0.f) set_field(Intensity, &g_original.intensity, 4);
+        if (g_original.intensity >= 0.f) add(Intensity, &g_original.intensity, 4);
+    }
+
+    inline void restore_ambient() {
+        std::vector<Change> todo;
+        collect_ambient_restore(todo);
+        write_changes(todo, true);
+        if (!g_applied) g_touched = false;
     }
 
     inline void restore() {
-        restore_ambient();
-        set_field(Fog, &g_original.fog, 1);
-        if (g_fields[Mode].address) set_field(Mode, &g_original.mode, 4);
-        set_field(Start, &g_original.start, 4);
-        set_field(End, &g_original.end, 4);
-        if (g_fields[FogColor].address) set_field(FogColor, g_original.color, sizeof(g_original.color));
+        std::vector<Change> todo;
+        collect_ambient_restore(todo);
+        auto add = [&](Field f, const void* v, size_t size) { if (differs(f, v, size)) todo.push_back(change_of(f, v, size)); };
+        add(Fog, &g_original.fog, 1);
+        if (g_fields[Mode].address) add(Mode, &g_original.mode, 4);
+        add(Start, &g_original.start, 4);
+        add(End, &g_original.end, 4);
+        if (g_fields[FogColor].address) add(FogColor, g_original.color, sizeof(g_original.color));
+        write_changes(todo, true);
+        g_touched = false;
         diag::log("FOG", "restored game fog fog=%d start=%.1f end=%.1f", g_original.fog, g_original.start, g_original.end);
     }
 
@@ -764,19 +885,22 @@ namespace worldfog {
                (w.ambient && w.intensity >= 0.f && differs(Intensity, &w.intensity, 4));
     }
 
-    // Field changes (setter replays) run on the worker thread.
+    // Field changes (the game's setters, replays) run on the worker thread.
     inline void apply_fields(const Want& w) {
-        set_field(Fog, &w.fog, 1);
-        set_field(Mode, &w.mode, 4);
-        set_field(Start, &w.start, 4);
-        set_field(End, &w.end, 4);
-        set_field(FogColor, w.color, 16);
+        std::vector<Change> todo;
+        auto add = [&](Field f, const void* v, size_t size) { if (differs(f, v, size)) todo.push_back(change_of(f, v, size)); };
+        add(Fog, &w.fog, 1);
+        add(Mode, &w.mode, 4);
+        add(Start, &w.start, 4);
+        add(End, &w.end, 4);
+        add(FogColor, w.color, 16);
         if (w.ambient) {
             g_ambient_written = true;
-            set_field(Sky, w.sky, 16);
-            set_field(Equator, w.equator, 16);
-            if (w.intensity >= 0.f) set_field(Intensity, &w.intensity, 4);
+            add(Sky, w.sky, 16);
+            add(Equator, w.equator, 16);
+            if (w.intensity >= 0.f) add(Intensity, &w.intensity, 4);
         }
+        write_changes(todo, false);
     }
 
     // The engine's setters are run at most once a second, and not at all once the game has put the fields back five
@@ -832,6 +956,10 @@ namespace worldfog {
             if (g_resolving.load()) return;  // let the old resolution finish first
             g_pid = proc::pid;
             g_ready = g_applied = false;
+            g_touched = false;
+            g_native_failed = false;
+            g_native_errors = 0;
+            g_native_retry_at = 0;
             g_dumped = false;
             g_last_resolve = 0;
             for (auto& f : g_fields) f = Resolved{};
@@ -858,6 +986,7 @@ namespace worldfog {
                 diag::log("FOG", "RenderSettings moved (scene load), resolving again");
                 restore_params();
                 g_ready = g_applied = false;
+                g_touched = false;
                 g_last_resolve = 0;
                 return;
             }
@@ -877,7 +1006,7 @@ namespace worldfog {
             std::thread([] { restore_ambient(); g_resolving = false; }).detach();
             return;
         }
-        if (!g_applied && g_params.empty()) read_original();
+        if (!g_applied && !g_touched.load()) read_original();   // never while our values stand in the game's fields
         if (now - g_last_write < 100) return;
         g_last_write = now;
         apply();
@@ -889,8 +1018,11 @@ namespace worldfog {
     // Menu "Rescan" button.
     inline void rescan() {
         if (g_resolving.load()) return;
-        if (g_applied) { restore_params(); restore(); }
         g_ready = g_applied = false;
         g_last_resolve = 0;
+        if (!g_touched.load()) return;
+        restore_params();
+        g_resolving = true;   // the game's own setters may take a moment: not on the menu's thread
+        std::thread([] { restore(); g_resolving = false; }).detach();
     }
 }

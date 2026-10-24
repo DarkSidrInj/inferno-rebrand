@@ -150,6 +150,12 @@ int main() {
     worldfog::tick();
     worldfog::wait();
     chams::occlusion_tick(0);
+    // An older draw.cpp hands the static font arrays to the atlas as its own, and DestroyContext() free()s them ("Pointer
+    // tag ... was truncated", abort). Whatever draw.cpp does, the atlas is told it owns nothing: the few KB are the process'.
+    if (ImGui::GetCurrentContext())
+        for (ImFontConfig& font : ImGui::GetIO().Fonts->ConfigData) font.FontDataOwnedByAtlas = false;
     shutdown();
-    return 0;
+    // Static destructors have nothing left to do; the overlay surface goes with the process.
+    std::fflush(nullptr);
+    _exit(0);
 }

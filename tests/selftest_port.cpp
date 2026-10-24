@@ -31,9 +31,39 @@
 
 static volatile uint64_t g_remote_flag = 0;
 extern "C" __attribute__((noinline)) uint64_t remote_target(volatile uint64_t* p, uint64_t v) { *p = v; return v + 1; }
+// A float in s0/xmm0 and a struct by reference, as the fog setters take them.
+static volatile float g_remote_f = 0.f;
+static volatile float g_remote_c[4] = {0.f, 0.f, 0.f, 0.f};
+extern "C" __attribute__((noinline)) void remote_float_target(float a, const float* c) {
+    g_remote_f = a;
+    for (int i = 0; i < 4; ++i) g_remote_c[i] = c[i];
+}
 
 static int failures = 0;
 #define CHECK(c, ...) do { if (!(c)) { ++failures; std::printf("FAIL %s:%d ", __FILE__, __LINE__); std::printf(__VA_ARGS__); std::printf("\n"); } } while (0)
+
+// The game's main thread for the fog tests: what the native setters would store, and the batches they came in.
+struct FakeBatch { std::vector<int> fields; uint8_t fog_flag_at_call; };
+static std::vector<FakeBatch> g_fake_batches;
+static uint8_t* g_fake_rs = nullptr;
+static bool g_fake_fail = false;
+static bool fake_remote_batch(remote::Call* calls, int n, std::string& why) {
+    if (g_fake_fail) { why = "PTRACE_SEIZE errno 1"; return false; }
+    FakeBatch batch{{}, g_fake_rs[0x40]};
+    for (int i = 0; i < n; ++i) {
+        int field = -1;
+        for (int f = 0; f < worldfog::kFields; ++f) if (worldfog::g_setter[f] == calls[i].fn) field = f;
+        if (field < 0) { why = "unknown function"; return false; }
+        uint8_t* at = reinterpret_cast<uint8_t*>(worldfog::g_fields[field].address);
+        if (worldfog::kSpecs[field].kind == worldfog::Float) std::memcpy(at, &calls[i].f[0], 4);
+        else if (worldfog::kSpecs[field].kind == worldfog::Color) std::memcpy(at, calls[i].blob, 16);
+        else { why = "unexpected kind"; return false; }
+        calls[i].done = true;
+        batch.fields.push_back(field);
+    }
+    g_fake_batches.push_back(batch);
+    return true;
+}
 
 // The touch screen of the host build: a finger list the tests set.
 namespace touch {
@@ -410,7 +440,7 @@ int main() {
         }
         const bool exec_ok = mprotect(unity + 0x1000, 0x1000, PROT_READ | PROT_EXEC) == 0;
 
-        cfg::fog::replay = true; cfg::fog::constants = true; cfg::fog::live_only = false;   // the whole engine path; the parts are tested alone below
+        cfg::fog::replay = true; cfg::fog::native = false; cfg::fog::constants = true; cfg::fog::live_only = false;   // replay + constants; the native setters have their own test below
         cfg::fog::enabled = true; cfg::fog::auto_color = true; cfg::fog::min_distance = 25.f; cfg::fog::max_distance = 90.f;
         worldfog::g_pid = -1;
         // The renderer still holds the map's fog params (start 0, end 300, density 0.01). The
@@ -553,6 +583,80 @@ int main() {
             worldfog::wait();
             CHECK(!worldfog::g_paused, "switching fog off clears the pause");
             cfg::fog::replay = true; cfg::fog::constants = true;
+        }
+
+        // The game's own setters, called on its main thread: one batch per change, the game's values come back whatever the
+        // menu says, and they are never read while ours stand in the fields.
+        {
+            auto rd = [&](int off) { float v; std::memcpy(&v, rs2 + off, 4); return v; };
+            using worldfog::Start; using worldfog::End;
+            g_fake_rs = rs2;
+            worldfog::g_remote_batch = fake_remote_batch;
+            worldfog::g_native_failed = false; worldfog::g_native_errors = 0; worldfog::g_native_retry_at = 0;
+            cfg::fog::replay = true; cfg::fog::native = true; cfg::fog::constants = false;
+            cfg::night::enabled = false; cfg::fog::enabled = false;
+            worldfog::g_paused = false; worldfog::g_fights = 0;
+            worldfog::tick(); worldfog::wait();
+            auto step = [&] { worldfog::g_last_write = 0; worldfog::g_last_replay = 0; worldfog::tick(); worldfog::wait(); };
+            CHECK(rd(0x58) == 0.f && rd(0x5C) == 300.f && rs2[0x40] == 0, "native test starts from the map's fog");
+
+            cfg::fog::enabled = true; cfg::fog::auto_color = false; cfg::fog::color = ImVec4(.9f, .1f, .2f, 1.f);
+            cfg::fog::min_distance = 30.f; cfg::fog::max_distance = 120.f;
+            g_fake_batches.clear();
+            step();
+            // (The fixture has no colour setter: the colour is a plain write, like the fog flag and the mode.)
+            CHECK(g_fake_batches.size() == 1 && g_fake_batches[0].fields == std::vector<int>({Start, End}),
+                  "native: one batch with start and end (%zu batches, first has %zu calls)", g_fake_batches.size(),
+                  g_fake_batches.empty() ? size_t(0) : g_fake_batches[0].fields.size());
+            CHECK(!g_fake_batches.empty() && g_fake_batches[0].fog_flag_at_call == 1, "native: the fog flag and the colour (no setter) are written before the setters run");
+            CHECK(rs2[0x40] == 1 && rd(0x58) == 30.f && rd(0x5C) == 120.f && std::fabs(rd(0x48) - .9f) < 1e-6f && std::fabs(rd(0x4C) - .1f) < 1e-6f,
+                  "native: fog %d start %.1f end %.1f r %.2f", rs2[0x40], rd(0x58), rd(0x5C), rd(0x48));
+
+            // The menu switch for the engine path goes off while the fog is on, then the fog goes off: everything comes back anyway.
+            cfg::fog::replay = false;
+            cfg::fog::enabled = false;
+            g_fake_batches.clear();
+            worldfog::tick(); worldfog::wait();
+            int32_t mode = 0;
+            std::memcpy(&mode, rs2 + 0x44, 4);
+            CHECK(rs2[0x40] == 0 && mode == 3 && rd(0x58) == 0.f && rd(0x5C) == 300.f && std::fabs(rd(0x48) - .5f) < 1e-6f,
+                  "restore works with the engine path switched off: fog %d mode %d start %.1f end %.1f", rs2[0x40], mode, rd(0x58), rd(0x5C));
+            CHECK(g_fake_batches.size() == 1 && !worldfog::g_touched.load(), "restore: one batch, nothing left changed");
+
+            // Again: the game's values are still the map's, not ours from the last time.
+            cfg::fog::replay = true; cfg::fog::enabled = true; cfg::fog::min_distance = 40.f; cfg::fog::max_distance = 100.f;
+            step();
+            CHECK(worldfog::g_original.start == 0.f && worldfog::g_original.end == 300.f && std::fabs(worldfog::g_original.color[0] - .5f) < 1e-6f,
+                  "the map's values were not replaced by ours: start %.1f end %.1f r %.2f", worldfog::g_original.start,
+                  worldfog::g_original.end, worldfog::g_original.color[0]);
+            CHECK(rd(0x58) == 40.f && rd(0x5C) == 100.f, "second time: start %.1f end %.1f", rd(0x58), rd(0x5C));
+            cfg::fog::enabled = false;
+            worldfog::tick(); worldfog::wait();
+            CHECK(rd(0x58) == 0.f && rd(0x5C) == 300.f && std::fabs(rd(0x48) - .5f) < 1e-6f, "second restore: start %.1f end %.1f", rd(0x58), rd(0x5C));
+
+            // Only the fog flag and mode differ (no setter of their own): fog start is called with its own value.
+            cfg::fog::enabled = true; cfg::fog::min_distance = 0.f; cfg::fog::max_distance = 300.f;
+            cfg::fog::color = ImVec4(.5f, .5f, .5f, 1.f);
+            g_fake_batches.clear();
+            step();
+            CHECK(g_fake_batches.size() == 1 && g_fake_batches[0].fields == std::vector<int>({Start}) && rs2[0x40] == 1,
+                  "flag-only change: the engine is nudged through fog start (%zu batches)", g_fake_batches.size());
+            cfg::fog::enabled = false;
+            worldfog::tick(); worldfog::wait();
+
+            // ptrace refused: the setters are replayed / the fields written, and the native path stays off.
+            g_fake_fail = true;
+            cfg::fog::enabled = true; cfg::fog::min_distance = 30.f; cfg::fog::max_distance = 120.f; cfg::fog::color = ImVec4(.9f, .1f, .2f, 1.f);
+            step();
+            CHECK(worldfog::g_native_failed.load() && rd(0x58) == 30.f && rd(0x5C) == 120.f && std::fabs(rd(0x48) - .9f) < 1e-6f,
+                  "ptrace refused: fields written all the same (start %.1f end %.1f)", rd(0x58), rd(0x5C));
+            cfg::fog::enabled = false;
+            worldfog::tick(); worldfog::wait();
+            CHECK(rd(0x58) == 0.f && rd(0x5C) == 300.f && rs2[0x40] == 0, "ptrace refused: restored all the same");
+            g_fake_fail = false;
+            worldfog::g_remote_batch = nullptr;
+            worldfog::g_native_failed = false;
+            cfg::fog::native = false; cfg::fog::replay = true; cfg::fog::constants = true;
         }
 
         // Occlusion bypass: the culling offset comes from tracing Animator.get_cullingMode_Injected
@@ -1386,6 +1490,49 @@ int main() {
         waitpid(child, &status, 0);
         CHECK(second && WIFEXITED(status) && WEXITSTATUS(status) == 7, "child went on after the calls: %s status=0x%x",
               second ? "ok" : why.c_str(), status);
+    }
+
+    // Remote batch: a float in s0/xmm0, a colour by reference (copied onto the thread's stack), two calls inside one stop.
+    {
+        const pid_t child = fork();
+        if (child == 0) {
+            prctl(PR_SET_NAME, "UnityMain");
+            const timespec nap{0, 2000000};
+            for (int i = 0; i < 5000 && g_remote_flag != 9; ++i) nanosleep(&nap, nullptr);
+            _exit(g_remote_flag == 9 ? 8 : 1);
+        }
+        usleep(50000);
+        remote::Call calls[2];
+        calls[0].fn = reinterpret_cast<uint64_t>(&remote_float_target);
+        calls[0].f[0] = 2.5f; calls[0].nf = 1;
+        calls[0].nx = 2; calls[0].blob_arg = 0; calls[0].blob_len = 16;
+        const float color[4] = {.1f, .2f, .3f, 1.f};
+        std::memcpy(calls[0].blob, color, 16);
+        calls[1].fn = reinterpret_cast<uint64_t>(&remote_target);
+        calls[1].x[0] = reinterpret_cast<uint64_t>(&g_remote_flag); calls[1].x[1] = 5; calls[1].nx = 2;
+        std::string why;
+        const int tid = remote::find_thread(child, "UnityMain");
+        const bool ok = tid > 0 && remote::call_batch(tid, calls, 2, why);
+        float seen_f = 0.f, seen_c[4] = {};
+        uint64_t seen_flag = 0;
+        char path[64];
+        std::snprintf(path, sizeof(path), "/proc/%d/mem", child);
+        const int fd = open(path, O_RDONLY);
+        if (fd >= 0) {
+            pread(fd, &seen_f, sizeof(seen_f), off_t(reinterpret_cast<uint64_t>(&g_remote_f)));
+            pread(fd, seen_c, sizeof(seen_c), off_t(reinterpret_cast<uint64_t>(&g_remote_c[0])));
+            pread(fd, &seen_flag, sizeof(seen_flag), off_t(reinterpret_cast<uint64_t>(&g_remote_flag)));
+            close(fd);
+        }
+        CHECK(ok && calls[0].done && calls[1].done && calls[1].ret == 6, "remote batch ran both calls: %s", ok ? "ok" : why.c_str());
+        CHECK(seen_f == 2.5f && seen_c[0] == .1f && seen_c[1] == .2f && seen_c[2] == .3f && seen_c[3] == 1.f && seen_flag == 5,
+              "float and struct arguments arrived: f=%.2f c=(%.2f %.2f %.2f %.2f) flag=%llu", seen_f, seen_c[0], seen_c[1], seen_c[2], seen_c[3],
+              (unsigned long long)seen_flag);
+        uint64_t ret = 0;
+        const bool last = remote::call(tid, reinterpret_cast<uint64_t>(&remote_target), {reinterpret_cast<uint64_t>(&g_remote_flag), 9}, ret, why);
+        int status = 0;
+        waitpid(child, &status, 0);
+        CHECK(last && WIFEXITED(status) && WEXITSTATUS(status) == 8, "child went on after the batch: %s status=0x%x", last ? "ok" : why.c_str(), status);
     }
 
     // Armor, max armor and helmet from the stats object; values that do not fit together are refused.
