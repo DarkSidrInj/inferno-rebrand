@@ -388,7 +388,7 @@ namespace {
         });
         card(1, "ENGINE", {
             toggle_row("Run Engine Setters", &cfg::fog::replay),
-            toggle_row("Renderer Constants", &cfg::fog::constants),
+            toggle_row("Renderer Constants (freezes)", &cfg::fog::constants),
             slider_row("Fog Start", &cfg::fog::min_distance, 0.f, 200.f, "%.0f m"),
             button_row("Rescan World", [] { worldfog::rescan(); }),
         });

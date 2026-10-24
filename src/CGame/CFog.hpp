@@ -88,6 +88,7 @@ namespace worldfog {
     inline Resolved g_fields[kFields];
     inline uint64_t g_setter[kFields]{};      // code that sets the field, for replays
     inline bool g_setter_logged[kFields]{};
+    inline bool g_replay_bad[kFields]{};      // this setter could not be emulated: its field is written directly from now on
     inline uint64_t g_object = 0;            // from GetRenderSettings_Injected, when readable
     inline bool g_ready = false;             // fog, start and end are known
     inline long long g_last_resolve = 0, g_last_check = 0, g_last_write = 0;
@@ -257,6 +258,7 @@ namespace worldfog {
         const Spec& spec = kSpecs[f];
         g_setter[f] = 0;
         g_setter_logged[f] = false;
+        g_replay_bad[f] = false;
         const uint64_t want = g_fields[f].address;
         if (!want) return;
         std::string why;
@@ -379,7 +381,7 @@ namespace worldfog {
     // setter or the replay cannot be fully known.
     inline bool replay_setter(Field f, const uint8_t* value, size_t size) {
         const uint64_t fn = g_setter[f];
-        if (!fn) return false;
+        if (!fn || g_replay_bad[f]) return false;
         const Spec& spec = kSpecs[f];
         a64::Machine m;
         m.pc = fn;
@@ -419,6 +421,7 @@ namespace worldfog {
         session.max_depth = 12;
         session.profile = !g_setter_logged[f];
         if (!a64::replay(m, field, stores, why, &session)) {
+            g_replay_bad[f] = true;
             if (!g_setter_logged[f]) {
                 g_setter_logged[f] = true;
                 diag::log("FOG", "%s setter not replayable (%s, %ld steps), writing the field", spec.name, why.c_str(), session.total_steps);

@@ -111,12 +111,15 @@ bool ImGui_init() {
     ImGuiIO &io = ImGui::GetIO();
     io.IniFilename = NULL;
 
-    fontBold = io.Fonts->AddFontFromMemoryTTF(pixeloperator, sizeof(pixeloperator), 32, nullptr, io.Fonts->GetGlyphRangesCyrillic());
-    fontMedium = io.Fonts->AddFontFromMemoryTTF(pixeloperator, sizeof(pixeloperator), 28, nullptr, io.Fonts->GetGlyphRangesCyrillic());
-    fontDesc = io.Fonts->AddFontFromMemoryTTF(pixeloperator, sizeof(pixeloperator), 22, nullptr, io.Fonts->GetGlyphRangesCyrillic());
+    // The font data is static: the atlas must not free it (it did, on exit: "Pointer tag ... truncated", abort).
+    ImFontConfig static_font;
+    static_font.FontDataOwnedByAtlas = false;
+    fontBold = io.Fonts->AddFontFromMemoryTTF(pixeloperator, sizeof(pixeloperator), 32, &static_font, io.Fonts->GetGlyphRangesCyrillic());
+    fontMedium = io.Fonts->AddFontFromMemoryTTF(pixeloperator, sizeof(pixeloperator), 28, &static_font, io.Fonts->GetGlyphRangesCyrillic());
+    fontDesc = io.Fonts->AddFontFromMemoryTTF(pixeloperator, sizeof(pixeloperator), 22, &static_font, io.Fonts->GetGlyphRangesCyrillic());
     io.FontDefault = fontMedium;
 
-    espFont = io.Fonts->AddFontFromMemoryTTF(esp, sizeof(esp), 18, nullptr, io.Fonts->GetGlyphRangesCyrillic());
+    espFont = io.Fonts->AddFontFromMemoryTTF(esp, sizeof(esp), 18, &static_font, io.Fonts->GetGlyphRangesCyrillic());
 
     // The Neverlose-style menu: text (Medium, Bold) and the icon font. The data is static, the atlas must not free it.
     {

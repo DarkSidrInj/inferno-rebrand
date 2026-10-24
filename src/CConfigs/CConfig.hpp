@@ -90,11 +90,12 @@ namespace fog {
     inline float min_distance = 20.f;    // meters: fog starts here
     inline float max_distance = 150.f;   // meters: fully fogged from here
     inline ImVec4 color = ImVec4(0.12f, 0.13f, 0.16f, 1.f);  // manual color (auto_color off)
-    // How fog and night reach the game. Both are the engine way and were the suspects of a freeze (ANR), so each can be
-    // switched off to find which one it is: `replay` runs the engine's own setters (RenderSettings fields and everything
-    // they update), `constants` rewrites the renderer's fog constants found by value.
+    // How fog and night reach the game. `replay` runs the engine's own setters when they can be emulated, else writes the
+    // RenderSettings fields (a handful of floats). `constants` rewrites every copy of the renderer's fog constants found
+    // by value: on device that is ~1250 places (plus ~1200 colours) all over the heap, most of them stale or freed memory;
+    // writing them froze the game, so it is off unless asked for.
     inline bool replay = true;
-    inline bool constants = true;
+    inline bool constants = false;
 }
 
 
