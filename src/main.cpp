@@ -126,7 +126,6 @@ int main() {
             if (run && proc::lib != 0) {
                 // Library health is independent from asynchronous registry discovery.
                 game::check_lib(proc::lib);
-                ui::menu::world_overlay();   // night and fog: under the ESP, over the game
                 visuals::draw();
                 worldfog::tick();
             }
