@@ -451,7 +451,6 @@ namespace worldfog {
 
     // Sets one field the way the game would (setter replay), or directly when that cannot be done.
     inline void set_field(Field f, const void* value, size_t size) {
-        if (!cfg::fog::engine) return;   // safe mode: RenderSettings and the engine's setters are left alone
         const uint64_t a = g_fields[f].address;
         uint8_t now[16]{};
         if (!a || (mem_read(a, now, size) && std::memcmp(now, value, size) == 0)) return;
@@ -708,7 +707,7 @@ namespace worldfog {
     inline void apply() {
         const Want w = desired();
         write_params(w.start, w.end, w.color);
-        if (cfg::fog::engine && !g_resolving.load() && fields_differ(w)) {
+        if (!g_resolving.load() && fields_differ(w)) {
             g_resolving = true;
             std::thread([w] { apply_fields(w); g_resolving = false; }).detach();
         }
@@ -742,7 +741,9 @@ namespace worldfog {
             g_colors.clear();
         }
         if (proc::pid <= 0 || !plausible(proc::lib)) return;
-        const bool active = cfg::fog::enabled || cfg::night::enabled;
+        // Without "Engine Writes" the world effects are overlays (CMenu.cpp) and nothing here runs: no scan of the
+        // game's memory, no writes into RenderSettings or the render thread's data.
+        const bool active = cfg::fog::engine && (cfg::fog::enabled || cfg::night::enabled);
         if (!active && !g_applied) return;
         const long long now = diag::now_ms();
 

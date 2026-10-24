@@ -77,13 +77,14 @@ int main(int argc, char** argv) {
     ImGui::GetStyle().ScaleAllSizes(3.0f);
     ui::bar::g_open = true;
     ui::menu::st.page = (ui::menu::Page)page;
-    cfg::esp::box = true; cfg::esp::health = true; cfg::esp::armor = true; cfg::night::enabled = true; cfg::strafe::enabled = true;
+    cfg::esp::box = true; cfg::esp::health = true; cfg::esp::armor = true; cfg::night::enabled = std::getenv("NIGHT") != nullptr; cfg::fog::enabled = std::getenv("FOG") != nullptr; cfg::strafe::enabled = true;
     for (int f = 0; f < 40; ++f) {
         io.DeltaTime = 0.05f;
         io.MousePos = ImVec2(-1000, -1000);
         io.MouseDown[0] = false;
         if (std::strcmp(mode, "select") == 0 && f >= 24 && f <= 26) { io.MousePos = ImVec2(1000, 1180); io.MouseDown[0] = f < 26; }   // taps near the bottom of the shell
         ImGui::NewFrame();
+        ui::menu::world_overlay();
         ui::menu::render();
         if (f == 20 && std::strcmp(mode, "color") == 0) ui::menu::open_color(3, &cfg::esp::box_col, ImVec2(1180, 330));
         if (f == 20 && std::strcmp(mode, "select") == 0) { ui::menu::Row r; static const char* items[] = {"Flat", "Untouchable", "Outline"}; r.items = items; r.count = 3; r.cur = 1; r.pick = [](int){}; ui::menu::open_popup(4, r, ImVec2(1100, 560), 220); }

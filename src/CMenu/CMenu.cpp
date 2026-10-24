@@ -377,17 +377,20 @@ namespace {
         });
         card(0, "FOG", {
             toggle_row("Fog", &cfg::fog::enabled),
-            toggle_row("Auto Color", &cfg::fog::auto_color),
-            slider_row("Min Distance", &cfg::fog::min_distance, 0.f, 200.f, "%.0f m"),
             slider_row("Max Distance", &cfg::fog::max_distance, 10.f, 400.f, "%.0f m"),
+            toggle_row("Auto Color", &cfg::fog::auto_color),
             color_row("Color", &cfg::fog::color),
-            button_row("Rescan World", [] { worldfog::rescan(); }),
-            toggle_row("Engine Writes (risky)", &cfg::fog::engine),
         });
         card(1, "WORLD ESP", {
             toggle_color("Grenades", &cfg::esp::grenade, &cfg::esp::grenade_col),
             toggle_color("Dropped Weapons", &cfg::esp::dropped, &cfg::esp::dropped_col),
             slider_row("Range", &cfg::esp::world_distance, 10.f, 200.f, "%.0f m"),
+        });
+        card(1, "ENGINE (RISKY)", {
+            toggle_row("Engine Writes", &cfg::fog::engine),
+            slider_row("Fog Start", &cfg::fog::min_distance, 0.f, 200.f, "%.0f m"),
+            button_row("Rescan World", [] { worldfog::rescan(); }),
+            info_row("Note", "can freeze the game"),
         });
     }
 
@@ -854,6 +857,30 @@ namespace {
 }
 
 bool exit_requested() { return g_exit; }
+
+void world_overlay() {
+    if (!cfg::night::enabled && !cfg::fog::enabled) return;
+    ImDrawList* d = ImGui::GetBackgroundDrawList();
+    const float w = g_sw, h = g_sh;
+    if (cfg::night::enabled) {
+        // Night: a dark blue tint over the whole view, darker toward the edges.
+        const float s = ImClamp(cfg::night::strength, 0.f, 1.f);
+        d->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), C(3, 8, 28, int(170.f * s)));
+        const ImU32 edge = C(0, 0, 8, int(200.f * s)), none = C(0, 0, 8, 0);
+        const float ex = w * 0.24f, ey = h * 0.30f;
+        d->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(ex, h), edge, none, none, edge);
+        d->AddRectFilledMultiColor(ImVec2(w - ex, 0), ImVec2(w, h), none, edge, edge, none);
+        d->AddRectFilledMultiColor(ImVec2(0, 0), ImVec2(w, ey), edge, edge, none, none);
+        d->AddRectFilledMultiColor(ImVec2(0, h - ey), ImVec2(w, h), none, none, edge, edge);
+    }
+    if (cfg::fog::enabled) {
+        // Fog: a haze over the view; the nearer the maximum distance, the thicker.
+        const float density = ImClamp(0.55f * (1.f - (cfg::fog::max_distance - 20.f) / 400.f), 0.06f, 0.5f);
+        const ImVec4 c = cfg::fog::auto_color ? ImVec4(0.66f, 0.71f, 0.78f, 1.f) : cfg::fog::color;
+        const ImU32 haze = IM_COL32(int(c.x * 255), int(c.y * 255), int(c.z * 255), int(density * 255.f));
+        d->AddRectFilled(ImVec2(0, 0), ImVec2(w, h), haze);
+    }
+}
 
 void render() {
     bar::render();
