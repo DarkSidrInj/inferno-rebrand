@@ -410,7 +410,7 @@ int main() {
         }
         const bool exec_ok = mprotect(unity + 0x1000, 0x1000, PROT_READ | PROT_EXEC) == 0;
 
-        cfg::fog::replay = true; cfg::fog::constants = true;   // the whole engine path; the parts are tested alone below
+        cfg::fog::replay = true; cfg::fog::constants = true; cfg::fog::live_only = false;   // the whole engine path; the parts are tested alone below
         cfg::fog::enabled = true; cfg::fog::auto_color = true; cfg::fog::min_distance = 25.f; cfg::fog::max_distance = 90.f;
         worldfog::g_pid = -1;
         // The renderer still holds the map's fog params (start 0, end 300, density 0.01). The
@@ -1528,6 +1528,22 @@ int main() {
         cfg::bhop::enabled = false;
         bhop::tick(0, Vector3{});
         strafe::tick(0, Vector3{}, nullptr);
+    }
+
+    // Live copies by the soft-dirty bits: a page something writes to all the time is told from one nobody touches.
+    {
+        uint8_t* pages = static_cast<uint8_t*>(mmap(nullptr, 0x4000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+        std::memset(pages, 1, 0x4000);
+        std::atomic<bool> stop{false};
+        std::thread writer([&] { while (!stop) { pages[0x20]++; usleep(2000); } });   // page 0 is written, page 2 is not
+        bool supported = false;
+        const std::vector<uint64_t> addresses = {reinterpret_cast<uint64_t>(pages) + 0x20, reinterpret_cast<uint64_t>(pages) + 0x2020};
+        const std::vector<bool> live = worldfog::live_pages(addresses, supported, getpid(), 40);
+        stop = true;
+        writer.join();
+        if (supported) CHECK(live[0] && !live[1], "soft-dirty: the written page is live (%d), the untouched one is not (%d)", int(live[0]), int(live[1]));
+        else std::printf("note: soft-dirty bits not available in this kernel, live-copy filter skipped\n");
+        munmap(pages, 0x4000);
     }
 
     std::printf(failures ? "SELFTEST FAILED (%d)\n" : "SELFTEST OK\n", failures);

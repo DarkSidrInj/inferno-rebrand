@@ -39,6 +39,7 @@
 #include <unordered_map>
 #include <vector>
 #include <unistd.h>
+#include <fcntl.h>
 
 namespace worldfog {
     enum Kind { Bool, Int, Float, Color };
@@ -520,6 +521,73 @@ namespace worldfog {
 
     inline float to_linear(float c) { return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f); }
 
+    // Which of these addresses lie on pages the game keeps writing to? The kernel's soft-dirty bit tells: clear it for the
+    // whole process (/proc/<pid>/clear_refs "4"), wait a few frames, read it back from /proc/<pid>/pagemap (bit 55). A copy
+    // of the fog constants that is live is rewritten every frame, a stale or freed one is not. Three rounds; a page counts
+    // when it was dirty in at least two. `supported` is false when the kernel never shows a dirty bit at all.
+    inline std::vector<bool> live_pages(const std::vector<uint64_t>& addresses, bool& supported, int pid, int wait_ms = 120) {
+        std::vector<bool> live(addresses.size(), false);
+        supported = false;
+        char path[64];
+        std::snprintf(path, sizeof(path), "/proc/%d/pagemap", pid);
+        const int pagemap = ::open(path, O_RDONLY);
+        if (pagemap < 0) return live;
+        std::vector<int> hits(addresses.size(), 0);
+        bool any_dirty = false;
+        const int rounds = 3;
+        for (int round = 0; round < rounds; ++round) {
+            std::snprintf(path, sizeof(path), "/proc/%d/clear_refs", pid);
+            const int clear = ::open(path, O_WRONLY);
+            if (clear < 0 || ::write(clear, "4", 1) != 1) { if (clear >= 0) ::close(clear); ::close(pagemap); return live; }
+            ::close(clear);
+            usleep(useconds_t(wait_ms) * 1000);
+            for (size_t i = 0; i < addresses.size(); ++i) {
+                uint64_t entry = 0;
+                if (::pread(pagemap, &entry, sizeof(entry), off_t((addresses[i] >> 12) * 8)) != ssize_t(sizeof(entry))) continue;
+                if ((entry >> 55) & 1) { ++hits[i]; any_dirty = true; }
+            }
+        }
+        ::close(pagemap);
+        supported = any_dirty;
+        for (size_t i = 0; i < addresses.size(); ++i) live[i] = hits[i] >= 2;
+        return live;
+    }
+
+    // Keeps only the live copies (and the colours next to them). Too many survivors means the filter does not separate
+    // anything on this device: then nothing is written at all.
+    inline void keep_live_copies() {
+        if (g_params.empty()) return;
+        std::vector<uint64_t> addresses;
+        for (const auto& p : g_params) addresses.push_back(p.address);
+        bool supported = false;
+        const std::vector<bool> live = live_pages(addresses, supported, proc::pid);
+        const size_t before = g_params.size();
+        if (!supported) {
+            diag::log("FOG", "renderer params: the kernel shows no soft-dirty bits, no way to tell the live copies; none are written");
+            g_params.clear();
+            g_colors.clear();
+            return;
+        }
+        std::vector<ParamsCopy> kept;
+        for (size_t i = 0; i < g_params.size(); ++i) if (live[i]) kept.push_back(g_params[i]);
+        constexpr size_t kMaxLive = 160;
+        if (kept.empty() || kept.size() > kMaxLive) {
+            diag::log("FOG", "renderer params: %zu of %zu copies on pages written all the time: %s; none are written", kept.size(), before,
+                      kept.empty() ? "no live copy found" : "too many to be sure which are live");
+            g_params.clear();
+            g_colors.clear();
+            return;
+        }
+        g_params = kept;
+        std::vector<ColorCopy> colors;
+        for (const auto& c : g_colors)
+            for (const auto& p : g_params)
+                if (c.address + 0x200 >= p.address && c.address <= p.address + 0x200) { colors.push_back(c); break; }
+        g_colors = colors;
+        diag::log("FOG", "renderer params: %zu of %zu copies are on pages the game writes every frame (live), %zu colours next to them", g_params.size(),
+                  before, g_colors.size());
+    }
+
     inline void scan_params() {
         g_params.clear();
         g_colors.clear();
@@ -572,6 +640,7 @@ namespace worldfog {
                   g_params.size(), want[0], want[1], want[2], want[3], g_colors.size(), double(scanned) / 1048576.0);
         for (size_t i = 0; i < g_params.size() && i < 8; ++i) diag::log("FOG", "  params at 0x%llx", (unsigned long long)g_params[i].address);
         if (g_params.size() > 8) diag::log("FOG", "  ... %zu more", g_params.size() - 8);
+        if (cfg::fog::live_only) keep_live_copies();
     }
 
     inline void write_params(float start, float end, const float color[3]) {

@@ -93,9 +93,12 @@ namespace fog {
     // How fog and night reach the game. `replay` runs the engine's own setters when they can be emulated, else writes the
     // RenderSettings fields (a handful of floats). `constants` rewrites every copy of the renderer's fog constants found
     // by value: on device that is ~1250 places (plus ~1200 colours) all over the heap, most of them stale or freed memory;
-    // writing them froze the game, so it is off unless asked for.
+    // writing all of them froze the game, hence `live_only`.
     inline bool replay = true;
-    inline bool constants = false;
+    inline bool constants = true;
+    // Of the ~1250 copies only the ones on pages the game writes to every frame (soft-dirty bits) are written; none when the
+    // kernel cannot tell or too many qualify.
+    inline bool live_only = true;
 }
 
 
