@@ -77,7 +77,7 @@ int main(int argc, char** argv) {
     ImGui::GetStyle().ScaleAllSizes(3.0f);
     ui::bar::g_open = true;
     ui::menu::st.page = (ui::menu::Page)page;
-    cfg::esp::box = true; cfg::esp::health = true; cfg::esp::armor = true; cfg::night::enabled = std::getenv("NIGHT") != nullptr; cfg::fog::enabled = std::getenv("FOG") != nullptr; cfg::strafe::enabled = true;
+    cfg::esp::box = true; cfg::esp::health = true; cfg::esp::armor = true; cfg::night::enabled = std::getenv("NIGHT") != nullptr; cfg::fog::enabled = std::getenv("FOG") != nullptr; cfg::fog::overlay = true; cfg::strafe::enabled = true;
     for (int f = 0; f < 40; ++f) {
         io.DeltaTime = 0.05f;
         io.MousePos = ImVec2(-1000, -1000);

@@ -38,6 +38,7 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <unistd.h>
 
 namespace worldfog {
     enum Kind { Bool, Int, Float, Color };
@@ -314,7 +315,7 @@ namespace worldfog {
             diag::log("FOG", "map fog: on=%d mode=%d density=%.4f start=%.1f end=%.1f color=(%.2f %.2f %.2f)", g_original.fog,
                       g_original.mode, g_original.density, g_original.start, g_original.end, g_original.color[0],
                       g_original.color[1], g_original.color[2]);
-            scan_params();
+            if (cfg::fog::constants) scan_params();
         }
         if (!g_ready) {
             diag::log("WARN", "FOG not usable: fog, start and end are all needed");
@@ -451,6 +452,7 @@ namespace worldfog {
 
     // Sets one field the way the game would (setter replay), or directly when that cannot be done.
     inline void set_field(Field f, const void* value, size_t size) {
+        if (!cfg::fog::replay) return;   // the engine's setters are not to be run (menu switch)
         const uint64_t a = g_fields[f].address;
         uint8_t now[16]{};
         if (!a || (mem_read(a, now, size) && std::memcmp(now, value, size) == 0)) return;
@@ -560,6 +562,7 @@ namespace worldfog {
                 }
                 scanned += chunk;
                 at += chunk;
+                usleep(1500);   // breathe: an unbroken multi-GB read pages the game's memory in and out and stalls its threads
             }
         }
         diag::log("FOG", "renderer params: %zu copies of unity_FogParams (%.4f %.4f %.6f %.4f), %zu fog colors, %.0f MiB searched",
@@ -704,12 +707,35 @@ namespace worldfog {
         }
     }
 
+    // The engine's setters are run at most once a second, and not at all once the game has put the fields back five
+    // times in a row (it owns them then): running engine code against live state ten times a second would be worse
+    // than the fog it buys.
+    inline long long g_last_replay = 0;
+    inline int g_fights = 0;
+    inline bool g_paused = false;
+
     inline void apply() {
         const Want w = desired();
-        write_params(w.start, w.end, w.color);
-        if (!g_resolving.load() && fields_differ(w)) {
+        if (cfg::fog::constants) write_params(w.start, w.end, w.color);
+        const long long now = diag::now_ms();
+        if (cfg::fog::replay && !g_paused && !g_resolving.load() && now - g_last_replay >= 1000 && fields_differ(w)) {
+            if (g_last_replay && now - g_last_replay < 3000) {
+                if (++g_fights >= 5) {
+                    g_paused = true;
+                    diag::log("WARN", "FOG the game puts RenderSettings back every time; the engine setters are paused (switch fog off and on to retry)");
+                    return;
+                }
+            } else {
+                g_fights = 0;
+            }
+            g_last_replay = now;
             g_resolving = true;
-            std::thread([w] { apply_fields(w); g_resolving = false; }).detach();
+            std::thread([w] {
+                const long long started = diag::now_ms();
+                apply_fields(w);
+                diag::log("FOG", "engine setters run in %lld ms", (long long)(diag::now_ms() - started));
+                g_resolving = false;
+            }).detach();
         }
         if (!g_applied) {
             g_applied = true;
@@ -741,9 +767,7 @@ namespace worldfog {
             g_colors.clear();
         }
         if (proc::pid <= 0 || !plausible(proc::lib)) return;
-        // Without "Engine Writes" the world effects are overlays (CMenu.cpp) and nothing here runs: no scan of the
-        // game's memory, no writes into RenderSettings or the render thread's data.
-        const bool active = cfg::fog::engine && (cfg::fog::enabled || cfg::night::enabled);
+        const bool active = (cfg::fog::replay || cfg::fog::constants) && (cfg::fog::enabled || cfg::night::enabled);
         if (!active && !g_applied) return;
         const long long now = diag::now_ms();
 
@@ -768,6 +792,8 @@ namespace worldfog {
         }
 
         if (!active) {
+            g_paused = false;
+            g_fights = 0;
             restore_params();
             g_resolving = true;
             std::thread([] { restore(); g_resolving = false; }).detach();

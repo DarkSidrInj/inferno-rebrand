@@ -90,10 +90,13 @@ namespace fog {
     inline float min_distance = 20.f;    // meters: fog starts here
     inline float max_distance = 150.f;   // meters: fully fogged from here
     inline ImVec4 color = ImVec4(0.12f, 0.13f, 0.16f, 1.f);  // manual color (auto_color off)
-    // Off (default): fog and night are overlays drawn over the game; nothing of the game is read or written for them.
-    // On: the engine way: RenderSettings fields, replays of the engine's setters, the renderer's fog constants. It
-    // writes into live engine state from outside the game's threads and has frozen the game (ANR), so it is opt-in.
-    inline bool engine = false;
+    // How fog and night reach the game. Both are the engine way and were the suspects of a freeze (ANR), so each can be
+    // switched off to find which one it is: `replay` runs the engine's own setters (RenderSettings fields and everything
+    // they update), `constants` rewrites the renderer's fog constants found by value. `overlay` is a fake instead: a tint
+    // drawn over the screen, nothing of the game touched.
+    inline bool replay = true;
+    inline bool constants = true;
+    inline bool overlay = false;
 }
 
 

@@ -410,7 +410,7 @@ int main() {
         }
         const bool exec_ok = mprotect(unity + 0x1000, 0x1000, PROT_READ | PROT_EXEC) == 0;
 
-        cfg::fog::engine = true;   // the engine path (field writes, setter replays); the safe path is tested below
+        cfg::fog::replay = true; cfg::fog::constants = true;   // the whole engine path; the parts are tested alone below
         cfg::fog::enabled = true; cfg::fog::auto_color = true; cfg::fog::min_distance = 25.f; cfg::fog::max_distance = 90.f;
         worldfog::g_pid = -1;
         // The renderer still holds the map's fog params (start 0, end 300, density 0.01). The
@@ -456,7 +456,7 @@ int main() {
         CHECK(std::fabs(params[1] - .01f * 1.4426950f) < 1e-7f, "density term %f", params[1]);
 
         cfg::fog::auto_color = false; cfg::fog::color = ImVec4(.9f, .1f, .2f, 1.f);
-        worldfog::g_last_write = 0;
+        worldfog::g_last_write = 0; worldfog::g_last_replay = 0;
         worldfog::tick();
         worldfog::wait();
         std::memcpy(&f, rs + 0x48, 4); CHECK(std::fabs(f - .9f) < 1e-5f, "manual color r=%.2f", f);
@@ -469,7 +469,7 @@ int main() {
         worldfog::tick();                       // notices the move
         worldfog::tick();                       // resolves again
         worldfog::wait();
-        worldfog::g_last_write = 0;
+        worldfog::g_last_write = 0; worldfog::g_last_replay = 0;
         worldfog::tick();                       // applies
         worldfog::wait();
         CHECK(worldfog::g_fields[worldfog::Start].address == reinterpret_cast<uint64_t>(rs2) + 0x58, "followed the move");
@@ -487,10 +487,10 @@ int main() {
         {
             auto rd = [&](int off) { float v; std::memcpy(&v, rs2 + off, 4); return v; };
             cfg::night::enabled = true; cfg::night::strength = 1.f;
-            worldfog::g_last_write = 0;
+            worldfog::g_last_write = 0; worldfog::g_last_replay = 0;
             worldfog::tick();
             worldfog::wait();
-            worldfog::g_last_write = 0;
+            worldfog::g_last_write = 0; worldfog::g_last_replay = 0;
             worldfog::tick();
             worldfog::wait();
             CHECK(rs2[0x40] == 1 && std::fabs(rd(0x5C) - 70.f) < 1e-3f && rd(0x58) == 0.f, "night fog: on, 0..%.1f m", rd(0x5C));
@@ -503,22 +503,56 @@ int main() {
             CHECK(rs2[0x40] == 0 && std::fabs(rd(0x80) - .3f) < 1e-5f && std::fabs(rd(0x70) - .1f) < 1e-5f && rd(0x5C) == 300.f,
                   "night off: the map's fog and ambient light are back (fog %d end %.1f equator %.2f)", rs2[0x40], rd(0x5C), rd(0x80));
 
-            // Without "Engine Writes" nothing of the game is read or written for the world effects.
-            cfg::fog::engine = false;
+            // Constants only: RenderSettings is never written, the renderer's fog constants carry the night fog.
+            cfg::fog::replay = false; cfg::fog::constants = true;
             cfg::night::enabled = true;
-            cfg::fog::enabled = true;
-            worldfog::g_last_write = 0;
+            worldfog::g_last_write = 0; worldfog::g_last_replay = 0;
             worldfog::tick();
             worldfog::wait();
-            worldfog::g_last_write = 0;
+            worldfog::g_last_write = 0; worldfog::g_last_replay = 0;
             worldfog::tick();
             worldfog::wait();
             const float* safe_params = reinterpret_cast<const float*>(base + fx::g_fog_params);
-            CHECK(rs2[0x40] == 0 && rd(0x5C) == 300.f && std::fabs(rd(0x80) - .3f) < 1e-5f && std::fabs(rd(0x48) - .5f) < 1e-5f &&
-                  std::fabs(safe_params[2] - (-1.f / 300.f)) < 1e-6f,
-                  "engine off: RenderSettings and the renderer constants untouched (fog %d end %.1f)", rs2[0x40], rd(0x5C));
+            CHECK(rs2[0x40] == 0 && rd(0x5C) == 300.f && std::fabs(rd(0x80) - .3f) < 1e-5f && std::fabs(rd(0x48) - .5f) < 1e-5f,
+                  "constants only: RenderSettings untouched (fog %d end %.1f equator %.2f)", rs2[0x40], rd(0x5C), rd(0x80));
+            CHECK(std::fabs(safe_params[2] - (-1.f / 70.f)) < 1e-6f, "constants only: the renderer's fog constants carry the night fog (%f)", safe_params[2]);
+            cfg::night::enabled = false;
+            worldfog::tick();
+            worldfog::wait();
+            CHECK(std::fabs(safe_params[2] - (-1.f / 300.f)) < 1e-6f, "constants only, off: the constants are back (%f)", safe_params[2]);
+
+            // Both off: nothing of the game is read or written.
+            cfg::fog::replay = false; cfg::fog::constants = false;
+            cfg::night::enabled = true; cfg::fog::enabled = true;
+            worldfog::g_last_write = 0; worldfog::g_last_replay = 0;
+            worldfog::tick();
+            worldfog::wait();
+            worldfog::g_last_write = 0; worldfog::g_last_replay = 0;
+            worldfog::tick();
+            worldfog::wait();
+            CHECK(rs2[0x40] == 0 && rd(0x5C) == 300.f && std::fabs(safe_params[2] - (-1.f / 300.f)) < 1e-6f, "both off: nothing touched");
             cfg::night::enabled = false;
             cfg::fog::enabled = false;
+            cfg::fog::replay = true; cfg::fog::constants = true;
+
+            // The game putting RenderSettings back every time: the engine setters are paused, not run ten times a second.
+            cfg::fog::constants = false; cfg::fog::enabled = true;
+            worldfog::g_paused = false; worldfog::g_fights = 0;
+            worldfog::tick();   // (re)start from the off state
+            worldfog::wait();
+            for (int i = 0; i < 9; ++i) {
+                rs2[0x40] = 0;   // the game's own scene logic sets it back
+                worldfog::g_last_replay = diag::now_ms() - 1500;
+                worldfog::g_last_write = 0;
+                worldfog::tick();
+                worldfog::wait();
+            }
+            CHECK(worldfog::g_paused, "the game puts the fields back every time: the setters are paused (fights %d)", worldfog::g_fights);
+            cfg::fog::enabled = false;
+            worldfog::tick();
+            worldfog::wait();
+            CHECK(!worldfog::g_paused, "switching fog off clears the pause");
+            cfg::fog::replay = true; cfg::fog::constants = true;
         }
 
         // Occlusion bypass: the culling offset comes from tracing Animator.get_cullingMode_Injected
@@ -1316,7 +1350,6 @@ int main() {
         close(fd);
         unlink(so.c_str());
         rmdir(unity_path);
-        cfg::fog::engine = true;
         cfg::fog::enabled = true;
         worldfog::g_pid = -1;
         worldfog::tick();
@@ -1324,7 +1357,6 @@ int main() {
         CHECK(!worldfog::g_ready && !worldfog::g_fields[worldfog::Start].address, "nothing resolved without slots");
         CHECK(worldfog::g_dumped, "wrapper code dumped");
         cfg::fog::enabled = false;
-        cfg::fog::engine = false;
     }
 
     // Remote call: a child whose main thread naps in nanosleep (a restartable system call) under the

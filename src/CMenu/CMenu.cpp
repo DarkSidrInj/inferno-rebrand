@@ -386,11 +386,12 @@ namespace {
             toggle_color("Dropped Weapons", &cfg::esp::dropped, &cfg::esp::dropped_col),
             slider_row("Range", &cfg::esp::world_distance, 10.f, 200.f, "%.0f m"),
         });
-        card(1, "ENGINE (RISKY)", {
-            toggle_row("Engine Writes", &cfg::fog::engine),
+        card(1, "ENGINE", {
+            toggle_row("Run Engine Setters", &cfg::fog::replay),
+            toggle_row("Renderer Constants", &cfg::fog::constants),
             slider_row("Fog Start", &cfg::fog::min_distance, 0.f, 200.f, "%.0f m"),
             button_row("Rescan World", [] { worldfog::rescan(); }),
-            info_row("Note", "can freeze the game"),
+            toggle_row("Screen Tint Instead", &cfg::fog::overlay),
         });
     }
 
@@ -859,7 +860,7 @@ namespace {
 bool exit_requested() { return g_exit; }
 
 void world_overlay() {
-    if (!cfg::night::enabled && !cfg::fog::enabled) return;
+    if (!cfg::fog::overlay || (!cfg::night::enabled && !cfg::fog::enabled)) return;
     ImDrawList* d = ImGui::GetBackgroundDrawList();
     const float w = g_sw, h = g_sh;
     if (cfg::night::enabled) {
